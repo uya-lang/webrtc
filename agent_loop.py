@@ -33,6 +33,7 @@ TOOLCHAIN_BUG_SECTIONS = (
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
 SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
+HEARTBEAT_SECONDS = max(1, int(os.environ.get("AGENT_HEARTBEAT", "15")))
 MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
 
 
@@ -83,6 +84,31 @@ def now():
 
 def timestamp_for_filename():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def format_duration(total_seconds):
+    total_seconds = max(0, int(total_seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def format_bytes(byte_count):
+    byte_count = max(0, int(byte_count))
+    units = ("B", "KB", "MB", "GB")
+    value = float(byte_count)
+
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+
+    return f"{byte_count}B"
 
 
 def resolve_root(raw_root):
@@ -211,6 +237,7 @@ def empty_state(root, todo_file):
         "failed": {},
         "toolchain_bugs": [],
         "commits": [],
+        "pending_commit": None,
         "current": None,
         "updated_at": now(),
     }
@@ -233,6 +260,7 @@ def load_state(state_file, root, todo_file):
     if "toolchain_bugs" not in state:
         state["toolchain_bugs"] = state.pop("compiler_bugs", [])
     state.setdefault("commits", [])
+    state.setdefault("pending_commit", None)
     state.setdefault("current", None)
     state["project_root"] = str(root)
     state["todo_file"] = str(todo_file)
@@ -276,6 +304,22 @@ def print_status(paths, state, status_lines):
     current = state.get("current")
     if not current:
         print("[agent] current: idle")
+        pending_commit = state.get("pending_commit")
+        if isinstance(pending_commit, dict):
+            print("[agent] pending commit recovery: yes")
+            print(f"[agent] recovery attempts: {pending_commit.get('attempts', 0)}")
+            pending_tasks = pending_commit.get("tasks", [])
+            if pending_tasks:
+                preview_count = min(5, len(pending_tasks))
+                print(f"[agent] pending tasks ({preview_count}/{len(pending_tasks)}):")
+                for index, task in enumerate(pending_tasks[:preview_count], start=1):
+                    print(f"  {index}. {task}")
+            pending_reports = pending_commit.get("toolchain_bug_reports", [])
+            if pending_reports:
+                preview_count = min(5, len(pending_reports))
+                print(f"[agent] pending bug reports ({preview_count}/{len(pending_reports)}):")
+                for index, report in enumerate(pending_reports[:preview_count], start=1):
+                    print(f"  {index}. {report}")
         return
 
     print("[agent] current: running")
@@ -285,6 +329,26 @@ def print_status(paths, state, status_lines):
     current_task = current.get("current_task") or current.get("text")
     if current_task:
         print(f"[agent] current task: {current_task}")
+
+    pid = current.get("pid")
+    if pid:
+        print(f"[agent] pid: {pid}")
+
+    elapsed_seconds = current.get("elapsed_seconds")
+    if isinstance(elapsed_seconds, int):
+        print(f"[agent] elapsed: {format_duration(elapsed_seconds)}")
+
+    heartbeat_at = current.get("heartbeat_at")
+    if heartbeat_at:
+        print(f"[agent] heartbeat at: {heartbeat_at}")
+
+    log_bytes = current.get("log_bytes")
+    if isinstance(log_bytes, int):
+        print(f"[agent] log size: {format_bytes(log_bytes)}")
+
+    log_updated_at = current.get("log_updated_at")
+    if log_updated_at:
+        print(f"[agent] log updated at: {log_updated_at}")
 
     tasks = current.get("tasks", [])
     if tasks:
@@ -413,6 +477,30 @@ def summarize_tasks(tasks, limit):
     return "\n".join(lines)
 
 
+def summarize_strings(items, limit):
+    if not items:
+        return "无"
+
+    lines = []
+    for index, item in enumerate(items[:limit], start=1):
+        lines.append(f"{index}. {item}")
+
+    if len(items) > limit:
+        lines.append(f"... 还有 {len(items) - limit} 项")
+
+    return "\n".join(lines)
+
+
+def print_batch_preview(tasks, limit=5):
+    if not tasks:
+        return
+
+    preview_count = min(limit, len(tasks))
+    print(f"[agent] batch preview ({preview_count}/{len(tasks)}):")
+    for index, task in enumerate(tasks[:preview_count], start=1):
+        print(f"[agent]   {index}. {task['text']}")
+
+
 def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug_dir, toolchain_bug_repro_dir):
     todo_path = todo_label(root, todo_file)
     project_root = path_label(root, root)
@@ -471,7 +559,7 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
    - `## Repro File` 小节下一行只放 repro 文件路径，并用反引号包起来。
    - `## Repro Code` 小节必须包含一个 fenced code block，内容要和 repro 文件内容一致；语言标记可按文件类型填写，也可以留空。
    - 被该工具链 bug 阻塞的 todo 任务必须留在 `[ ]`，并写进 `blocked`。
-10. 如果当前目录是 git 仓库，并且你在本轮完成了任务或新增了工具链 bug 记录，你必须自己创建提交；不要依赖外层脚本代为提交。
+10. 如果当前目录是 git 仓库，并且你在本轮完成了任务或新增了工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的 todo 留给下一轮。
 11. 提交要求：
    - 优先在本轮结束时创建一个清晰、可读的普通提交；只有在工作天然分成两块时才拆成多个提交。
    - 提交消息要自然、简洁，能概括本轮真实改动，不要使用机械化模板。
@@ -492,6 +580,50 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
 """
 
 
+def build_commit_recovery_prompt(root, todo_file, pending_commit):
+    todo_path = todo_label(root, todo_file)
+    project_root = path_label(root, root)
+    task_preview = summarize_strings(pending_commit.get("tasks", []), limit=20)
+    bug_preview = summarize_strings(pending_commit.get("toolchain_bug_reports", []), limit=20)
+    attempt_count = pending_commit.get("attempts", 0)
+
+    return f"""
+你是一个代码执行 Agent。
+
+上一个批次已经完成了部分工作，但没有创建 git commit。
+这次不要继续做新的 todo 任务；只处理“补提交”收尾。
+
+项目根目录：
+{project_root}
+
+todo 文件：
+{todo_path}
+
+待补提交的已完成任务：
+{task_preview}
+
+待补提交的 toolchain bug 报告：
+{bug_preview}
+
+这是第 {attempt_count} 次补提交尝试。
+
+要求：
+1. 先检查当前 git 状态和最近提交，确认哪些未提交改动属于上述任务或 bug 报告。
+2. 只 stage 与上述任务或 bug 报告直接相关的文件，立即创建一个或多个清晰、自然的普通提交。
+3. 不要继续实现新的 todo 任务，不要扩大工作范围，也不要把无关脏改动一起提交。
+4. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[ ]` 或修正相关文件，再把这次修正提交掉。
+5. 结束前必须输出一行严格单行 JSON，格式如下：
+{RESULT_PREFIX} {{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"summary":"一句话总结"}}
+
+字段说明：
+- `completed`：默认使用空数组，除非这次顺手修正了 todo 状态并重新确认完成
+- `blocked`：如果因为明确原因暂时无法完成补提交，写原因对应的任务文本
+- `deferred`：默认使用空数组
+- `toolchain_bugs`：默认使用空数组；只有这次新增或更新了 bug 报告时才填写
+- `commits`：这次新创建的 git commit 哈希，短哈希或长哈希都可以
+"""
+
+
 def make_log_file(log_dir, runnable_tasks):
     first_id = runnable_tasks[0]["id"] if runnable_tasks else "empty"
     return log_dir / f"batch-{timestamp_for_filename()}-{first_id[:8]}.log"
@@ -505,9 +637,12 @@ def run_codex(
     exhausted_tasks,
     toolchain_bug_dir,
     toolchain_bug_repro_dir,
+    state_file=None,
+    state=None,
     log_file=None,
+    prompt_override=None,
 ):
-    prompt = build_prompt(
+    prompt = prompt_override or build_prompt(
         root,
         todo_file,
         runnable_tasks,
@@ -539,7 +674,7 @@ def run_codex(
         handle.flush()
 
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=root,
                 stdout=handle,
@@ -550,9 +685,74 @@ def run_codex(
             handle.write(f"[{now()}] ERROR: command not found: {CODEX_CMD}\n")
             return False, log_file
 
-        handle.write(f"\n[{now()}] EXIT CODE: {process.returncode}\n")
+        start_monotonic = time.monotonic()
+        next_heartbeat = start_monotonic + HEARTBEAT_SECONDS
+        last_reported_size = log_file.stat().st_size if log_file.exists() else 0
+        last_log_size = last_reported_size
+        last_log_update_monotonic = start_monotonic
+        last_log_update_at = now()
 
-    return process.returncode == 0, log_file
+        if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+            state["current"]["pid"] = process.pid
+            state["current"]["heartbeat_at"] = now()
+            state["current"]["elapsed_seconds"] = 0
+            state["current"]["log_bytes"] = last_log_size
+            state["current"]["log_updated_at"] = last_log_update_at
+            save_state(state_file, state)
+
+        while True:
+            returncode = process.poll()
+            current_monotonic = time.monotonic()
+            current_log_size = log_file.stat().st_size if log_file.exists() else 0
+
+            if current_log_size > last_log_size:
+                last_log_size = current_log_size
+                last_log_update_monotonic = current_monotonic
+                last_log_update_at = now()
+
+            if returncode is not None:
+                elapsed_seconds = int(current_monotonic - start_monotonic)
+                if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                    state["current"]["elapsed_seconds"] = elapsed_seconds
+                    state["current"]["heartbeat_at"] = now()
+                    state["current"]["log_bytes"] = last_log_size
+                    state["current"]["log_updated_at"] = last_log_update_at
+                    save_state(state_file, state)
+                break
+
+            if current_monotonic >= next_heartbeat:
+                elapsed_seconds = int(current_monotonic - start_monotonic)
+                delta_bytes = max(0, current_log_size - last_reported_size)
+                if delta_bytes > 0:
+                    log_note = f"+{format_bytes(delta_bytes)} output"
+                else:
+                    quiet_for = int(current_monotonic - last_log_update_monotonic)
+                    log_note = f"no new output for {format_duration(quiet_for)}"
+
+                current_task = runnable_tasks[0]["text"] if runnable_tasks else "无"
+                print(
+                    "[agent] heartbeat: "
+                    f"{format_duration(elapsed_seconds)} running | "
+                    f"current={current_task} | "
+                    f"log={path_label(root, log_file)} | "
+                    f"{log_note}"
+                )
+
+                if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                    state["current"]["elapsed_seconds"] = elapsed_seconds
+                    state["current"]["heartbeat_at"] = now()
+                    state["current"]["log_bytes"] = current_log_size
+                    state["current"]["log_updated_at"] = last_log_update_at
+                    save_state(state_file, state)
+
+                last_reported_size = current_log_size
+                next_heartbeat = current_monotonic + HEARTBEAT_SECONDS
+
+            time.sleep(1)
+
+        handle.write(f"\n[{now()}] EXIT CODE: {returncode}\n")
+
+    return returncode == 0, log_file
 
 
 def normalize_string_list(value):
@@ -700,6 +900,174 @@ def collect_valid_commits(root, commit_refs):
     return valid_commits
 
 
+def git_head_commit(root):
+    if not is_git_repo(root):
+        return None
+
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None
+
+    commit_ref = probe.stdout.strip()
+    return commit_ref or None
+
+
+def collect_new_commits(root, before_commit, after_commit=None):
+    if not is_git_repo(root):
+        return []
+
+    if after_commit is None:
+        after_commit = git_head_commit(root)
+
+    if not after_commit or after_commit == before_commit:
+        return []
+
+    revision = after_commit if before_commit is None else f"{before_commit}..{after_commit}"
+    probe = subprocess.run(
+        ["git", "rev-list", "--reverse", revision],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return []
+
+    commits = []
+    seen = set()
+    for line in probe.stdout.splitlines():
+        commit_ref = line.strip()
+        if not commit_ref or commit_ref in seen:
+            continue
+        commits.append(commit_ref)
+        seen.add(commit_ref)
+
+    return commits
+
+
+def ensure_pending_commit(state):
+    pending_commit = state.get("pending_commit")
+    if not isinstance(pending_commit, dict):
+        pending_commit = {
+            "tasks": [],
+            "toolchain_bug_reports": [],
+            "attempts": 0,
+            "updated_at": now(),
+        }
+        state["pending_commit"] = pending_commit
+
+    pending_commit.setdefault("tasks", [])
+    pending_commit.setdefault("toolchain_bug_reports", [])
+    pending_commit.setdefault("attempts", 0)
+    pending_commit["updated_at"] = now()
+    return pending_commit
+
+
+def queue_pending_commit(state, completed_tasks, toolchain_bug_reports):
+    pending_commit = ensure_pending_commit(state)
+    merge_unique_strings(pending_commit["tasks"], [task["text"] for task in completed_tasks])
+    merge_unique_strings(pending_commit["toolchain_bug_reports"], toolchain_bug_reports)
+    pending_commit["updated_at"] = now()
+    return pending_commit
+
+
+def recovery_task_list(pending_commit):
+    task_text = "提交上轮未提交改动"
+    pending_tasks = pending_commit.get("tasks", [])
+    if pending_tasks:
+        task_text = f"提交上轮未提交改动：{pending_tasks[0]}"
+
+    return [
+        {
+            "id": "commit-recovery",
+            "text": task_text,
+        }
+    ]
+
+
+def run_pending_commit_recovery(paths, state):
+    pending_commit = ensure_pending_commit(state)
+    pending_commit["attempts"] = pending_commit.get("attempts", 0) + 1
+    pending_commit["updated_at"] = now()
+
+    recovery_tasks = recovery_task_list(pending_commit)
+    recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
+    batch_head_before = git_head_commit(paths["root"])
+    state["current"] = {
+        "project_root": path_label(paths["root"], paths["root"]),
+        "todo_file": todo_label(paths["root"], paths["todo_file"]),
+        "started_at": now(),
+        "task_count": len(pending_commit.get("tasks", [])),
+        "current_task": recovery_tasks[0]["text"],
+        "tasks": pending_commit.get("tasks", [])[:20] or pending_commit.get("toolchain_bug_reports", [])[:20],
+        "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
+        "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
+        "git_repo": True,
+        "log_file": path_label(paths["root"], recovery_log_file),
+        "pid": None,
+        "heartbeat_at": None,
+        "elapsed_seconds": 0,
+        "log_bytes": 0,
+        "log_updated_at": None,
+    }
+    save_state(paths["state_file"], state)
+
+    print("[agent] run recovery: missing commit from previous batch")
+    print(f"[agent] recovery attempt: {pending_commit['attempts']}")
+    print(f"[agent] current task: {recovery_tasks[0]['text']}")
+    if pending_commit.get("tasks"):
+        print("[agent] recovery targets:")
+        for index, task in enumerate(pending_commit["tasks"][:5], start=1):
+            print(f"[agent]   {index}. {task}")
+
+    ok, log_file = run_codex(
+        paths["root"],
+        paths["todo_file"],
+        paths["log_dir"],
+        recovery_tasks,
+        [],
+        paths["toolchain_bug_dir"],
+        paths["toolchain_bug_repro_dir"],
+        state_file=paths["state_file"],
+        state=state,
+        log_file=recovery_log_file,
+        prompt_override=build_commit_recovery_prompt(paths["root"], paths["todo_file"], pending_commit),
+    )
+
+    result = parse_agent_result(log_file)
+    reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
+    detected_commits = collect_new_commits(paths["root"], batch_head_before)
+    commits = list(reported_commits)
+    merge_unique_strings(commits, detected_commits)
+    invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+
+    if commits:
+        print(f"[agent] recovery committed: {len(commits)}")
+        merge_unique_strings(state.setdefault("commits", []), commits)
+        state["pending_commit"] = None
+        state["current"] = None
+        save_state(paths["state_file"], state)
+        return True
+
+    if invalid_commits > 0:
+        print(f"[agent] recovery ignored invalid commits: {invalid_commits}")
+
+    if not ok:
+        print("[agent] recovery batch failed without producing a commit; will retry")
+    else:
+        print("[agent] recovery batch ended without producing a commit; will retry")
+
+    state["current"] = None
+    save_state(paths["state_file"], state)
+    return False
+
+
 def completed_tasks(before_tasks, after_tasks):
     after_by_id = {task["id"]: task for task in after_tasks}
     completed = []
@@ -777,12 +1145,22 @@ def main():
     if args.status:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
         print_status(paths, state, args.status_lines)
-        return
+        return 0
 
     print(f"[agent] start: root={path_label(root, root)} todo={todo_label(root, todo_file)}")
+    git_repo = is_git_repo(paths["root"])
 
     while True:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+
+        if git_repo and isinstance(state.get("pending_commit"), dict):
+            recovered = run_pending_commit_recovery(paths, state)
+            if recovered:
+                continue
+
+            time.sleep(SLEEP_SECONDS)
+            continue
+
         tasks_before = parse_todo(paths["todo_file"])
         runnable_tasks = choose_runnable_tasks(tasks_before, state)
         exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
@@ -795,6 +1173,7 @@ def main():
             break
 
         batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
+        batch_head_before = git_head_commit(paths["root"])
         state["current"] = {
             "project_root": path_label(paths["root"], paths["root"]),
             "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -804,12 +1183,19 @@ def main():
             "tasks": [task["text"] for task in runnable_tasks[:20]],
             "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
             "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
-            "git_repo": is_git_repo(paths["root"]),
+            "git_repo": git_repo,
             "log_file": path_label(paths["root"], batch_log_file),
+            "pid": None,
+            "heartbeat_at": None,
+            "elapsed_seconds": 0,
+            "log_bytes": 0,
+            "log_updated_at": None,
         }
         save_state(paths["state_file"], state)
 
         print(f"[agent] run batch: {len(runnable_tasks)} runnable tasks")
+        print(f"[agent] current task: {runnable_tasks[0]['text']}")
+        print_batch_preview(runnable_tasks)
         ok, log_file = run_codex(
             paths["root"],
             paths["todo_file"],
@@ -818,6 +1204,8 @@ def main():
             exhausted_tasks,
             paths["toolchain_bug_dir"],
             paths["toolchain_bug_repro_dir"],
+            state_file=paths["state_file"],
+            state=state,
             log_file=batch_log_file,
         )
 
@@ -833,8 +1221,26 @@ def main():
             paths["toolchain_bug_repro_dir"],
         )
         invalid_toolchain_bug_reports = len(result.get("toolchain_bugs", [])) - len(toolchain_bug_reports)
-        commits = collect_valid_commits(paths["root"], result.get("commits", []))
-        invalid_commits = len(result.get("commits", [])) - len(commits)
+        reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
+        detected_commits = collect_new_commits(paths["root"], batch_head_before)
+        commits = list(reported_commits)
+        merge_unique_strings(commits, detected_commits)
+        invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+        commit_required = git_repo and (bool(newly_completed) or bool(toolchain_bug_reports))
+
+        if commit_required and not commits:
+            reasons = []
+            if newly_completed:
+                reasons.append(f"{len(newly_completed)} completed task(s)")
+            if toolchain_bug_reports:
+                reasons.append(f"{len(toolchain_bug_reports)} toolchain bug report(s)")
+            joined_reasons = " and ".join(reasons)
+            print(f"[agent] warning: batch produced {joined_reasons} but no new git commit was created")
+            print("[agent] queue recovery: agent will run a commit-only follow-up batch")
+            queue_pending_commit(state, newly_completed, toolchain_bug_reports)
+            state["current"] = None
+            save_state(paths["state_file"], state)
+            continue
 
         if newly_completed:
             print(f"[agent] completed: {len(newly_completed)} task(s)")
@@ -873,6 +1279,8 @@ def main():
 
         time.sleep(SLEEP_SECONDS)
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
