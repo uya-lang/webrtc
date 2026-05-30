@@ -20,7 +20,7 @@
 - [x] 创建 `docs/design.md`。
 - [x] 创建 `docs/todo.md`。
 - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
-- [ ] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+- [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
 - [ ] 创建 `Makefile` 或 `uyabuild` 配置。
 - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
 - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。

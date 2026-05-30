@@ -1,0 +1,1246 @@
+[2026-05-31 06:22:01] START TASK
+创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+
+CMD: codex exec --cd /media/winger/_dde_data/winger/uya/webrtc <prompt>
+
+OpenAI Codex v0.118.0 (research preview)
+--------
+workdir: /media/winger/_dde_data/winger/uya/webrtc
+model: gpt-5.4
+provider: gpt001
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /home/winger/.codex/memories]
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e7afa-df3b-7a30-8495-7d855f56d06d
+--------
+user
+
+你是一个代码执行 Agent。
+
+当前任务：
+
+创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+
+要求：
+1. 只完成这个任务，不要扩大范围。
+2. 修改代码后运行相关测试。
+3. 如果无法完成，说明原因。
+4. 完成后总结修改了哪些文件。
+
+codex
+先检查仓库结构和现有构建入口，确认 `README.md` 需要覆盖的项目目标、Uya 边界和构建方式，再直接补上文档并做一次相关验证。
+exec
+/bin/bash -lc pwd in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+/media/winger/_dde_data/winger/uya/webrtc
+
+exec
+/bin/bash -lc 'ls -la' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+total 32
+drwxrwxr-x  6 winger winger 4096 May 31 06:22 .
+drwxrwxr-x 20 winger winger 4096 May 31 00:34 ..
+drwxrwxr-x  3 winger winger 4096 May 31 06:22 .agent
+-r--r--r--  1 winger winger    0 May 31 06:22 .codex
+drwxrwxr-x  7 winger winger 4096 May 31 00:59 .git
+drwxrwxr-x  2 winger winger 4096 May 31 06:00 .marscode
+-rw-rw-r--  1 winger winger 4558 May 31 06:21 agent_loop.py
+drwxrwxr-x  2 winger winger 4096 May 31 00:44 docs
+
+exec
+/bin/bash -lc 'rg --files' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+agent_loop.py
+docs/design.md
+docs/todo.md
+
+codex
+仓库很小，当前只有主脚本和两份设计文档。我先读取这三处内容，提炼 README 需要的边界和构建信息。
+exec
+/bin/bash -lc "sed -n '1,220p' agent_loop.py" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+#!/usr/bin/env python3
+import os
+import re
+import json
+import time
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+ROOT = Path.cwd()
+AGENT_DIR = ROOT / ".agent"
+TODO_FILE = ROOT / "docs/todo.md"
+STATE_FILE = AGENT_DIR / "state.json"
+LOG_DIR = AGENT_DIR / "logs"
+
+CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
+SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
+MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
+
+AGENT_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {
+            "done": [],
+            "failed": {},
+            "current": None,
+            "updated_at": now()
+        }
+
+    return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+
+
+def save_state(state):
+    state["updated_at"] = now()
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def parse_todo():
+    """
+    支持 todo.md 格式：
+
+    - [ ] 修改 parser 错误处理
+    - [ ] 增加 runtime 测试
+    - [x] 已完成任务
+    """
+
+    if not TODO_FILE.exists():
+        raise FileNotFoundError("缺少 todo.md")
+
+    tasks = []
+
+    for line in TODO_FILE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*-\s+\[( |x|X)\]\s+(.+)$", line)
+        if not m:
+            continue
+
+        checked, text = m.groups()
+        task_id = str(abs(hash(text)))
+
+        tasks.append({
+            "id": task_id,
+            "text": text.strip(),
+            "done_in_file": checked.lower() == "x"
+        })
+
+    return tasks
+
+
+def mark_done_in_todo(task_text):
+    content = TODO_FILE.read_text(encoding="utf-8")
+    pattern = r"^(\s*-\s+)\[ \](\s+" + re.escape(task_text) + r"\s*)$"
+    content = re.sub(pattern, r"\1[x]\2", content, flags=re.MULTILINE)
+    TODO_FILE.write_text(content, encoding="utf-8")
+
+
+def choose_next_task(tasks, state):
+    for task in tasks:
+        if task["done_in_file"]:
+            continue
+
+        if task["id"] in state["done"]:
+            continue
+
+        fails = state["failed"].get(task["id"], 0)
+        if fails >= MAX_FAILS_PER_TASK:
+            continue
+
+        return task
+
+    return None
+
+
+def git_commit(message):
+    subprocess.run(["git", "add", "."], cwd=ROOT)
+
+    diff = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=ROOT
+    )
+
+    if diff.returncode == 0:
+        return False
+
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=ROOT
+    )
+
+    return True
+
+
+def run_codex(task):
+    prompt = f"""
+你是一个代码执行 Agent。
+
+当前任务：
+
+{task["text"]}
+
+要求：
+1. 只完成这个任务，不要扩大范围。
+2. 修改代码后运行相关测试。
+3. 如果无法完成，说明原因。
+4. 完成后总结修改了哪些文件。
+"""
+
+    log_file = LOG_DIR / f"{task['id']}.log"
+
+    cmd = [
+        CODEX_CMD,
+        "exec",
+        "--cd",
+        str(ROOT),
+        prompt
+    ]
+
+    with log_file.open("w", encoding="utf-8") as f:
+        f.write(f"[{now()}] START TASK\n")
+        f.write(task["text"] + "\n\n")
+        f.write("CMD: " + " ".join(cmd[:4]) + " <prompt>\n\n")
+        f.flush()
+
+        process = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+
+        f.write(f"\n[{now()}] EXIT CODE: {process.returncode}\n")
+
+    return process.returncode == 0
+
+
+def main():
+    print("[agent] start")
+
+    while True:
+        state = load_state()
+        tasks = parse_todo()
+        task = choose_next_task(tasks, state)
+
+        if task is None:
+            print("[agent] no task left")
+            break
+
+        print(f"[agent] run: {task['text']}")
+
+        state["current"] = task
+        save_state(state)
+
+        ok = run_codex(task)
+
+        if ok:
+            print(f"[agent] done: {task['text']}")
+
+            state["done"].append(task["id"])
+            state["current"] = None
+
+            mark_done_in_todo(task["text"])
+            save_state(state)
+
+            git_commit(f"agent: {task['text']}")
+
+        else:
+            print(f"[agent] failed: {task['text']}")
+
+            state["failed"][task["id"]] = state["failed"].get(task["id"], 0) + 1
+            state["current"] = None
+            save_state(state)
+
+            git_commit(f"agent failed: {task['text']}")
+
+        time.sleep(SLEEP_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
+exec
+/bin/bash -lc "sed -n '1,260p' docs/design.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+# 纯 Uya WebRTC 重构详细设计
+
+**版本**：v0.1  
+**状态**：设计阶段  
+**日期**：2026-05-31  
+**目标平台**：Linux x86_64 first，后续扩展 macOS / Windows / Android / iOS  
+
+## 1. 项目定位
+
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。它不是对 Google libwebrtc 的 C++ 包装，也不是只做一层 API 兼容层，而是把信令模型、SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计和测试工具逐步落到 Uya 代码中。
+
+“纯 Uya”在本项目中的含义：
+
+- 核心协议和状态机全部由 Uya 实现，不链接 libwebrtc、libnice、BoringSSL、usrsctp、libsrtp、libvpx、libopus 作为默认运行路径。
+- 允许存在极薄 OS FFI 边界：socket、epoll/kqueue/IOCP、clock、pthread 或平台等价线程原语、mmap、sendmmsg/recvmmsg 等系统能力。
+- 默认构建路径不依赖 C++ runtime，不复用外部协议库的对象生命周期。
+- 性能热点优先使用 Uya `@vector`、固定容量结构、arena、atomic 和编译期边界证明。
+- 第一期优先实现 WebRTC 传输和互通能力；纯 Uya Opus / VP8 编解码能力由兄弟仓库 `../opus`、`../vp8` 承担，WebRTC 侧通过 encoded-frame 和可选适配层集成。
+
+第一阶段交付目标：
+
+- 可以与 Chrome / Firefox 建立 P2P 或 server-side PeerConnection。
+- 支持 ICE + DTLS + SRTP 的音视频 RTP 传输。
+- 支持 SCTP DataChannel。
+- 支持基础 SDP offer/answer 和 trickle ICE。
+- 支持 Opus / VP8 / H264 / AV1 的 RTP packetize / depacketize 和 encoded-frame API。
+- 与 `../opus`、`../vp8` 文档中的 codec API、RTP payload 语义和测试边界保持同步。
+- 支持可观测 stats、trace、benchmark 和网络模拟测试。
+
+非目标或延后目标：
+
+- 第一阶段不实现浏览器 DOM / JavaScript WebRTC API。
+- 第一阶段不实现摄像头、麦克风、屏幕采集和系统音视频渲染。
+- 第一阶段不要求完整实现 Opus、VP8、H264、AV1 编码器/解码器；先传输已编码帧。
+- WebRTC 仓库不重复实现 Opus / VP8 codec core；编解码器主体分别放在 `../opus`、`../vp8`。
+- 第一阶段不做 MCU/SFU 的完整业务产品，只提供可组合的底层栈和示例。
+
+## 2. 标准基线
+
+设计以以下标准和事实互通需求为边界：
+
+- W3C WebRTC 1.0：PeerConnection、transceiver、sender/receiver、DataChannel 的行为模型。
+- W3C WebRTC Statistics：stats 字段语义和采样口径。
+- W3C WebRTC Encoded Transform：后续支持端到端加密和 encoded-frame 处理时参考其 frame 边界。
+- RFC 8445：ICE。
+- RFC 8489：STUN。
+- RFC 8656：TURN。
+- RFC 8838：Trickle ICE。
+- RFC 8829：JSEP offer/answer 行为。
+- RFC 3550 / 3551：RTP / RTCP 基础。
+- RFC 6716 / RFC 8251：Opus codec 与更新。
+- RFC 7587：Opus RTP payload。
+- RFC 6386：VP8 bitstream。
+- RFC 7741：VP8 RTP payload。
+- RFC 5761：RTP / RTCP mux。
+- RFC 7983：STUN / DTLS / TURN ChannelData / RTP demux。
+- RFC 5764：DTLS-SRTP。
+- RFC 3711 / RFC 7714：SRTP 传统 profile 与 AEAD profile。
+- RFC 4585 / RFC 4588 / RFC 8285：RTP feedback、RTX、RTP header extension。
+- RFC 8831 / RFC 8832：WebRTC DataChannel 和 DCEP。
+- RFC 8261：SCTP over DTLS。
+
+浏览器互通的最小闭环：
+
+```text
+SDP offer/answer
+  -> ICE candidate gathering/checklist/nomination
+  -> DTLS handshake and certificate fingerprint verification
+  -> DTLS exporter derives SRTP keys
+  -> SRTP/SRTCP protects RTP/RTCP
+  -> RTP media transport and RTCP feedback
+  -> SCTP over DTLS for DataChannel
+```
+
+## 3. 成功标准
+
+### 3.1 正确性
+
+- 与 Chrome / Firefox 完成 offer/answer、trickle ICE、DTLS-SRTP、RTP/RTCP、DataChannel 互通。
+- 每个协议模块都有 parser/builder roundtrip、错误输入、截断输入、边界长度测试。
+- 所有公网输入解析路径返回显式 `!T` 错误，不 panic、不越界、不未定义行为。
+- 所有加密、重放窗口、计数器 rollover、序列号 wrap 都有向量测试。
+
+### 3.2 性能
+
+- 建连后 RTP 热路径零堆分配。
+- 单 UDP socket 的收发路径支持批量 `recvmmsg` / `sendmmsg`。
+- 热路径只传 packet descriptor，不跨线程复制 payload。
+- 每个引入热路径的阶段必须同时引入 allocation counter、microbench 或 queue-depth 断言，性能退化不能等到后期统一修。
+- 默认每连接内存可预测，避免按 peer、track、SSRC 无上限增长。
+- 关键统计包括 P50/P95/P99 延迟、packet loss、jitter、RTT、码率、CPU、内存和队列积压。
+
+### 3.3 可维护性
+
+- 协议核心采用 Sans-I/O 风格：parser、state machine、crypto transform 与 socket I/O 解耦。
+- 每个模块可独立 fuzz 和单测。
+- 公共 API 不暴露内部 buffer 生命周期。
+- 示例和 benchmark 可在无摄像头、无浏览器 UI 的 CI 环境运行。
+
+## 4. 总体架构
+
+建议目录：
+
+```text
+src/
+  main.uya
+  webrtc/
+    api.uya             # PeerConnection / DataChannel / track public API
+    config.uya          # RtcConfiguration / IceServer / codec capability
+    error.uya           # 统一错误定义
+    time.uya            # monotonic clock / timer helpers
+    arena.uya           # PacketArena / fixed buffer / slab allocator
+    ring.uya            # bounded MPSC/SPMC queues
+    net/
+      udp.uya           # socket, recvmmsg/sendmmsg, nonblocking I/O
+      worker.uya        # epoll event loop, timers, pacer tick
+      demux.uya         # STUN / DTLS / TURN ChannelData / RTP / RTCP classifier
+    sdp/
+      model.uya         # SDP AST / media section / attributes
+      parse.uya
+      write.uya
+      jsep.uya          # offer/answer validation and negotiation
+    stun/
+      types.uya
+      parse.uya
+      write.uya
+      auth.uya
+    turn/
+      client.uya
+      allocation.uya
+      channel.uya
+    ice/
+      candidate.uya
+      checklist.uya
+      transport.uya
+      agent.uya
+    crypto/
+      hash.uya
+      hmac.uya
+      aes.uya
+      gcm.uya
+      ecdsa.uya
+      random.uya
+    dtls/
+      record.uya
+      handshake.uya
+      cipher.uya
+      exporter.uya
+      retransmit.uya
+    srtp/
+      context.uya
+      protect.uya
+      replay.uya
+    rtp/
+      packet.uya
+      extension.uya
+      packetizer.uya
+      depacketizer.uya
+      sender.uya
+      receiver.uya
+      jitter.uya
+    rtcp/
+      packet.uya
+      feedback.uya
+      scheduler.uya
+    sctp/
+      packet.uya
+      association.uya
+      retransmit.uya
+      stream.uya
+    data/
+      channel.uya
+      dcep.uya
+    media/
+      codec.uya
+      encoded_frame.uya
+      opus_rtp.uya
+      vp8_rtp.uya
+      h264_rtp.uya
+      av1_rtp.uya
+      codec_bridge.uya   # optional adapters to ../opus and ../vp8
+    congestion/
+      pacer.uya
+      twcc.uya
+      estimator.uya
+      bitrate_allocator.uya
+    peer/
+      connection.uya
+      transport.uya
+      transceiver.uya
+      track.uya
+    stats/
+      types.uya
+      collector.uya
+      trace.uya
+benchmarks/
+examples/
+tests/
+```
+
+核心依赖方向：
+
+```text
+api/peer
+  -> sdp, ice, dtls, srtp, rtp, rtcp, sctp, data, media, congestion, stats
+ice
+  -> stun, turn, net, time
+dtls
+  -> crypto, time
+srtp
+  -> crypto, rtp, rtcp
+rtp/rtcp
+  -> media, congestion, time
+sctp/data
+  -> dtls, time
+net
+  -> arena, ring, time
+media.codec_bridge
+  -> optional sibling package APIs only, not transport internals
+```
+
+不允许反向依赖：
+
+- `stun` 不依赖 `ice`。
+- `rtp` 不依赖 `peer`。
+- `dtls` 不依赖 `ice`。
+- `media` payload 格式不依赖 `PeerConnection`。
+- `../opus`、`../vp8` 不能为了 WebRTC 适配反向依赖本仓库 transport、peer 或 worker 模块。
+- `stats` 可以采样各模块只读快照，但不能驱动业务状态机。
+
+## 5. Uya 编码约束
+
+### 5.1 错误模型
+
+所有公网输入解析和网络状态机函数使用 `!T`：
+
+```uya
+error PacketTooShort;
+error InvalidPacket;
+error UnsupportedProfile;
+error ReplayRejected;
+error HandshakeFailed;
+
+fn parse_rtp_packet(buf: &[byte]) !RtpPacket {
+    if @len(buf) < 12 {
+        return error.PacketTooShort;
+    }
+    ...
+}
+```
+
+热路径不使用字符串错误；错误码用于 stats 计数和 trace 映射。
+
+### 5.2 内存生命周期
+
+- 网络线程拥有 `PacketArena`。
+- packet payload 以 slab + offset + len 表示。
+- 协议 parser 返回借用切片，不能逃逸出当前 packet 生命周期。
+- 如果 packet 要进入重传缓存、抖动缓冲或跨线程队列，必须优先转移 slab token；确需保留原 owner 时才允许显式 clone 到对应 owner arena。
+- 每个允许 clone 的路径必须有预算和统计：clone bytes、clone count、drop count、owner arena high-watermark；超过预算时按模块策略丢弃老包、不完整帧或拒绝大消息。
+
+exec
+/bin/bash -lc "sed -n '1,260p' docs/todo.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+# 纯 Uya WebRTC 重构 TODO
+
+**状态**：启动阶段  
+**日期**：2026-05-31  
+**设计参考**：[design.md](design.md)
+
+实现纪律：
+
+- 先写测试，再写实现，再跑回归。
+- 所有公网输入 parser 必须覆盖截断、坏长度、未知字段、最大长度。
+- 每个阶段都要有可运行示例和 benchmark 占位。
+- 每个阶段的第一批提交应优先加入 failing tests、fixtures、vectors、fuzz corpus 或 benchmark 基线，再补实现让它们通过。
+- 热路径功能进入阶段验收前必须有 allocation counter、queue-depth 或 microbench 门禁，性能退化不能留到 Phase 18 才发现。
+- 核心协议默认纯 Uya，不引入 libwebrtc/BoringSSL/usrsctp/libsrtp 等外部实现作为运行依赖。
+- 若某阶段临时加入 reference oracle，只能用于测试对照，不能进入默认 runtime。
+- Media payload 与 codec bridge 必须跟本地 `../opus`、`../vp8` 文档保持同步；WebRTC transport 首版仍可只处理 encoded frames。
+
+## Phase 0：项目基座
+
+- [x] 创建 `docs/design.md`。
+- [x] 创建 `docs/todo.md`。
+- [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+- [ ] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
+- [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+- [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+- [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+- [ ] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
+- [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
+- [ ] 创建 `tests/` 基础测试入口。
+- [ ] 创建 `benchmarks/` 基础 benchmark 入口。
+- [ ] 创建 allocation counter / high-watermark 测试辅助。
+- [ ] 创建 benchmark JSON lines 输出 helper。
+
+验收标准：
+
+- `make build` 生成可执行文件。
+- `make test` 至少跑通空测试和基础 arena/ring 测试。
+- `make bench` 至少输出空基线 JSON lines。
+- `build/webrtc-uya --help` 可运行。
+- 文档中明确不复用外部 WebRTC 协议库。
+
+## Phase 1：基础二进制、buffer 与 packet 工具
+
+- [ ] 先增加 binary/buffer/arena failing tests：截断、越界、重复 free、cap 超限、clone 预算。
+- [ ] 先增加 `PacketRef` size / alignment 断言。
+- [ ] 先增加 arena/ring allocation counter 和 high-watermark tests。
+- [ ] 实现 big-endian / little-endian 读写 helpers。
+- [ ] 实现 checked integer add/mul/align helpers。
+- [ ] 实现 `ByteReader`，支持 cursor、remaining、read_u8/u16/u32/u64、read_slice。
+- [ ] 实现 `ByteWriter`，支持固定 buffer、回填 length、写 slice。
+- [ ] 实现 `PacketRef` 和 `PacketArena`。
+- [ ] 实现 arena free-list 和 reset。
+- [ ] 实现 slab token transfer。
+- [ ] 实现受预算约束的 packet clone 到 owner arena。
+- [ ] 实现常量时间 byte compare。
+- [ ] 增加 `bench_arena_ring`。
+
+验收标准：
+
+- 所有读写越界返回 `!T` 错误。
+- arena 重复 alloc/free 不泄漏、不重复释放。
+- `PacketRef` 不直接持有裸跨线程切片。
+- `PacketRef` 保持 64 字节级别，arena/ring 基础路径无堆分配。
+- clone bytes/count/drop/high-watermark 可观测，超预算路径有测试。
+
+## Phase 2：UDP I/O 与事件循环
+
+- [ ] 先增加 UDP classifier 首字节矩阵测试。
+- [ ] 先增加短包、unknown、reserved/ZRTP、TURN ChannelData 边界测试。
+- [ ] 先增加 EAGAIN/EINTR/短写 failing tests。
+- [ ] 先建立 `bench_udp_echo` JSON lines 基线。
+- [ ] 实现 Linux UDP socket 创建、bind、connect 可选、nonblocking。
+- [ ] 实现 epoll worker。
+- [ ] 实现 monotonic timer wheel 或 min-heap。
+- [ ] 实现 `recvmmsg` 批量收包路径。
+- [ ] 实现 `sendmmsg` 批量发包路径。
+- [ ] 实现 fallback `recvfrom/sendto`。
+- [ ] 实现 UDP packet classifier：STUN / DTLS / TURN ChannelData / RTP / RTCP / reserved / unknown。
+- [ ] 实现 worker command queue 和 event queue。
+- [ ] 增加 loopback UDP echo 测试。
+
+验收标准：
+
+- 单 worker 能收发 UDP echo。
+- EAGAIN/EINTR/短写路径测试通过。
+- classifier 对 RFC 7983 首字节范围和短包不崩溃。
+- `recvmmsg` / `sendmmsg` 与 fallback 路径都有 benchmark 基线。
+
+## Phase 3：SDP parser/writer 与 JSEP 模型
+
+- [ ] 先收集 Chrome/Firefox SDP fixtures。
+- [ ] 先增加 SDP parse/write/parse roundtrip failing tests。
+- [ ] 先增加缺失 fingerprint、ice-pwd、rtcp-mux、不支持能力的错误测试。
+- [ ] 定义 `SessionDescription`、`MediaSection`、`CodecParameters`、`HeaderExtension`。
+- [ ] 实现 SDP 行扫描和字段 parser。
+- [ ] 支持 `v/o/s/t` 基础字段。
+- [ ] 支持 `m=` audio/video/application。
+- [ ] 支持 `a=group:BUNDLE`。
+- [ ] 支持 `a=mid`。
+- [ ] 支持 `a=ice-ufrag` / `a=ice-pwd`。
+- [ ] 支持 `a=fingerprint`。
+- [ ] 支持 `a=setup`。
+- [ ] 支持 `a=rtcp-mux`。
+- [ ] 支持 `a=candidate`。
+- [ ] 支持 `a=rtpmap` / `a=fmtp` / `a=rtcp-fb`。
+- [ ] 支持 `a=extmap`。
+- [ ] 支持 Opus SDP 参数：`minptime`、`maxptime`、`useinbandfec`、`stereo`、`sprop-stereo`、`usedtx`。
+- [ ] 支持 VP8 SDP 能力和反馈：`rtcp-fb` NACK、PLI、FIR、Transport-CC。
+- [ ] 支持 DataChannel application section。
+- [ ] 实现 SDP writer。
+- [ ] 实现 JSEP validator：bundle、rtcp-mux、fingerprint、payload type、direction。
+- [ ] 增加 `bench_sdp_parse`。
+
+验收标准：
+
+- Chrome/Firefox 常见 offer 能 parse -> write -> parse。
+- 缺失 fingerprint、ice-pwd、rtcp-mux 时返回明确错误。
+- 不支持能力不会静默忽略。
+- SDP parser 对最大长度和长行输入有 microbench 基线。
+
+## Phase 4：STUN
+
+- [ ] 先增加 RFC test vectors。
+- [ ] 先增加截断 header、坏 length、坏 padding、重复/未知 attribute failing tests。
+- [ ] 先建立 STUN parser fuzz corpus 和 `bench_stun_parse` 基线。
+- [ ] 定义 STUN message / attribute 类型。
+- [ ] 实现 STUN header parser。
+- [ ] 实现 TLV attribute iterator。
+- [ ] 实现 Binding request/response/error response builder。
+- [ ] 实现 XOR-MAPPED-ADDRESS。
+- [ ] 实现 USERNAME。
+- [ ] 实现 PRIORITY。
+- [ ] 实现 USE-CANDIDATE。
+- [ ] 实现 ICE-CONTROLLING / ICE-CONTROLLED。
+- [ ] 实现 MESSAGE-INTEGRITY。
+- [ ] 实现 MESSAGE-INTEGRITY-SHA256。
+- [ ] 实现 FINGERPRINT。
+- [ ] 实现 ERROR-CODE。
+
+验收标准：
+
+- binding request/response 与标准向量一致。
+- integrity/fingerprint 错误能被拒绝。
+- 任意截断 attribute 不越界。
+- STUN parser benchmark 输出 ns/packet 和 allocation count。
+
+## Phase 5：ICE host/srflx
+
+- [ ] 定义 `IceCandidate`、`CandidatePair`、`IceAgent`。
+- [ ] 实现 host candidate gathering。
+- [ ] 实现 STUN server reflexive candidate gathering。
+- [ ] 实现 remote candidate 添加。
+- [ ] 实现 candidate priority 计算。
+- [ ] 实现 checklist。
+- [ ] 实现 connectivity check transaction。
+- [ ] 实现 controlling / controlled role。
+- [ ] 实现 nomination。
+- [ ] 实现 role conflict。
+- [ ] 实现 selected pair。
+- [ ] 实现 consent freshness。
+- [ ] 实现 trickle ICE 状态。
+- [ ] 实现 ICE state change event。
+- [ ] 增加 loopback 双 agent 测试。
+- [ ] 增加 Chrome/Firefox trickle interop 测试。
+
+验收标准：
+
+- 两个本地 Uya ICE agent 可完成 selected pair。
+- 与浏览器 host candidate loopback 场景可连接。
+- consent 失败后状态进入 disconnected/failed。
+
+## Phase 6：TURN client
+
+- [ ] 实现 TURN Allocate。
+- [ ] 实现 long-term credential。
+- [ ] 实现 Refresh。
+- [ ] 实现 CreatePermission。
+- [ ] 实现 Send/Data indication。
+- [ ] 实现 ChannelBind。
+- [ ] 实现 relay candidate 注入 ICE。
+- [ ] 实现 allocation refresh timer。
+- [ ] 增加 coturn interop 测试。
+
+验收标准：
+
+- 通过 coturn 获得 relay candidate。
+- relay candidate 可以完成 ICE selected pair。
+- allocation 过期前自动 refresh。
+
+## Phase 7：Crypto 基础
+
+- [ ] 先收集官方 vectors 和 Wycheproof 风格负例。
+- [ ] 先增加 constant-time 比较测试和随机源失败测试。
+- [ ] 先建立 AES/GHASH/HMAC microbench 基线。
+- [ ] 实现 SHA-1。
+- [ ] 实现 SHA-256。
+- [ ] 实现 HMAC-SHA1。
+- [ ] 实现 HMAC-SHA256。
+- [ ] 实现 AES-CTR。
+- [ ] 实现 AES-GCM。
+- [ ] 实现 GHASH。
+- [ ] 实现 HKDF / TLS PRF 所需函数。
+- [ ] 实现 P-256 field arithmetic。
+- [ ] 实现 ECDHE P-256。
+- [ ] 实现 ECDSA P-256 sign/verify。
+- [ ] 实现 CSPRNG 平台熵源封装。
+
+验收标准：
+
+- 所有 crypto primitives 通过标准向量。
+- tag/MAC/fingerprint 比较不使用早停逻辑。
+- 随机源失败返回明确错误。
+- crypto benchmark 记录 MB/s、ns/op 和是否启用 `@vector` 路径。
+
+## Phase 8：DTLS 1.2 WebRTC 子集
+
+- [ ] 先增加 DTLS record parser 截断、epoch/sequence、fragment/reassembly failing tests。
+- [ ] 先增加 exporter reference 对照测试。
+- [ ] 先准备 OpenSSL/浏览器握手 fixtures。
+- [ ] 实现 DTLS record parser/writer。
+- [ ] 实现 handshake message fragmentation/reassembly。
+- [ ] 实现 ClientHello / ServerHello。
+- [ ] 实现 certificate 解析和生成。
+- [ ] 实现 ECDHE key exchange。
+- [ ] 实现 Finished 校验。
+- [ ] 实现 SRTP protection profile negotiation。
+- [ ] 实现 DTLS exporter。
+- [ ] 实现 handshake retransmission timer。
+- [ ] 实现 alert。
+- [ ] 实现 certificate fingerprint 校验。
+- [ ] 集成 ICE selected pair。
+- [ ] 增加 OpenSSL/浏览器互通测试脚本。
+
+验收标准：
+
+- Uya client/server 可以完成 DTLS handshake。
+- 浏览器可与 Uya 端完成 DTLS handshake。
+- fingerprint 错误必须拒绝连接。
+- exporter 输出与 reference 对照一致。
+
+## Phase 9：SRTP / SRTCP
+
+- [ ] 先增加 RFC 3711 vectors。
+- [ ] 先增加 sequence wrap、ROC、replay window failing tests。
+- [ ] 先建立 `bench_srtp` 基线和零堆分配断言。
+- [ ] 定义 SRTP context。
+- [ ] 实现 key derivation。
+- [ ] 实现 RTP sequence rollover counter。
+- [ ] 实现 replay window。
+- [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_80`。
+- [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_32`。
+- [ ] 实现 SRTCP protect/unprotect。
+- [ ] 集成 DTLS exporter keys。
+- [ ] 集成 RTP/RTCP demux。
+
+验收标准：
+
+- protect/unprotect roundtrip。
+- replay packet 被拒绝。
+
+codex
+文档里已经定义了“纯 Uya”边界，但仓库还没有 `Makefile`/`uyabuild`。我会在 README 里明确区分“当前仓库现状”和“目标构建入口”，避免把未实现的能力写成已可用。
+exec
+/bin/bash -lc 'git status --short' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+?? .agent/
+?? .codex
+?? .marscode/
+?? agent_loop.py
+
+exec
+/bin/bash -lc 'rg -n "make build|make test|make bench|uyabuild|构建|build" docs agent_loop.py' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+docs/design.md:16:- 默认构建路径不依赖 C++ runtime，不复用外部协议库的对象生命周期。
+docs/design.md:80:- 每个协议模块都有 parser/builder roundtrip、错误输入、截断输入、边界长度测试。
+docs/design.md:476:parser 使用 TLV 迭代，不复制 attribute value。builder 使用固定 buffer，先写 header，再写 attributes，最后回填 length 和 integrity/fingerprint。
+docs/design.md:676:- 默认 WebRTC transport 构建不能依赖 codec decoder/encoder；启用 codec bridge 时也只能依赖纯 Uya sibling package，不能引入 libopus、libvpx 或 FFmpeg runtime。
+docs/design.md:831:每个 parser/builder：
+docs/design.md:974:M1：SDP + STUN parser/builder  
+docs/todo.md:23:- [ ] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+docs/todo.md:24:- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
+docs/todo.md:37:- `make build` 生成可执行文件。
+docs/todo.md:38:- `make test` 至少跑通空测试和基础 arena/ring 测试。
+docs/todo.md:39:- `make bench` 至少输出空基线 JSON lines。
+docs/todo.md:40:- `build/webrtc-uya --help` 可运行。
+docs/todo.md:130:- [ ] 实现 Binding request/response/error response builder。
+docs/todo.md:297:- [ ] 定义 optional `media/codec_bridge.uya` 边界，默认 transport build 不依赖 decoder/encoder。
+docs/todo.md:320:- WebRTC transport 在不构建 codec bridge 时仍可跑 encoded-frame RTP 测试。
+docs/todo.md:530:- [ ] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
+docs/todo.md:547:1. Phase 0 - Phase 2：项目可构建，UDP worker 可收发。
+
+codex
+README 需要把“纯 Uya”写得可执行，而不是口号。我再补读设计里和外部依赖、codec bridge、默认构建路径相关的段落，然后落文档。
+exec
+/bin/bash -lc "sed -n '640,720p' docs/design.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+  -> NACK missing packets
+  -> depacketizer
+  -> EncodedFrame output
+  -> stats
+```
+
+JitterBuffer 首版目标：
+
+- 支持乱序、重复包、丢包检测。
+- 按 frame boundary 输出 encoded frame。
+- video keyframe 识别。
+- NACK 触发和 PLI backoff。
+- 上限内存，超限丢弃老帧或不完整帧。
+
+## 13. Media 与 Codec 边界
+
+第一阶段 media 模块只做 RTP payload 格式和 encoded-frame 边界，不做全量编解码：
+
+- Opus RTP packet parse/write。
+- VP8 payload descriptor parse/write。
+- H264 STAP-A / FU-A packetize/depacketize。
+- AV1 RTP payload descriptor parse/write。
+- codec capability negotiation。
+- encoded frame metadata：kind、codec、timestamp、duration、keyframe、spatial/temporal id。
+
+兄弟 codec 仓库已经拆分：
+
+- `../opus` 对应 `https://github.com/uya-lang/opus`，负责 RFC 6716 / RFC 8251 的 Opus packet、entropy、SILK、CELT、Hybrid、decoder、encoder、Ogg Opus 和 RTP Opus payload 语义。
+- `../vp8` 对应 `https://github.com/uya-lang/vp8`，负责 RFC 6386 的 VP8 bitstream、IVF/WebM、decoder、encoder、SIMD kernel、VP8 RTP payload descriptor 和 frame reassembly 语义。
+
+WebRTC 与 codec 仓库的责任边界：
+
+- WebRTC 拥有 SDP/JSEP codec negotiation、RTP/RTCP、SRTP、jitter buffer、NACK/PLI/RTX、pacer、stats 和 browser interop。
+- Opus 仓库拥有 Opus packet 合法性、TOC/frame split、ptime/maxptime/stereo/fec fmtp 映射、decoder/encoder、Ogg Opus。
+- VP8 仓库拥有 VP8 bitstream header、keyframe 判断、payload descriptor 字段、partition/frame reassembly 语义、decoder/encoder、IVF/WebM。
+- WebRTC `media/opus_rtp.uya` 和 `media/vp8_rtp.uya` 必须与兄弟仓库的 RTP payload 行为保持 roundtrip 等价；实现上可以先内置最小 payload parser，再在 `media/codec_bridge.uya` 中提供可选适配。
+- 默认 WebRTC transport 构建不能依赖 codec decoder/encoder；启用 codec bridge 时也只能依赖纯 Uya sibling package，不能引入 libopus、libvpx 或 FFmpeg runtime。
+- Encoded-frame API 是稳定边界：codec 仓库可以把 PCM/YUV 编码成 encoded frame，WebRTC 负责 packetize/send；WebRTC 收到 encoded frame 后可以交给 codec bridge decode，也可以直接交给应用、录制或转推。
+
+`EncodedFrame` 建议字段：
+
+```text
+EncodedFrame {
+  codec: CodecId,
+  kind: MediaKind,
+  timestamp: u64,
+  duration_us: u32,
+  payload: PacketRef or borrowed bytes,
+  is_keyframe: bool,
+  sequence_id: u64,
+  spatial_id: i32,
+  temporal_id: i32,
+  marker: bool,
+}
+```
+
+Opus 同步点：
+
+- RTP clock rate 固定按 48 kHz。
+- payload 可以包含一个或多个 Opus frame，WebRTC 不解码音频内容。
+- SDP fmtp 覆盖 `minptime`、`maxptime`、`useinbandfec`、`stereo`、`sprop-stereo`、`usedtx` 等常见参数。
+- DTX/空 payload、FEC hint、packet duration 校验与 `../opus/docs/todo.md` 的 RTP Opus 阶段保持一致。
+
+VP8 同步点：
+
+- RTP payload descriptor 支持 X/N/S/PartID、PictureID、TL0PICIDX、TID、KEYIDX。
+- keyframe 检测以 payload descriptor + VP8 uncompressed header 为准；完整 bitstream 解析由 `../vp8` 负责。
+- jitter buffer 输出完整 VP8 frame，丢包时触发 NACK，长期不可恢复时触发 PLI。
+- frame reassembly、RTP malformed 错误和 API examples 与 `../vp8/docs/todo.md` 的 WebM/RTP 与库 API 阶段保持一致。
+
+H264 / AV1 策略不变：
+
+- H264 涉及专利和 profiles，优先只做 RTP payload 与 Annex-B/AVCC 转换。
+- AV1 编解码复杂度高，优先 RTP payload 和 OBU 处理。
+
+这一区分很重要：WebRTC 传输栈可以先服务 SFU、录制、转推、AI 实时处理等场景，这些场景经常只需要处理 encoded frames。
+
+## 14. SCTP 与 DataChannel
+
+DataChannel 栈：
+
+
+exec
+/bin/bash -lc 'rg -n "纯 Uya|codec_bridge|默认构建|FFI|外部|libwebrtc|libnice|BoringSSL|usrsctp|libsrtp|libopus|libvpx|FFmpeg" docs/design.md' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+1:# 纯 Uya WebRTC 重构详细设计
+10:本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。它不是对 Google libwebrtc 的 C++ 包装，也不是只做一层 API 兼容层，而是把信令模型、SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计和测试工具逐步落到 Uya 代码中。
+12:“纯 Uya”在本项目中的含义：
+14:- 核心协议和状态机全部由 Uya 实现，不链接 libwebrtc、libnice、BoringSSL、usrsctp、libsrtp、libvpx、libopus 作为默认运行路径。
+15:- 允许存在极薄 OS FFI 边界：socket、epoll/kqueue/IOCP、clock、pthread 或平台等价线程原语、mmap、sendmmsg/recvmmsg 等系统能力。
+16:- 默认构建路径不依赖 C++ runtime，不复用外部协议库的对象生命周期。
+18:- 第一期优先实现 WebRTC 传输和互通能力；纯 Uya Opus / VP8 编解码能力由兄弟仓库 `../opus`、`../vp8` 承担，WebRTC 侧通过 encoded-frame 和可选适配层集成。
+181:      codec_bridge.uya   # optional adapters to ../opus and ../vp8
+218:media.codec_bridge
+527:纯 Uya crypto 模块需要：
+675:- WebRTC `media/opus_rtp.uya` 和 `media/vp8_rtp.uya` 必须与兄弟仓库的 RTP payload 行为保持 roundtrip 等价；实现上可以先内置最小 payload parser，再在 `media/codec_bridge.uya` 中提供可选适配。
+676:- 默认 WebRTC transport 构建不能依赖 codec decoder/encoder；启用 codec bridge 时也只能依赖纯 Uya sibling package，不能引入 libopus、libvpx 或 FFmpeg runtime。
+792:后续再对齐 libwebrtc GCC 的细节。
+967:- 先 encoded-frame transport，后接入 `../opus`、`../vp8` 的纯 Uya codec bridge。
+983:M10：接入 `../opus` / `../vp8` 纯 Uya codec bridge
+
+codex
+接下来只改 `README.md`。内容会明确三件事：项目目标、纯 Uya 的技术边界，以及“当前尚无构建脚本”和“目标构建入口”的区别。
+apply patch
+patch: completed
+/media/winger/_dde_data/winger/uya/webrtc/README.md
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..545bdc99353ac9b5d66dc9604b6199cebb927f51
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,39 @@
++# 纯 Uya WebRTC
++
++本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
++
++## 项目目标
++
++- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
++- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
++- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
++
++## 纯 Uya 边界
++
++“纯 Uya”在本项目中的含义是：
++
++- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
++- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
++- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
++- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
++- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
++
++## 构建方式
++
++当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++
++项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++
++```sh
++make build
++make test
++make bench
++```
++
++对应目标如下：
++
++- `make build`：生成 `build/webrtc-uya`。
++- `make test`：运行基础单测与后续协议回归测试。
++- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++
++在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..545bdc99353ac9b5d66dc9604b6199cebb927f51
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,39 @@
++# 纯 Uya WebRTC
++
++本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
++
++## 项目目标
++
++- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
++- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
++- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
++
++## 纯 Uya 边界
++
++“纯 Uya”在本项目中的含义是：
++
++- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
++- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
++- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
++- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
++- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
++
++## 构建方式
++
++当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++
++项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++
++```sh
++make build
++make test
++make bench
++```
++
++对应目标如下：
++
++- `make build`：生成 `build/webrtc-uya`。
++- `make test`：运行基础单测与后续协议回归测试。
++- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++
++在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+codex
+README 已写入。现在做两类验证：先检查文档内容和 diff，再跑仓库里现有脚本的最小自动化校验；这个仓库目前没有 README 专用测试或 Uya 构建脚本。
+exec
+/bin/bash -lc "sed -n '1,220p' README.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+# 纯 Uya WebRTC
+
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
+
+## 项目目标
+
+- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
+- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
+- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
+
+## 纯 Uya 边界
+
+“纯 Uya”在本项目中的含义是：
+
+- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
+- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
+- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
+- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
+- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
+
+## 构建方式
+
+当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
+
+项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+
+```sh
+make build
+make test
+make bench
+```
+
+对应目标如下：
+
+- `make build`：生成 `build/webrtc-uya`。
+- `make test`：运行基础单测与后续协议回归测试。
+- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
+
+在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+exec
+/bin/bash -lc 'git diff --check' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+exec
+/bin/bash -lc 'python3 -m py_compile agent_loop.py' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..545bdc99353ac9b5d66dc9604b6199cebb927f51
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,39 @@
++# 纯 Uya WebRTC
++
++本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
++
++## 项目目标
++
++- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
++- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
++- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
++
++## 纯 Uya 边界
++
++“纯 Uya”在本项目中的含义是：
++
++- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
++- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
++- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
++- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
++- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
++
++## 构建方式
++
++当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++
++项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++
++```sh
++make build
++make test
++make bench
++```
++
++对应目标如下：
++
++- `make build`：生成 `build/webrtc-uya`。
++- `make test`：运行基础单测与后续协议回归测试。
++- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++
++在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+codex
+验证结束：文档改动没有 whitespace/diff 问题，仓库现有 Python 入口也能通过语法编译。最后再核对一次工作区，只汇报这次实际新增的文件。
+exec
+/bin/bash -lc 'git status --short README.md' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+?? README.md
+
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..545bdc99353ac9b5d66dc9604b6199cebb927f51
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,39 @@
++# 纯 Uya WebRTC
++
++本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
++
++## 项目目标
++
++- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
++- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
++- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
++
++## 纯 Uya 边界
++
++“纯 Uya”在本项目中的含义是：
++
++- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
++- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
++- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
++- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
++- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
++
++## 构建方式
++
++当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++
++项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++
++```sh
++make build
++make test
++make bench
++```
++
++对应目标如下：
++
++- `make build`：生成 `build/webrtc-uya`。
++- `make test`：运行基础单测与后续协议回归测试。
++- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++
++在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+codex
+已新增 [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md)，内容只覆盖了你要求的三部分：项目目标、纯 Uya 边界，以及构建方式。构建部分明确区分了当前状态和后续约定，避免把尚未存在的 `Makefile`/`uyabuild` 写成已可用能力。
+
+已做验证：运行了 `git diff --check`，并执行了 `python3 -m py_compile agent_loop.py`。当前仓库还没有 Uya 构建脚本或 README 专用测试，因此没有可运行的 `make build` / `make test`。
+
+本次修改文件只有：
+- [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md)
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..545bdc99353ac9b5d66dc9604b6199cebb927f51
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,39 @@
++# 纯 Uya WebRTC
++
++本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
++
++## 项目目标
++
++- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
++- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
++- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
++
++## 纯 Uya 边界
++
++“纯 Uya”在本项目中的含义是：
++
++- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
++- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
++- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
++- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
++- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
++
++## 构建方式
++
++当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++
++项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++
++```sh
++make build
++make test
++make bench
++```
++
++对应目标如下：
++
++- `make build`：生成 `build/webrtc-uya`。
++- `make test`：运行基础单测与后续协议回归测试。
++- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++
++在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+tokens used
+30,162
+已新增 [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md)，内容只覆盖了你要求的三部分：项目目标、纯 Uya 边界，以及构建方式。构建部分明确区分了当前状态和后续约定，避免把尚未存在的 `Makefile`/`uyabuild` 写成已可用能力。
+
+已做验证：运行了 `git diff --check`，并执行了 `python3 -m py_compile agent_loop.py`。当前仓库还没有 Uya 构建脚本或 README 专用测试，因此没有可运行的 `make build` / `make test`。
+
+本次修改文件只有：
+- [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md)
+
+[2026-05-31 06:23:51] EXIT CODE: 0
