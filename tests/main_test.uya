@@ -1,0 +1,10 @@
+use std.testing.expect;
+use webrtc.error;
+use webrtc.arena;
+use webrtc.ring;
+
+test "tests entry imports core webrtc modules" {
+    try expect(WEBRTC_ERROR_VERSION == 1);
+    try expect(PACKET_ARENA_MAX_SLABS > 0);
+    try expect(RING_QUEUE_MAX_CAPACITY > 0);
+}
