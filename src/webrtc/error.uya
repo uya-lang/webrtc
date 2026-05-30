@@ -1,0 +1,26 @@
+// webrtc.error - WebRTC 统一错误定义
+// 模块路径：src/webrtc/error.uya → use webrtc.error;
+
+// 模块标记；避免仅导出 error 时出现空导出表问题。
+export const WEBRTC_ERROR_VERSION: i32 = 1;
+
+// 通用解析与边界错误
+export error PacketTooShort;
+export error InvalidPacket;
+export error UnsupportedProfile;
+export error UnsupportedCapability;
+
+// SDP / JSEP 协商错误
+export error MissingFingerprint;
+export error MissingIceUfrag;
+export error MissingIcePwd;
+export error MissingRtcpMux;
+
+// 认证、完整性与重放错误
+export error IntegrityCheckFailed;
+export error FingerprintMismatch;
+export error ReplayRejected;
+
+// 握手与平台错误
+export error HandshakeFailed;
+export error RandomSourceFailed;
