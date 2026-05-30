@@ -57,6 +57,17 @@ def parse_args():
         default=None,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show the current agent status for the selected project/todo and exit.",
+    )
+    parser.add_argument(
+        "--status-lines",
+        type=int,
+        default=20,
+        help="How many recent log lines to show with --status. Default: 20.",
+    )
     args = parser.parse_args()
 
     if args.todo and args.todo_flag and args.todo != args.todo_flag:
@@ -235,6 +246,69 @@ def save_state(state_file, state):
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def tail_lines(path, limit):
+    if limit <= 0 or not path.exists():
+        return []
+
+    return path.read_text(encoding="utf-8").splitlines()[-limit:]
+
+
+def latest_log_file(log_dir):
+    if not log_dir.exists():
+        return None
+
+    log_files = sorted(log_dir.glob("*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not log_files:
+        return None
+
+    return log_files[0]
+
+
+def print_status(paths, state, status_lines):
+    root = paths["root"]
+    print(f"[agent] state file: {path_label(root, paths['state_file'])}")
+    print(f"[agent] project root: {path_label(root, root)}")
+    print(f"[agent] todo: {todo_label(root, resolve_path(root, state['todo_file']))}")
+    print(f"[agent] updated at: {state.get('updated_at', '')}")
+
+    current = state.get("current")
+    if not current:
+        print("[agent] current: idle")
+        return
+
+    print("[agent] current: running")
+    print(f"[agent] started at: {current.get('started_at', '')}")
+    print(f"[agent] task count: {current.get('task_count', 0)}")
+
+    current_task = current.get("current_task") or current.get("text")
+    if current_task:
+        print(f"[agent] current task: {current_task}")
+
+    tasks = current.get("tasks", [])
+    if tasks:
+        preview_count = min(5, len(tasks))
+        print(f"[agent] batch preview ({preview_count}/{len(tasks)}):")
+        for index, task in enumerate(tasks[:preview_count], start=1):
+            print(f"  {index}. {task}")
+
+    log_path_value = current.get("log_file")
+    if isinstance(log_path_value, str) and log_path_value.strip():
+        log_path = resolve_path(root, log_path_value.strip())
+    else:
+        log_path = latest_log_file(paths["log_dir"])
+        if log_path is None:
+            return
+
+    print(f"[agent] log file: {path_label(root, log_path)}")
+    recent_lines = tail_lines(log_path, status_lines)
+    if not recent_lines:
+        return
+
+    print(f"[agent] recent log lines ({len(recent_lines)}):")
+    for line in recent_lines:
+        print(line)
 
 
 def make_task_id(todo_file, task_text, occurrence):
@@ -423,7 +497,16 @@ def make_log_file(log_dir, runnable_tasks):
     return log_dir / f"batch-{timestamp_for_filename()}-{first_id[:8]}.log"
 
 
-def run_codex(root, todo_file, log_dir, runnable_tasks, exhausted_tasks, toolchain_bug_dir, toolchain_bug_repro_dir):
+def run_codex(
+    root,
+    todo_file,
+    log_dir,
+    runnable_tasks,
+    exhausted_tasks,
+    toolchain_bug_dir,
+    toolchain_bug_repro_dir,
+    log_file=None,
+):
     prompt = build_prompt(
         root,
         todo_file,
@@ -432,7 +515,8 @@ def run_codex(root, todo_file, log_dir, runnable_tasks, exhausted_tasks, toolcha
         toolchain_bug_dir,
         toolchain_bug_repro_dir,
     )
-    log_file = make_log_file(log_dir, runnable_tasks)
+    if log_file is None:
+        log_file = make_log_file(log_dir, runnable_tasks)
 
     cmd = [
         CODEX_CMD,
@@ -690,6 +774,11 @@ def main():
     todo_file = resolve_todo_file(root, args.todo)
     paths = build_runtime_paths(root, todo_file)
 
+    if args.status:
+        state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        print_status(paths, state, args.status_lines)
+        return
+
     print(f"[agent] start: root={path_label(root, root)} todo={todo_label(root, todo_file)}")
 
     while True:
@@ -705,14 +794,18 @@ def main():
                 print("[agent] no task left")
             break
 
+        batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
         state["current"] = {
             "project_root": path_label(paths["root"], paths["root"]),
             "todo_file": todo_label(paths["root"], paths["todo_file"]),
+            "started_at": now(),
             "task_count": len(runnable_tasks),
+            "current_task": runnable_tasks[0]["text"],
             "tasks": [task["text"] for task in runnable_tasks[:20]],
             "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
             "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
             "git_repo": is_git_repo(paths["root"]),
+            "log_file": path_label(paths["root"], batch_log_file),
         }
         save_state(paths["state_file"], state)
 
@@ -725,6 +818,7 @@ def main():
             exhausted_tasks,
             paths["toolchain_bug_dir"],
             paths["toolchain_bug_repro_dir"],
+            log_file=batch_log_file,
         )
 
         tasks_after = parse_todo(paths["todo_file"])

@@ -1,2 +1,4 @@
 .agent/logs/*
 __pycache__/
+
+.agent/state*.json
