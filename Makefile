@@ -11,7 +11,7 @@ all: build
 
 build: $(BIN)
 
-$(BIN): Makefile
+$(BIN): Makefile src/main.uya
 	mkdir -p $(BUILD_DIR)
 	rm -f $@
 	{ \
@@ -34,6 +34,7 @@ $(BIN): Makefile
 	chmod +x $@
 
 test: build
+	test -f src/main.uya
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null

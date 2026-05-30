@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  ""|--help|-h)
+    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"
+    ;;
+  version)
+    printf "%s\n" "webrtc-uya 0.0.0-placeholder"
+    ;;
+  *)
+    printf "unknown command: %s\n" "${1:-}" >&2
+    exit 1
+    ;;
+esac
