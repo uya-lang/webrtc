@@ -1,0 +1,101 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use std.testing.assert_eq_u64;
+use webrtc.arena;
+
+fn new_packet_arena() PacketArena {
+    return PacketArena{
+        storage: [],
+        slot_generations: [],
+        slot_lengths: [],
+        slot_in_use: [],
+        free_list: [],
+    };
+}
+
+test "packet arena copies payload into owned slab" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 17u32, 4, 64);
+
+    var src: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 4 as byte];
+    const packet: PacketRef = try packet_arena_alloc(&arena_local, src[0:4], 99u64, 7u32, 2u16, 1u16);
+
+    src[1] = 55 as byte;
+    const view: &[byte] = try packet_arena_bytes(&arena_local, &packet);
+
+    try assert_eq_i32((view.len as! i32).value, 4);
+    try assert_eq_i32(view[0] as i32, 1);
+    try assert_eq_i32(view[1] as i32, 2);
+    try assert_eq_i32(packet.five_tuple_id as i32, 7);
+    try assert_eq_i32(packet.kind as i32, 2);
+    try assert_eq_i32(packet.flags as i32, 1);
+    try assert_eq_u64(arena_local.in_use_count, 1u64);
+}
+
+test "packet arena reuses freed slab" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 3u32, 2, 32);
+
+    var a: [byte: 1] = [11 as byte];
+    var b: [byte: 1] = [22 as byte];
+    var c: [byte: 1] = [33 as byte];
+
+    const p1: PacketRef = try packet_arena_alloc(&arena_local, a[0:1], 1u64, 1u32, 0u16, 0u16);
+    const p2: PacketRef = try packet_arena_alloc(&arena_local, b[0:1], 2u64, 1u32, 0u16, 0u16);
+    try packet_arena_free(&arena_local, &p2);
+
+    const p3: PacketRef = try packet_arena_alloc(&arena_local, c[0:1], 3u64, 1u32, 0u16, 0u16);
+    try assert_eq_i32(p3.slab_id as i32, p2.slab_id as i32);
+    try assert_eq_u64(arena_local.high_watermark, 2u64);
+
+    try packet_arena_free(&arena_local, &p3);
+    try packet_arena_free(&arena_local, &p1);
+}
+
+test "packet arena rejects oversize payload and exhausted arena" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 9u32, 1, 4);
+
+    var big: [byte: 5] = [1 as byte, 2 as byte, 3 as byte, 4 as byte, 5 as byte];
+    const oversize: !PacketRef = packet_arena_alloc(&arena_local, big[0:5], 0u64, 0u32, 0u16, 0u16);
+    try expect(oversize.error_id == @error_id(error.PacketArenaPayloadTooLarge));
+
+    var small: [byte: 4] = [9 as byte, 8 as byte, 7 as byte, 6 as byte];
+    _ = try packet_arena_alloc(&arena_local, small[0:4], 0u64, 0u32, 0u16, 0u16);
+
+    const exhausted: !PacketRef = packet_arena_alloc(&arena_local, small[0:4], 0u64, 0u32, 0u16, 0u16);
+    try expect(exhausted.error_id == @error_id(error.PacketArenaExhausted));
+}
+
+test "packet arena rejects double free" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 19u32, 1, 16);
+
+    var payload: [byte: 2] = [7 as byte, 8 as byte];
+    const packet: PacketRef = try packet_arena_alloc(&arena_local, payload[0:2], 0u64, 0u32, 0u16, 0u16);
+
+    try packet_arena_free(&arena_local, &packet);
+    const second_free: !void = packet_arena_free(&arena_local, &packet);
+    try expect(second_free.error_id == @error_id(error.PacketArenaDoubleFree));
+}
+
+test "packet arena reset restores all slabs" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 23u32, 2, 24);
+
+    var payload: [byte: 3] = [1 as byte, 2 as byte, 3 as byte];
+    _ = try packet_arena_alloc(&arena_local, payload[0:3], 0u64, 0u32, 0u16, 0u16);
+    _ = try packet_arena_alloc(&arena_local, payload[0:3], 0u64, 0u32, 0u16, 0u16);
+
+    packet_arena_reset(&arena_local);
+    try assert_eq_u64(arena_local.in_use_count, 0u64);
+    try assert_eq_u64(arena_local.high_watermark, 0u64);
+
+    const packet: PacketRef = try packet_arena_alloc(&arena_local, payload[0:3], 0u64, 0u32, 0u16, 0u16);
+    const view: &[byte] = try packet_arena_bytes(&arena_local, &packet);
+    try assert_eq_i32((view.len as! i32).value, 3);
+}
+
+test "packet ref stays within cache friendly budget" {
+    try expect(@size_of(PacketRef) <= 64);
+}

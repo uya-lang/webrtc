@@ -1,0 +1,246 @@
+// webrtc.arena - 固定 slab packet arena
+// 模块路径：src/webrtc/arena.uya → use webrtc.arena;
+
+export const PACKET_ARENA_MAX_SLABS: usize = 256;
+export const PACKET_ARENA_MAX_SLAB_BYTES: usize = 2048;
+
+const PACKET_ARENA_STORAGE_BYTES: usize = PACKET_ARENA_MAX_SLABS * PACKET_ARENA_MAX_SLAB_BYTES;
+const PACKET_REF_COMPONENT_MAX: usize = 65535;
+
+export error PacketArenaConfigInvalid;
+export error PacketArenaExhausted;
+export error PacketArenaPayloadTooLarge;
+export error PacketArenaInvalidRef;
+export error PacketArenaDoubleFree;
+
+// PacketRef 只保存 slab 身份和 packet 元数据，不暴露可逃逸的内部切片。
+export struct PacketRef {
+    recv_time_us: u64 = 0u64,
+    arena_id: u32 = 0u32,
+    slab_id: u32 = 0u32,
+    generation: u32 = 0u32,
+    five_tuple_id: u32 = 0u32,
+    offset: u16 = 0u16,
+    len: u16 = 0u16,
+    kind: u16 = 0u16,
+    flags: u16 = 0u16,
+}
+
+// 固定容量 arena：每个 slab 只承载一个 packet，free-list 走 LIFO。
+export struct PacketArena {
+    storage: [byte: PACKET_ARENA_STORAGE_BYTES] = [],
+    slot_generations: [u32: PACKET_ARENA_MAX_SLABS] = [],
+    slot_lengths: [u16: PACKET_ARENA_MAX_SLABS] = [],
+    slot_in_use: [bool: PACKET_ARENA_MAX_SLABS] = [],
+    free_list: [u32: PACKET_ARENA_MAX_SLABS] = [],
+    arena_id: u32 = 0u32,
+    slab_count: usize = 0,
+    slab_size: usize = 0,
+    free_top: usize = 0,
+    alloc_count: u64 = 0u64,
+    free_count: u64 = 0u64,
+    in_use_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+fn packet_arena_slot_base(slot: usize) usize {
+    return slot * PACKET_ARENA_MAX_SLAB_BYTES;
+}
+
+fn packet_arena_copy_into(dst: &byte, src: &[byte]) void {
+    var i: usize = 0;
+    while i < src.len {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+fn packet_arena_validate_ref(arena: &PacketArena, packet: &PacketRef) !usize {
+    if arena == null || arena.slab_count == 0 || arena.slab_size == 0 {
+        return error.PacketArenaInvalidRef;
+    }
+    if packet.generation == 0u32 {
+        return error.PacketArenaInvalidRef;
+    }
+    if packet.arena_id != arena.arena_id {
+        return error.PacketArenaInvalidRef;
+    }
+
+    const slot: usize = (packet.slab_id as! usize).value;
+    if slot >= arena.slab_count {
+        return error.PacketArenaInvalidRef;
+    }
+    if slot >= PACKET_ARENA_MAX_SLABS {
+        return error.PacketArenaInvalidRef;
+    }
+
+    if !arena.slot_in_use[slot] {
+        if arena.slot_generations[slot] == packet.generation {
+            return error.PacketArenaDoubleFree;
+        }
+        return error.PacketArenaInvalidRef;
+    }
+    if arena.slot_generations[slot] != packet.generation {
+        return error.PacketArenaInvalidRef;
+    }
+
+    const slot_len: usize = arena.slot_lengths[slot] as usize;
+    const offset: usize = packet.offset as usize;
+    const len: usize = packet.len as usize;
+    if offset > slot_len {
+        return error.PacketArenaInvalidRef;
+    }
+    if len > slot_len - offset {
+        return error.PacketArenaInvalidRef;
+    }
+    return slot;
+}
+
+fn packet_arena_validate_owner_ref(arena: &PacketArena, packet: &PacketRef) !usize {
+    const slot: usize = try packet_arena_validate_ref(arena, packet);
+    if packet.offset != 0u16 {
+        return error.PacketArenaInvalidRef;
+    }
+    if slot >= PACKET_ARENA_MAX_SLABS {
+        return error.PacketArenaInvalidRef;
+    }
+    if packet.len != arena.slot_lengths[slot] {
+        return error.PacketArenaInvalidRef;
+    }
+    return slot;
+}
+
+export fn packet_arena_init(arena: &PacketArena, arena_id: u32, slab_count: usize, slab_size: usize) !void {
+    if arena == null {
+        return error.PacketArenaConfigInvalid;
+    }
+    if slab_count == 0 || slab_count > PACKET_ARENA_MAX_SLABS {
+        return error.PacketArenaConfigInvalid;
+    }
+    if slab_size == 0 || slab_size > PACKET_ARENA_MAX_SLAB_BYTES || slab_size > PACKET_REF_COMPONENT_MAX {
+        return error.PacketArenaConfigInvalid;
+    }
+
+    arena.arena_id = arena_id;
+    arena.slab_count = slab_count;
+    arena.slab_size = slab_size;
+    packet_arena_reset(arena);
+}
+
+export fn packet_arena_reset(arena: &PacketArena) void {
+    if arena == null {
+        return;
+    }
+
+    var i: usize = 0;
+    while i < PACKET_ARENA_MAX_SLABS {
+        arena.slot_generations[i] = 0u32;
+        arena.slot_lengths[i] = 0u16;
+        arena.slot_in_use[i] = false;
+        if i < arena.slab_count {
+            arena.free_list[i] = (i as! u32).value;
+        } else {
+            arena.free_list[i] = 0u32;
+        }
+        i = i + 1;
+    }
+
+    arena.free_top = arena.slab_count;
+    arena.alloc_count = 0u64;
+    arena.free_count = 0u64;
+    arena.in_use_count = 0u64;
+    arena.high_watermark = 0u64;
+}
+
+export fn packet_arena_alloc(
+    arena: &PacketArena,
+    payload: &[byte],
+    recv_time_us: u64,
+    five_tuple_id: u32,
+    kind: u16,
+    flags: u16,
+) !PacketRef {
+    if arena == null || arena.slab_count == 0 || arena.slab_size == 0 {
+        return error.PacketArenaConfigInvalid;
+    }
+    if payload.len > arena.slab_size || payload.len > PACKET_REF_COMPONENT_MAX {
+        return error.PacketArenaPayloadTooLarge;
+    }
+    if arena.free_top == 0 {
+        return error.PacketArenaExhausted;
+    }
+
+    const free_idx: usize = arena.free_top - 1;
+    const slot: usize = (arena.free_list[free_idx] as! usize).value;
+    arena.free_top = free_idx;
+    if slot >= PACKET_ARENA_MAX_SLABS {
+        return error.PacketArenaConfigInvalid;
+    }
+
+    const base: usize = packet_arena_slot_base(slot);
+    const end: usize = base + payload.len;
+    if base >= PACKET_ARENA_STORAGE_BYTES || end > PACKET_ARENA_STORAGE_BYTES || end < base {
+        return error.PacketArenaConfigInvalid;
+    }
+    if base < PACKET_ARENA_STORAGE_BYTES {
+        packet_arena_copy_into(&arena.storage[base], payload);
+    } else {
+        return error.PacketArenaConfigInvalid;
+    }
+
+    var generation: u32 = arena.slot_generations[slot] + 1u32;
+    if generation == 0u32 {
+        generation = 1u32;
+    }
+
+    arena.slot_generations[slot] = generation;
+    arena.slot_lengths[slot] = (payload.len as! u16).value;
+    arena.slot_in_use[slot] = true;
+    arena.alloc_count = arena.alloc_count + 1u64;
+    arena.in_use_count = arena.in_use_count + 1u64;
+    if arena.in_use_count > arena.high_watermark {
+        arena.high_watermark = arena.in_use_count;
+    }
+
+    return PacketRef{
+        recv_time_us: recv_time_us,
+        arena_id: arena.arena_id,
+        slab_id: (slot as! u32).value,
+        generation: generation,
+        five_tuple_id: five_tuple_id,
+        offset: 0u16,
+        len: (payload.len as! u16).value,
+        kind: kind,
+        flags: flags,
+    };
+}
+
+export fn packet_arena_bytes(arena: &PacketArena, packet: &PacketRef) !&[byte] {
+    const slot: usize = try packet_arena_validate_ref(arena, packet);
+    const base: usize = packet_arena_slot_base(slot) + packet.offset as usize;
+    const len: usize = packet.len as usize;
+    const end: usize = base + len;
+    if base >= PACKET_ARENA_STORAGE_BYTES || end > PACKET_ARENA_STORAGE_BYTES || end < base {
+        return error.PacketArenaInvalidRef;
+    }
+    if base < PACKET_ARENA_STORAGE_BYTES {
+        return arena.storage[base:len];
+    }
+    return error.PacketArenaInvalidRef;
+}
+
+export fn packet_arena_free(arena: &PacketArena, packet: &PacketRef) !void {
+    const slot: usize = try packet_arena_validate_owner_ref(arena, packet);
+    if arena.free_top >= arena.slab_count {
+        return error.PacketArenaInvalidRef;
+    }
+
+    arena.slot_in_use[slot] = false;
+    arena.slot_lengths[slot] = 0u16;
+    arena.free_list[arena.free_top] = packet.slab_id;
+    arena.free_top = arena.free_top + 1;
+    arena.free_count = arena.free_count + 1u64;
+    if arena.in_use_count > 0u64 {
+        arena.in_use_count = arena.in_use_count - 1u64;
+    }
+}
