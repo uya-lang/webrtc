@@ -20,9 +20,9 @@
 
 ## 构建方式
 
-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
+当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
 
-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+项目已经约定当前统一的构建入口，以以下命令作为标准接口：
 
 ```sh
 make build
@@ -32,8 +32,8 @@ make bench
 
 对应目标如下：
 
-- `make build`：生成 `build/webrtc-uya`。
-- `make test`：运行基础单测与后续协议回归测试。
-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
+- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
+- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
+- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
 
-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。

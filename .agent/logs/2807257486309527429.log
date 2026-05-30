@@ -1,0 +1,2627 @@
+[2026-05-31 06:23:54] START TASK
+创建 `Makefile` 或 `uyabuild` 配置。
+
+CMD: codex exec --cd /media/winger/_dde_data/winger/uya/webrtc <prompt>
+
+OpenAI Codex v0.118.0 (research preview)
+--------
+workdir: /media/winger/_dde_data/winger/uya/webrtc
+model: gpt-5.4
+provider: gpt001
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /home/winger/.codex/memories]
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e7afc-97da-7100-b8a9-b303fe3a2759
+--------
+user
+
+你是一个代码执行 Agent。
+
+当前任务：
+
+创建 `Makefile` 或 `uyabuild` 配置。
+
+要求：
+1. 只完成这个任务，不要扩大范围。
+2. 修改代码后运行相关测试。
+3. 如果无法完成，说明原因。
+4. 完成后总结修改了哪些文件。
+
+codex
+先检查仓库现状，确认已有构建方式、入口文件和是否存在 `uyabuild` 相关约定；然后我会只补这个构建配置，并跑对应验证。
+exec
+/bin/bash -lc pwd in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+/media/winger/_dde_data/winger/uya/webrtc
+
+exec
+/bin/bash -lc 'git status --short' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+ M .agent/state.json
+?? .agent/logs/2807257486309527429.log
+
+exec
+/bin/bash -lc 'rg --files' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+README.md
+agent_loop.py
+__pycache__/agent_loop.cpython-312.pyc
+docs/design.md
+docs/todo.md
+
+codex
+仓库很小，当前只有一个 Python 脚本和文档，没有现成构建文件。我先读 `README` 和主脚本，判断最合适的是 `Makefile` 还是 `uyabuild` 配置，并找出可执行的验证命令。
+exec
+/bin/bash -lc "sed -n '1,220p' README.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+# 纯 Uya WebRTC
+
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
+
+## 项目目标
+
+- 逐步在 Uya 中实现 SDP、ICE、STUN/TURN、DTLS、SRTP、RTP/RTCP、SCTP DataChannel、拥塞控制、抖动缓冲、统计与测试工具。
+- 第一阶段优先完成 WebRTC 传输和互通能力，与 Chrome / Firefox 建立 PeerConnection，并支持 encoded-frame 传输。
+- codec 能力与兄弟仓库 `../opus`、`../vp8` 协同推进；本仓库优先解决 WebRTC transport、browser interop 和 RTP/RTCP 语义。
+
+## 纯 Uya 边界
+
+“纯 Uya”在本项目中的含义是：
+
+- 核心协议、parser、state machine 和传输逻辑默认全部由 Uya 实现。
+- 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
+- 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
+- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
+- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
+
+## 构建方式
+
+当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
+
+项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+
+```sh
+make build
+make test
+make bench
+```
+
+对应目标如下：
+
+- `make build`：生成 `build/webrtc-uya`。
+- `make test`：运行基础单测与后续协议回归测试。
+- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
+
+在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
+
+exec
+/bin/bash -lc "sed -n '1,260p' agent_loop.py" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+#!/usr/bin/env python3
+import os
+import re
+import json
+import time
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+ROOT = Path.cwd()
+AGENT_DIR = ROOT / ".agent"
+TODO_FILE = ROOT / "docs/todo.md"
+STATE_FILE = AGENT_DIR / "state.json"
+LOG_DIR = AGENT_DIR / "logs"
+
+CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
+SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
+MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
+
+AGENT_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {
+            "done": [],
+            "failed": {},
+            "current": None,
+            "updated_at": now()
+        }
+
+    return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+
+
+def save_state(state):
+    state["updated_at"] = now()
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def parse_todo():
+    """
+    支持 todo.md 格式：
+
+    - [ ] 修改 parser 错误处理
+    - [ ] 增加 runtime 测试
+    - [x] 已完成任务
+    """
+
+    if not TODO_FILE.exists():
+        raise FileNotFoundError("缺少 todo.md")
+
+    tasks = []
+
+    for line in TODO_FILE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\s*-\s+\[( |x|X)\]\s+(.+)$", line)
+        if not m:
+            continue
+
+        checked, text = m.groups()
+        task_id = str(abs(hash(text)))
+
+        tasks.append({
+            "id": task_id,
+            "text": text.strip(),
+            "done_in_file": checked.lower() == "x"
+        })
+
+    return tasks
+
+
+def mark_done_in_todo(task_text):
+    content = TODO_FILE.read_text(encoding="utf-8")
+    pattern = r"^(\s*-\s+)\[ \](\s+" + re.escape(task_text) + r"\s*)$"
+    content = re.sub(pattern, r"\1[x]\2", content, flags=re.MULTILINE)
+    TODO_FILE.write_text(content, encoding="utf-8")
+
+
+def choose_next_task(tasks, state):
+    for task in tasks:
+        if task["done_in_file"]:
+            continue
+
+        if task["id"] in state["done"]:
+            continue
+
+        fails = state["failed"].get(task["id"], 0)
+        if fails >= MAX_FAILS_PER_TASK:
+            continue
+
+        return task
+
+    return None
+
+
+def git_commit(message):
+    subprocess.run(["git", "add", "."], cwd=ROOT)
+
+    diff = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=ROOT
+    )
+
+    if diff.returncode == 0:
+        return False
+
+    subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=ROOT
+    )
+
+    return True
+
+
+def run_codex(task):
+    prompt = f"""
+你是一个代码执行 Agent。
+
+当前任务：
+
+{task["text"]}
+
+要求：
+1. 只完成这个任务，不要扩大范围。
+2. 修改代码后运行相关测试。
+3. 如果无法完成，说明原因。
+4. 完成后总结修改了哪些文件。
+"""
+
+    log_file = LOG_DIR / f"{task['id']}.log"
+
+    cmd = [
+        CODEX_CMD,
+        "exec",
+        "--cd",
+        str(ROOT),
+        prompt
+    ]
+
+    with log_file.open("w", encoding="utf-8") as f:
+        f.write(f"[{now()}] START TASK\n")
+        f.write(task["text"] + "\n\n")
+        f.write("CMD: " + " ".join(cmd[:4]) + " <prompt>\n\n")
+        f.flush()
+
+        process = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+
+        f.write(f"\n[{now()}] EXIT CODE: {process.returncode}\n")
+
+    return process.returncode == 0
+
+
+def main():
+    print("[agent] start")
+
+    while True:
+        state = load_state()
+        tasks = parse_todo()
+        task = choose_next_task(tasks, state)
+
+        if task is None:
+            print("[agent] no task left")
+            break
+
+        print(f"[agent] run: {task['text']}")
+
+        state["current"] = task
+        save_state(state)
+
+        ok = run_codex(task)
+
+        if ok:
+            print(f"[agent] done: {task['text']}")
+
+            state["done"].append(task["id"])
+            state["current"] = None
+
+            mark_done_in_todo(task["text"])
+            save_state(state)
+
+            git_commit(f"agent: {task['text']}")
+
+        else:
+            print(f"[agent] failed: {task['text']}")
+
+            state["failed"][task["id"]] = state["failed"].get(task["id"], 0) + 1
+            state["current"] = None
+            save_state(state)
+
+            git_commit(f"agent failed: {task['text']}")
+
+        time.sleep(SLEEP_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
+exec
+/bin/bash -lc 'rg -n "uyabuild|make|pytest|unittest|build|run" -S README.md docs agent_loop.py' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+README.md:18:- 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
+README.md:19:- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
+README.md:23:当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
+README.md:28:make build
+README.md:29:make test
+README.md:30:make bench
+README.md:35:- `make build`：生成 `build/webrtc-uya`。
+README.md:36:- `make test`：运行基础单测与后续协议回归测试。
+README.md:37:- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
+agent_loop.py:53:    - [ ] 增加 runtime 测试
+agent_loop.py:104:    subprocess.run(["git", "add", "."], cwd=ROOT)
+agent_loop.py:106:    diff = subprocess.run(
+agent_loop.py:114:    subprocess.run(
+agent_loop.py:122:def run_codex(task):
+agent_loop.py:153:        process = subprocess.run(
+agent_loop.py:178:        print(f"[agent] run: {task['text']}")
+agent_loop.py:183:        ok = run_codex(task)
+docs/design.md:16:- 默认构建路径不依赖 C++ runtime，不复用外部协议库的对象生命周期。
+docs/design.md:80:- 每个协议模块都有 parser/builder roundtrip、错误输入、截断输入、边界长度测试。
+docs/design.md:267:- 使用 `atomic` 实现队列 head/tail、stats counter、runtime state flag。
+docs/design.md:364:    runtime: &RtcRuntime,
+docs/design.md:378:- `rtc_runtime_init(config) !RtcRuntime`
+docs/design.md:379:- `peer_connection_new(runtime, config, observer) !PeerConnection`
+docs/design.md:476:parser 使用 TLV 迭代，不复制 attribute value。builder 使用固定 buffer，先写 header，再写 attributes，最后回填 length 和 integrity/fingerprint。
+docs/design.md:676:- 默认 WebRTC transport 构建不能依赖 codec decoder/encoder；启用 codec bridge 时也只能依赖纯 Uya sibling package，不能引入 libopus、libvpx 或 FFmpeg runtime。
+docs/design.md:831:每个 parser/builder：
+docs/design.md:974:M1：SDP + STUN parser/builder  
+docs/todo.md:15:- 若某阶段临时加入 reference oracle，只能用于测试对照，不能进入默认 runtime。
+docs/todo.md:24:- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
+docs/todo.md:37:- `make build` 生成可执行文件。
+docs/todo.md:38:- `make test` 至少跑通空测试和基础 arena/ring 测试。
+docs/todo.md:39:- `make bench` 至少输出空基线 JSON lines。
+docs/todo.md:40:- `build/webrtc-uya --help` 可运行。
+docs/todo.md:130:- [ ] 实现 Binding request/response/error response builder。
+docs/todo.md:297:- [ ] 定义 optional `media/codec_bridge.uya` 边界，默认 transport build 不依赖 decoder/encoder。
+docs/todo.md:374:- [ ] 实现 `RtcRuntime`。
+docs/todo.md:530:- [ ] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
+docs/todo.md:540:- 启用 bridge 时只依赖纯 Uya sibling package，不引入 libopus、libvpx、FFmpeg runtime。
+
+codex
+`README` 已经写明标准入口应该是 `make build / test / bench`，`todo` 里还有更具体的验收条件。我再看那一段，确保这次只补最小可用构建骨架，不顺手改别的任务。
+exec
+/bin/bash -lc "sed -n '1,90p' docs/todo.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+# 纯 Uya WebRTC 重构 TODO
+
+**状态**：启动阶段  
+**日期**：2026-05-31  
+**设计参考**：[design.md](design.md)
+
+实现纪律：
+
+- 先写测试，再写实现，再跑回归。
+- 所有公网输入 parser 必须覆盖截断、坏长度、未知字段、最大长度。
+- 每个阶段都要有可运行示例和 benchmark 占位。
+- 每个阶段的第一批提交应优先加入 failing tests、fixtures、vectors、fuzz corpus 或 benchmark 基线，再补实现让它们通过。
+- 热路径功能进入阶段验收前必须有 allocation counter、queue-depth 或 microbench 门禁，性能退化不能留到 Phase 18 才发现。
+- 核心协议默认纯 Uya，不引入 libwebrtc/BoringSSL/usrsctp/libsrtp 等外部实现作为运行依赖。
+- 若某阶段临时加入 reference oracle，只能用于测试对照，不能进入默认 runtime。
+- Media payload 与 codec bridge 必须跟本地 `../opus`、`../vp8` 文档保持同步；WebRTC transport 首版仍可只处理 encoded frames。
+
+## Phase 0：项目基座
+
+- [x] 创建 `docs/design.md`。
+- [x] 创建 `docs/todo.md`。
+- [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+- [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
+- [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+- [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+- [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+- [ ] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
+- [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
+- [ ] 创建 `tests/` 基础测试入口。
+- [ ] 创建 `benchmarks/` 基础 benchmark 入口。
+- [ ] 创建 allocation counter / high-watermark 测试辅助。
+- [ ] 创建 benchmark JSON lines 输出 helper。
+
+验收标准：
+
+- `make build` 生成可执行文件。
+- `make test` 至少跑通空测试和基础 arena/ring 测试。
+- `make bench` 至少输出空基线 JSON lines。
+- `build/webrtc-uya --help` 可运行。
+- 文档中明确不复用外部 WebRTC 协议库。
+
+## Phase 1：基础二进制、buffer 与 packet 工具
+
+- [ ] 先增加 binary/buffer/arena failing tests：截断、越界、重复 free、cap 超限、clone 预算。
+- [ ] 先增加 `PacketRef` size / alignment 断言。
+- [ ] 先增加 arena/ring allocation counter 和 high-watermark tests。
+- [ ] 实现 big-endian / little-endian 读写 helpers。
+- [ ] 实现 checked integer add/mul/align helpers。
+- [ ] 实现 `ByteReader`，支持 cursor、remaining、read_u8/u16/u32/u64、read_slice。
+- [ ] 实现 `ByteWriter`，支持固定 buffer、回填 length、写 slice。
+- [ ] 实现 `PacketRef` 和 `PacketArena`。
+- [ ] 实现 arena free-list 和 reset。
+- [ ] 实现 slab token transfer。
+- [ ] 实现受预算约束的 packet clone 到 owner arena。
+- [ ] 实现常量时间 byte compare。
+- [ ] 增加 `bench_arena_ring`。
+
+验收标准：
+
+- 所有读写越界返回 `!T` 错误。
+- arena 重复 alloc/free 不泄漏、不重复释放。
+- `PacketRef` 不直接持有裸跨线程切片。
+- `PacketRef` 保持 64 字节级别，arena/ring 基础路径无堆分配。
+- clone bytes/count/drop/high-watermark 可观测，超预算路径有测试。
+
+## Phase 2：UDP I/O 与事件循环
+
+- [ ] 先增加 UDP classifier 首字节矩阵测试。
+- [ ] 先增加短包、unknown、reserved/ZRTP、TURN ChannelData 边界测试。
+- [ ] 先增加 EAGAIN/EINTR/短写 failing tests。
+- [ ] 先建立 `bench_udp_echo` JSON lines 基线。
+- [ ] 实现 Linux UDP socket 创建、bind、connect 可选、nonblocking。
+- [ ] 实现 epoll worker。
+- [ ] 实现 monotonic timer wheel 或 min-heap。
+- [ ] 实现 `recvmmsg` 批量收包路径。
+- [ ] 实现 `sendmmsg` 批量发包路径。
+- [ ] 实现 fallback `recvfrom/sendto`。
+- [ ] 实现 UDP packet classifier：STUN / DTLS / TURN ChannelData / RTP / RTCP / reserved / unknown。
+- [ ] 实现 worker command queue 和 event queue。
+- [ ] 增加 loopback UDP echo 测试。
+
+验收标准：
+
+- 单 worker 能收发 UDP echo。
+- EAGAIN/EINTR/短写路径测试通过。
+- classifier 对 RFC 7983 首字节范围和短包不崩溃。
+- `recvmmsg` / `sendmmsg` 与 fallback 路径都有 benchmark 基线。
+
+## Phase 3：SDP parser/writer 与 JSEP 模型
+
+exec
+/bin/bash -lc "sed -n '90,160p' docs/todo.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+## Phase 3：SDP parser/writer 与 JSEP 模型
+
+- [ ] 先收集 Chrome/Firefox SDP fixtures。
+- [ ] 先增加 SDP parse/write/parse roundtrip failing tests。
+- [ ] 先增加缺失 fingerprint、ice-pwd、rtcp-mux、不支持能力的错误测试。
+- [ ] 定义 `SessionDescription`、`MediaSection`、`CodecParameters`、`HeaderExtension`。
+- [ ] 实现 SDP 行扫描和字段 parser。
+- [ ] 支持 `v/o/s/t` 基础字段。
+- [ ] 支持 `m=` audio/video/application。
+- [ ] 支持 `a=group:BUNDLE`。
+- [ ] 支持 `a=mid`。
+- [ ] 支持 `a=ice-ufrag` / `a=ice-pwd`。
+- [ ] 支持 `a=fingerprint`。
+- [ ] 支持 `a=setup`。
+- [ ] 支持 `a=rtcp-mux`。
+- [ ] 支持 `a=candidate`。
+- [ ] 支持 `a=rtpmap` / `a=fmtp` / `a=rtcp-fb`。
+- [ ] 支持 `a=extmap`。
+- [ ] 支持 Opus SDP 参数：`minptime`、`maxptime`、`useinbandfec`、`stereo`、`sprop-stereo`、`usedtx`。
+- [ ] 支持 VP8 SDP 能力和反馈：`rtcp-fb` NACK、PLI、FIR、Transport-CC。
+- [ ] 支持 DataChannel application section。
+- [ ] 实现 SDP writer。
+- [ ] 实现 JSEP validator：bundle、rtcp-mux、fingerprint、payload type、direction。
+- [ ] 增加 `bench_sdp_parse`。
+
+验收标准：
+
+- Chrome/Firefox 常见 offer 能 parse -> write -> parse。
+- 缺失 fingerprint、ice-pwd、rtcp-mux 时返回明确错误。
+- 不支持能力不会静默忽略。
+- SDP parser 对最大长度和长行输入有 microbench 基线。
+
+## Phase 4：STUN
+
+- [ ] 先增加 RFC test vectors。
+- [ ] 先增加截断 header、坏 length、坏 padding、重复/未知 attribute failing tests。
+- [ ] 先建立 STUN parser fuzz corpus 和 `bench_stun_parse` 基线。
+- [ ] 定义 STUN message / attribute 类型。
+- [ ] 实现 STUN header parser。
+- [ ] 实现 TLV attribute iterator。
+- [ ] 实现 Binding request/response/error response builder。
+- [ ] 实现 XOR-MAPPED-ADDRESS。
+- [ ] 实现 USERNAME。
+- [ ] 实现 PRIORITY。
+- [ ] 实现 USE-CANDIDATE。
+- [ ] 实现 ICE-CONTROLLING / ICE-CONTROLLED。
+- [ ] 实现 MESSAGE-INTEGRITY。
+- [ ] 实现 MESSAGE-INTEGRITY-SHA256。
+- [ ] 实现 FINGERPRINT。
+- [ ] 实现 ERROR-CODE。
+
+验收标准：
+
+- binding request/response 与标准向量一致。
+- integrity/fingerprint 错误能被拒绝。
+- 任意截断 attribute 不越界。
+- STUN parser benchmark 输出 ns/packet 和 allocation count。
+
+## Phase 5：ICE host/srflx
+
+- [ ] 定义 `IceCandidate`、`CandidatePair`、`IceAgent`。
+- [ ] 实现 host candidate gathering。
+- [ ] 实现 STUN server reflexive candidate gathering。
+- [ ] 实现 remote candidate 添加。
+- [ ] 实现 candidate priority 计算。
+- [ ] 实现 checklist。
+- [ ] 实现 connectivity check transaction。
+- [ ] 实现 controlling / controlled role。
+- [ ] 实现 nomination。
+- [ ] 实现 role conflict。
+- [ ] 实现 selected pair。
+
+exec
+/bin/bash -lc 'find . -maxdepth 2 -type f | sort' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+./.agent/state.json
+./.codex
+./.git/COMMIT_EDITMSG
+./.git/HEAD
+./.git/config
+./.git/description
+./.git/index
+./.marscode/deviceInfo.json
+./README.md
+./__pycache__/agent_loop.cpython-312.pyc
+./agent_loop.py
+./docs/design.md
+./docs/todo.md
+
+codex
+我准备补一个最小但可运行的 `Makefile`，保持和 `README` 里约定的 `build/test/bench` 接口一致，同时不去顺手创建 `src/` 或实现代码。先确认本机是否已有 `uya`/`uyabuild` 命令，避免写出明显不匹配环境的入口。
+exec
+/bin/bash -lc 'command -v uya' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 1 in 0ms:
+exec
+/bin/bash -lc 'command -v uyabuild' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 1 in 0ms:
+exec
+/bin/bash -lc 'make --version | head -n 1' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+GNU Make 4.4.1
+
+codex
+计划如下：
+
+1. 新增 `Makefile`，提供 `build`、`test`、`bench`、`clean` 目标，并让当前空仓也能跑通占位构建。
+2. 只修正与此直接相关的文档表述，避免仓库继续声称“还没有 Makefile”。
+3. 运行 `make build`、`make test`、`make bench` 做验证，再汇总变更文件。
+  ✓ Inspect repo build expectations and current constraints
+  → Add minimal Makefile and related doc updates only where directly required
+  • Run build/test/bench verification and summarize changed files
+codex
+开始改文件：我会新增 `Makefile`，并仅修正 `README`/`docs/todo.md` 中和这个构建入口直接相关的表述，不碰源码骨架和其它待办。
+apply patch
+patch: completed
+/media/winger/_dde_data/winger/uya/webrtc/Makefile
+/media/winger/_dde_data/winger/uya/webrtc/README.md
+/media/winger/_dde_data/winger/uya/webrtc/docs/todo.md
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..658b27be3f02dadc9e6382f48c97906c7270c920
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,53 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile | $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++$(BUILD_DIR):
++	mkdir -p $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build | $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++$(BENCH_DIR):
++	mkdir -p $@
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..8ad39c655576dd00f15837a18187a3fc5ee911fd
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+ 项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+ 
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..658b27be3f02dadc9e6382f48c97906c7270c920
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,53 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile | $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++$(BUILD_DIR):
++	mkdir -p $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build | $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++$(BENCH_DIR):
++	mkdir -p $@
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..8ad39c655576dd00f15837a18187a3fc5ee911fd
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+ 项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+ 
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+文件已写入。我先检查 `Makefile` 生成脚本的转义是否正确，再执行 `make build/test/bench`；这一步主要是防止占位 CLI 在 shell 展开上出错。
+exec
+/bin/bash -lc "sed -n '1,220p' Makefile" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+SHELL := /bin/bash
+
+BUILD_DIR := build
+BIN := $(BUILD_DIR)/webrtc-uya
+BENCH_DIR := $(BUILD_DIR)/benchmarks
+BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
+
+.PHONY: all build test bench clean
+
+all: build
+
+build: $(BIN)
+
+$(BIN): Makefile | $(BUILD_DIR)
+	rm -f $@
+	printf '%s\n' '#!/usr/bin/env bash' > $@
+	printf '%s\n' 'set -euo pipefail' >> $@
+	printf '%s\n' >> $@
+	printf '%s\n' 'case "$${1:-}" in' >> $@
+	printf '%s\n' '  ""|--help|-h)' >> $@
+	printf '%s\n' "    printf '%s\\n' \\" >> $@
+	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
+	printf '%s\n' "      'Usage:' \\" >> $@
+	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
+	printf '%s\n' "      '  webrtc-uya version'" >> $@
+	printf '%s\n' '    ;;' >> $@
+	printf '%s\n' '  version)' >> $@
+	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
+	printf '%s\n' '    ;;' >> $@
+	printf '%s\n' '  *)' >> $@
+	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
+	printf '%s\n' '    exit 1' >> $@
+	printf '%s\n' '    ;;' >> $@
+	printf '%s\n' 'esac' >> $@
+	chmod +x $@
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+test: build
+	test -x $(BIN)
+	./$(BIN) --help >/dev/null
+	./$(BIN) version >/dev/null
+
+bench: build | $(BENCH_DIR)
+	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
+	test -s $(BENCH_FILE)
+
+$(BENCH_DIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+exec
+/bin/bash -lc "sed -n '20,60p' README.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+
+## 构建方式
+
+当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+
+项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+
+```sh
+make build
+make test
+make bench
+```
+
+对应目标如下：
+
+- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
+- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
+- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+
+随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+
+exec
+/bin/bash -lc "sed -n '18,30p' docs/todo.md" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+## Phase 0：项目基座
+
+- [x] 创建 `docs/design.md`。
+- [x] 创建 `docs/todo.md`。
+- [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+- [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+- [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+- [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+- [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+- [ ] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
+- [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
+- [ ] 创建 `tests/` 基础测试入口。
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..658b27be3f02dadc9e6382f48c97906c7270c920
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,53 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile | $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++$(BUILD_DIR):
++	mkdir -p $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build | $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++$(BENCH_DIR):
++	mkdir -p $@
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..8ad39c655576dd00f15837a18187a3fc5ee911fd
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+ 项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+ 
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+我发现 `README` 里还有一句“待 Phase 0 的构建脚本补齐后”，和现在状态冲突；同时要实跑一遍 `make`，确认 `Makefile` 里的 `$` 转义没有留下隐患。先执行验证，再按结果做一次最小修正。
+exec
+/bin/bash -lc 'make build' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 2 in 0ms:
+make: Circular build/webrtc-uya <- build dependency dropped.
+rm -f build/webrtc-uya
+printf '%s\n' '#!/usr/bin/env bash' > build/webrtc-uya
+/bin/bash: line 1: build/webrtc-uya: No such file or directory
+make: *** [Makefile:16: build/webrtc-uya] Error 1
+
+exec
+/bin/bash -lc 'make test' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 2 in 0ms:
+rm -f build/webrtc-uya
+make: Circular build/webrtc-uya <- build dependency dropped.
+printf '%s\n' '#!/usr/bin/env bash' > build/webrtc-uya
+/bin/bash: line 1: build/webrtc-uya: No such file or directory
+make: *** [Makefile:16: build/webrtc-uya] Error 1
+
+exec
+/bin/bash -lc 'make bench' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 2 in 0ms:
+rm -f build/webrtc-uya
+make: Circular build/webrtc-uya <- build dependency dropped.
+printf '%s\n' '#!/usr/bin/env bash' > build/webrtc-uya
+/bin/bash: line 1: build/webrtc-uya: No such file or directory
+make: *** [Makefile:16: build/webrtc-uya] Error 1
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..658b27be3f02dadc9e6382f48c97906c7270c920
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,53 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile | $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++$(BUILD_DIR):
++	mkdir -p $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build | $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++$(BENCH_DIR):
++	mkdir -p $@
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..8ad39c655576dd00f15837a18187a3fc5ee911fd
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,7 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+ 项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
+ 
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+第一次验证暴露了一个明确问题：`build` 这个目标名和 `build/` 目录重名，导致 GNU Make 把目录依赖解析成循环依赖。这个属于纯构建配置缺陷，我现在只修这个点并顺手修正 `README` 里残留的过时措辞。
+apply patch
+patch: completed
+/media/winger/_dde_data/winger/uya/webrtc/Makefile
+/media/winger/_dde_data/winger/uya/webrtc/README.md
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..894e507496bdb88a6f63c964e0a048c320a61e94
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,49 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..894e507496bdb88a6f63c964e0a048c320a61e94
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,49 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+目录冲突已去掉。现在重新跑 `make build`、`make test`、`make bench`，如果还有问题，就只继续修 `Makefile` 本身，不再扩任何文件。
+exec
+/bin/bash -lc 'make build' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+mkdir -p build
+rm -f build/webrtc-uya
+printf '%s\n' '#!/usr/bin/env bash' > build/webrtc-uya
+printf '%s\n' 'set -euo pipefail' >> build/webrtc-uya
+printf '%s\n' >> build/webrtc-uya
+printf '%s\n' 'case "${1:-}" in' >> build/webrtc-uya
+printf '%s\n' '  ""|--help|-h)' >> build/webrtc-uya
+printf '%s\n' "    printf '%s\\n' \\" >> build/webrtc-uya
+printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> build/webrtc-uya
+printf '%s\n' "      'Usage:' \\" >> build/webrtc-uya
+printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> build/webrtc-uya
+printf '%s\n' "      '  webrtc-uya version'" >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' '  version)' >> build/webrtc-uya
+printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' '  *)' >> build/webrtc-uya
+printf '%s\n' "    printf 'unknown command: %s\\n' \"\$1\" >&2" >> build/webrtc-uya
+printf '%s\n' '    exit 1' >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' 'esac' >> build/webrtc-uya
+chmod +x build/webrtc-uya
+
+exec
+/bin/bash -lc 'make test' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 2 in 0ms:
+mkdir -p build
+rm -f build/webrtc-uya
+printf '%s\n' '#!/usr/bin/env bash' > build/webrtc-uya
+printf '%s\n' 'set -euo pipefail' >> build/webrtc-uya
+printf '%s\n' >> build/webrtc-uya
+printf '%s\n' 'case "${1:-}" in' >> build/webrtc-uya
+printf '%s\n' '  ""|--help|-h)' >> build/webrtc-uya
+printf '%s\n' "    printf '%s\\n' \\" >> build/webrtc-uya
+printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> build/webrtc-uya
+printf '%s\n' "      'Usage:' \\" >> build/webrtc-uya
+printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> build/webrtc-uya
+printf '%s\n' "      '  webrtc-uya version'" >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' '  version)' >> build/webrtc-uya
+printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' '  *)' >> build/webrtc-uya
+printf '%s\n' "    printf 'unknown command: %s\\n' \"\$1\" >&2" >> build/webrtc-uya
+printf '%s\n' '    exit 1' >> build/webrtc-uya
+printf '%s\n' '    ;;' >> build/webrtc-uya
+printf '%s\n' 'esac' >> build/webrtc-uya
+chmod +x build/webrtc-uya
+test -x build/webrtc-uya
+./build/webrtc-uya --help >/dev/null
+./build/webrtc-uya: line 8: syntax error near unexpected token `'%s\n''
+make: *** [Makefile:40: test] Error 2
+
+exec
+/bin/bash -lc 'make bench' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+mkdir -p build/benchmarks
+printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > build/benchmarks/baseline.jsonl
+test -s build/benchmarks/baseline.jsonl
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..894e507496bdb88a6f63c964e0a048c320a61e94
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,49 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+`make bench` 已经通了，问题只剩生成的占位 CLI 脚本语法错误。我先看实际生成内容，然后把 `Makefile` 的脚本模板改成更稳的形式。
+exec
+/bin/bash -lc "sed -n '1,120p' build/webrtc-uya" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+#!/usr/bin/env bash
+
+set -euo pipefail
+case "${1:-}" in
+
+  ""|--help|-h)
+case "${1:-}" in
+    printf '%s\n' \
+  ""|--help|-h)
+      'webrtc-uya placeholder CLI' \
+    printf '%s\n' \
+      'Usage:' \
+      'webrtc-uya placeholder CLI' \
+      '  webrtc-uya [--help|-h]' \
+      'Usage:' \
+      '  webrtc-uya version'
+      '  webrtc-uya [--help|-h]' \
+    ;;
+      '  webrtc-uya version'
+  version)
+    ;;
+    printf '%s\n' 'webrtc-uya 0.0.0-placeholder'
+  version)
+    ;;
+    printf '%s\n' 'webrtc-uya 0.0.0-placeholder'
+  *)
+    ;;
+    printf 'unknown command: %s\n' "$1" >&2
+  *)
+    exit 1
+    printf 'unknown command: %s\n' "$1" >&2
+    ;;
+    exit 1
+esac
+    ;;
+esac
+
+exec
+/bin/bash -lc 'bash -n build/webrtc-uya' in /media/winger/_dde_data/winger/uya/webrtc
+ exited 2 in 0ms:
+build/webrtc-uya: line 8: syntax error near unexpected token `'%s\n''
+build/webrtc-uya: line 8: `    printf '%s\n' \'
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..894e507496bdb88a6f63c964e0a048c320a61e94
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,49 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	printf '%s\n' '#!/usr/bin/env bash' > $@
++	printf '%s\n' 'set -euo pipefail' >> $@
++	printf '%s\n' >> $@
++	printf '%s\n' 'case "$${1:-}" in' >> $@
++	printf '%s\n' '  ""|--help|-h)' >> $@
++	printf '%s\n' "    printf '%s\\n' \\" >> $@
++	printf '%s\n' "      'webrtc-uya placeholder CLI' \\" >> $@
++	printf '%s\n' "      'Usage:' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya [--help|-h]' \\" >> $@
++	printf '%s\n' "      '  webrtc-uya version'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  version)' >> $@
++	printf '%s\n' "    printf '%s\\n' 'webrtc-uya 0.0.0-placeholder'" >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' '  *)' >> $@
++	printf '%s\n' "    printf 'unknown command: %s\\n' \"\$$1\" >&2" >> $@
++	printf '%s\n' '    exit 1' >> $@
++	printf '%s\n' '    ;;' >> $@
++	printf '%s\n' 'esac' >> $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+问题定位清楚了：之前那种“把带反斜杠的脚本行拆成多条 recipe”在 `make` 里不稳。我把它改成一个原子写入块，生成的脚本每一行都是完整语句，这样更符合 `make` 的执行模型。
+apply patch
+patch: completed
+/media/winger/_dde_data/winger/uya/webrtc/Makefile
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+脚本模板已改成单块输出。现在再跑完整验证；如果这次通过，就不再继续动实现范围。
+exec
+/bin/bash -lc 'make build' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+mkdir -p build
+rm -f build/webrtc-uya
+{ \
+	printf '%s\n' '#!/usr/bin/env bash'; \
+	printf '%s\n' 'set -euo pipefail'; \
+	printf '%s\n' ''; \
+	printf '%s\n' 'case "${1:-}" in'; \
+	printf '%s\n' '  ""|--help|-h)'; \
+	printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
+	printf '%s\n' '    ;;'; \
+	printf '%s\n' '  version)'; \
+	printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
+	printf '%s\n' '    ;;'; \
+	printf '%s\n' '  *)'; \
+	printf '%s\n' '    printf "unknown command: %s\n" "${1:-}" >&2'; \
+	printf '%s\n' '    exit 1'; \
+	printf '%s\n' '    ;;'; \
+	printf '%s\n' 'esac'; \
+} > build/webrtc-uya
+chmod +x build/webrtc-uya
+
+exec
+/bin/bash -lc 'make bench' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+mkdir -p build/benchmarks
+printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > build/benchmarks/baseline.jsonl
+test -s build/benchmarks/baseline.jsonl
+
+exec
+/bin/bash -lc 'make test' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+test -x build/webrtc-uya
+./build/webrtc-uya --help >/dev/null
+./build/webrtc-uya version >/dev/null
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+验证已经通过：`make build`、`make test`、`make bench` 都成功。收尾前我看一下最终 diff 和工作区状态，确保只留下这次任务相关的改动。
+exec
+/bin/bash -lc 'git status --short' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+ M .agent/state.json
+ M README.md
+ M docs/todo.md
+?? .agent/logs/2807257486309527429.log
+?? Makefile
+?? build/
+
+exec
+/bin/bash -lc 'git diff -- Makefile README.md docs/todo.md' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+diff --git a/README.md b/README.md
+index 545bdc9..a056126 100644
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@ make bench
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4..208b8c0 100644
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+exec
+/bin/bash -lc "sed -n '1,120p' build/webrtc-uya" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  ""|--help|-h)
+    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"
+    ;;
+  version)
+    printf "%s\n" "webrtc-uya 0.0.0-placeholder"
+    ;;
+  *)
+    printf "unknown command: %s\n" "${1:-}" >&2
+    exit 1
+    ;;
+esac
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+工作区里只剩三处源码/文档改动，`build/` 是验证时生成的产物。为了不把任务范围扩成“提交构建输出”，我会保留测试结论，但把这些产物清掉。
+exec
+/bin/bash -lc 'make clean' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+rm -rf build
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+构建产物已经清理，只保留配置和对应文档变更。我再看一眼状态，然后给你最终结果。
+exec
+/bin/bash -lc 'git status --short' in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+ M .agent/state.json
+ M README.md
+ M docs/todo.md
+?? .agent/logs/2807257486309527429.log
+?? Makefile
+
+exec
+/bin/bash -lc "nl -ba Makefile | sed -n '1,120p'" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+     1	SHELL := /bin/bash
+     2	
+     3	BUILD_DIR := build
+     4	BIN := $(BUILD_DIR)/webrtc-uya
+     5	BENCH_DIR := $(BUILD_DIR)/benchmarks
+     6	BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
+     7	
+     8	.PHONY: all build test bench clean
+     9	
+    10	all: build
+    11	
+    12	build: $(BIN)
+    13	
+    14	$(BIN): Makefile
+    15		mkdir -p $(BUILD_DIR)
+    16		rm -f $@
+    17		{ \
+    18			printf '%s\n' '#!/usr/bin/env bash'; \
+    19			printf '%s\n' 'set -euo pipefail'; \
+    20			printf '%s\n' ''; \
+    21			printf '%s\n' 'case "$${1:-}" in'; \
+    22			printf '%s\n' '  ""|--help|-h)'; \
+    23			printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
+    24			printf '%s\n' '    ;;'; \
+    25			printf '%s\n' '  version)'; \
+    26			printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
+    27			printf '%s\n' '    ;;'; \
+    28			printf '%s\n' '  *)'; \
+    29			printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
+    30			printf '%s\n' '    exit 1'; \
+    31			printf '%s\n' '    ;;'; \
+    32			printf '%s\n' 'esac'; \
+    33		} > $@
+    34		chmod +x $@
+    35	
+    36	test: build
+    37		test -x $(BIN)
+    38		./$(BIN) --help >/dev/null
+    39		./$(BIN) version >/dev/null
+    40	
+    41	bench: build
+    42		mkdir -p $(BENCH_DIR)
+    43		printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
+    44		test -s $(BENCH_FILE)
+    45	
+    46	clean:
+    47		rm -rf $(BUILD_DIR)
+
+exec
+/bin/bash -lc "nl -ba docs/todo.md | sed -n '20,30p'" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+    20	- [x] 创建 `docs/design.md`。
+    21	- [x] 创建 `docs/todo.md`。
+    22	- [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+    23	- [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+    24	- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+    25	- [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+    26	- [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+    27	- [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+    28	- [ ] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
+    29	- [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
+    30	- [ ] 创建 `tests/` 基础测试入口。
+
+exec
+/bin/bash -lc "nl -ba README.md | sed -n '20,50p'" in /media/winger/_dde_data/winger/uya/webrtc
+ succeeded in 0ms:
+    20	
+    21	## 构建方式
+    22	
+    23	当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+    24	
+    25	项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+    26	
+    27	```sh
+    28	make build
+    29	make test
+    30	make bench
+    31	```
+    32	
+    33	对应目标如下：
+    34	
+    35	- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
+    36	- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
+    37	- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+    38	
+    39	随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+Added the Makefile, aligned directly related docs, verified the new targets, and cleaned generated build artifacts afterward.
+  ✓ Inspect repo build expectations and current constraints
+  ✓ Add minimal Makefile and related doc updates only where directly required
+  ✓ Run build/test/bench verification and summarize changed files
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+codex
+已创建 `Makefile`，只补了这次任务所需的构建入口，没有扩到 `src/` 或其它实现。新的 [Makefile](/media/winger/_dde_data/winger/uya/webrtc/Makefile#L1) 提供 `make build`、`make test`、`make bench`、`make clean`，当前会生成占位 `build/webrtc-uya`，支持 `--help` 和 `version`，并输出占位 benchmark JSON lines。相关说明已同步到 [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md#L21)，并在 [docs/todo.md](/media/winger/_dde_data/winger/uya/webrtc/docs/todo.md#L20) 勾掉了这项待办。
+
+已运行验证：`make build`、`make test`、`make bench`，全部通过；验证后执行了 `make clean` 清理生成产物。
+
+本次修改文件：
+- [Makefile](/media/winger/_dde_data/winger/uya/webrtc/Makefile#L1)
+- [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md#L21)
+- [docs/todo.md](/media/winger/_dde_data/winger/uya/webrtc/docs/todo.md#L20)
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000000000000000000000000000000000000..73b825623c580ed87b6d78d2ace76fd7dbc28637
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,47 @@
++SHELL := /bin/bash
++
++BUILD_DIR := build
++BIN := $(BUILD_DIR)/webrtc-uya
++BENCH_DIR := $(BUILD_DIR)/benchmarks
++BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
++
++.PHONY: all build test bench clean
++
++all: build
++
++build: $(BIN)
++
++$(BIN): Makefile
++	mkdir -p $(BUILD_DIR)
++	rm -f $@
++	{ \
++		printf '%s\n' '#!/usr/bin/env bash'; \
++		printf '%s\n' 'set -euo pipefail'; \
++		printf '%s\n' ''; \
++		printf '%s\n' 'case "$${1:-}" in'; \
++		printf '%s\n' '  ""|--help|-h)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  version)'; \
++		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' '  *)'; \
++		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
++		printf '%s\n' '    exit 1'; \
++		printf '%s\n' '    ;;'; \
++		printf '%s\n' 'esac'; \
++	} > $@
++	chmod +x $@
++
++test: build
++	test -x $(BIN)
++	./$(BIN) --help >/dev/null
++	./$(BIN) version >/dev/null
++
++bench: build
++	mkdir -p $(BENCH_DIR)
++	printf '%s\n' '{"name":"placeholder","unit":"ns/op","value":0,"allocations":0}' > $(BENCH_FILE)
++	test -s $(BENCH_FILE)
++
++clean:
++	rm -rf $(BUILD_DIR)
+diff --git a/README.md b/README.md
+index 545bdc99353ac9b5d66dc9604b6199cebb927f51..a056126272e60e13f21e7f24af249def6ae334c1
+--- a/README.md
++++ b/README.md
+@@ -20,9 +20,9 @@
+ 
+ ## 构建方式
+ 
+-当前仓库还没有落地 `Makefile`、`uyabuild` 配置或 `src/` 目录，因此目前不存在可直接执行的 Uya 构建产物。这一点是当前状态，不是文档遗漏。
++当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+ 
+-项目已经约定后续统一的构建入口，待 Phase 0 的构建脚本补齐后，以以下命令作为标准接口：
++项目已经约定当前统一的构建入口，以以下命令作为标准接口：
+ 
+ ```sh
+ make build
+@@ -32,8 +32,8 @@
+ 
+ 对应目标如下：
+ 
+-- `make build`：生成 `build/webrtc-uya`。
+-- `make test`：运行基础单测与后续协议回归测试。
+-- `make bench`：输出 benchmark 基线，包含 JSON lines 结果。
++- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
++- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
++- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+ 
+-在这些构建入口落地之前，本仓库当前主要用于沉淀设计、边界约束和后续实现计划。
++随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+diff --git a/docs/todo.md b/docs/todo.md
+index 21cb7f4ff12a418a64892743aa6e2c56ce74ac94..208b8c05ecbf6c8444c43f8e1b6e7e2fedbb214b
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -21,7 +21,7 @@
+ - [x] 创建 `docs/todo.md`。
+ - [x] 根据本地 `../opus`、`../vp8` 同步 WebRTC / codec 边界文档。
+ - [x] 创建 `README.md`，说明项目目标、纯 Uya 边界、构建方式。
+-- [ ] 创建 `Makefile` 或 `uyabuild` 配置。
++- [x] 创建 `Makefile` 或 `uyabuild` 配置。
+ - [ ] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
+ - [ ] 创建 `src/webrtc/error.uya`，定义统一错误。
+ - [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+
+tokens used
+56,814
+已创建 `Makefile`，只补了这次任务所需的构建入口，没有扩到 `src/` 或其它实现。新的 [Makefile](/media/winger/_dde_data/winger/uya/webrtc/Makefile#L1) 提供 `make build`、`make test`、`make bench`、`make clean`，当前会生成占位 `build/webrtc-uya`，支持 `--help` 和 `version`，并输出占位 benchmark JSON lines。相关说明已同步到 [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md#L21)，并在 [docs/todo.md](/media/winger/_dde_data/winger/uya/webrtc/docs/todo.md#L20) 勾掉了这项待办。
+
+已运行验证：`make build`、`make test`、`make bench`，全部通过；验证后执行了 `make clean` 清理生成产物。
+
+本次修改文件：
+- [Makefile](/media/winger/_dde_data/winger/uya/webrtc/Makefile#L1)
+- [README.md](/media/winger/_dde_data/winger/uya/webrtc/README.md#L21)
+- [docs/todo.md](/media/winger/_dde_data/winger/uya/webrtc/docs/todo.md#L20)
+
+[2026-05-31 06:28:16] EXIT CODE: 0
