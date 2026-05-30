@@ -1,0 +1,76 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use std.testing.assert_eq_u64;
+use webrtc.ring;
+
+fn new_ring_queue() RingQueue {
+    return RingQueue{
+        slots: [],
+    };
+}
+
+test "ring queue preserves FIFO order across wraparound" {
+    var queue_local: RingQueue = new_ring_queue();
+    try ring_queue_init(&queue_local, 3);
+
+    try ring_queue_push(&queue_local, 11u64);
+    try ring_queue_push(&queue_local, 22u64);
+    const first: u64 = try ring_queue_pop(&queue_local);
+    try assert_eq_u64(first, 11u64);
+
+    try ring_queue_push(&queue_local, 33u64);
+    try ring_queue_push(&queue_local, 44u64);
+
+    try assert_eq_u64(try ring_queue_pop(&queue_local), 22u64);
+    try assert_eq_u64(try ring_queue_pop(&queue_local), 33u64);
+    try assert_eq_u64(try ring_queue_pop(&queue_local), 44u64);
+    try assert_eq_u64(queue_local.high_watermark, 3u64);
+    try assert_eq_u64(queue_local.push_count, 4u64);
+    try assert_eq_u64(queue_local.pop_count, 4u64);
+}
+
+test "ring queue rejects full and empty operations" {
+    var queue_local: RingQueue = new_ring_queue();
+    try ring_queue_init(&queue_local, 1);
+
+    const empty_pop: !u64 = ring_queue_pop(&queue_local);
+    try expect(empty_pop.error_id == @error_id(error.RingQueueEmpty));
+
+    try ring_queue_push(&queue_local, 99u64);
+    const full_push: !void = ring_queue_push(&queue_local, 100u64);
+    try expect(full_push.error_id == @error_id(error.RingQueueFull));
+    try assert_eq_u64(queue_local.drop_count, 1u64);
+    try assert_eq_u64(try ring_queue_peek(&queue_local), 99u64);
+    try assert_eq_u64(try ring_queue_pop(&queue_local), 99u64);
+
+    const empty_peek: !u64 = ring_queue_peek(&queue_local);
+    try expect(empty_peek.error_id == @error_id(error.RingQueueEmpty));
+}
+
+test "ring queue reset clears counters and depth" {
+    var queue_local: RingQueue = new_ring_queue();
+    try ring_queue_init(&queue_local, 2);
+
+    try ring_queue_push(&queue_local, 1u64);
+    try ring_queue_push(&queue_local, 2u64);
+    ring_queue_reset(&queue_local);
+
+    try assert_eq_i32((ring_queue_len(&queue_local) as! i32).value, 0);
+    try assert_eq_i32((ring_queue_capacity(&queue_local) as! i32).value, 2);
+    try assert_eq_u64(queue_local.push_count, 0u64);
+    try assert_eq_u64(queue_local.pop_count, 0u64);
+    try assert_eq_u64(queue_local.drop_count, 0u64);
+    try assert_eq_u64(queue_local.high_watermark, 0u64);
+    try expect(ring_queue_is_empty(&queue_local));
+    try expect(!ring_queue_is_full(&queue_local));
+}
+
+test "ring queue validates capacity bounds" {
+    var queue_local: RingQueue = new_ring_queue();
+
+    const zero_cap: !void = ring_queue_init(&queue_local, 0);
+    try expect(zero_cap.error_id == @error_id(error.RingQueueConfigInvalid));
+
+    const too_large: !void = ring_queue_init(&queue_local, RING_QUEUE_MAX_CAPACITY + 1);
+    try expect(too_large.error_id == @error_id(error.RingQueueConfigInvalid));
+}

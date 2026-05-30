@@ -36,8 +36,16 @@ $(BIN): Makefile src/main.uya src/webrtc/time.uya
 test: build
 	test -f src/main.uya
 	test -f src/webrtc/time.uya
+	test -f src/webrtc/ring.uya
+	test -f src/webrtc_ring_test.uya
 	rg -q "export fn monotonic_now" src/webrtc/time.uya
 	rg -q "CLOCK_MONOTONIC" src/webrtc/time.uya
+	rg -q "export fn ring_queue_init" src/webrtc/ring.uya
+	rg -q "export fn ring_queue_push" src/webrtc/ring.uya
+	rg -q "export fn ring_queue_pop" src/webrtc/ring.uya
+	rg -q "high_watermark" src/webrtc/ring.uya
+	rg -q 'test "ring queue preserves FIFO order across wraparound"' src/webrtc_ring_test.uya
+	rg -q 'test "ring queue rejects full and empty operations"' src/webrtc_ring_test.uya
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null

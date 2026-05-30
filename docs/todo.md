@@ -26,7 +26,7 @@
 - [x] 创建 `src/webrtc/error.uya`，定义统一错误。
 - [x] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
 - [x] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
-- [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
+- [x] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
 - [ ] 创建 `tests/` 基础测试入口。
 - [ ] 创建 `benchmarks/` 基础 benchmark 入口。
 - [ ] 创建 allocation counter / high-watermark 测试辅助。

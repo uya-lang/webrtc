@@ -1,0 +1,137 @@
+// webrtc.ring - 固定容量 bounded ring queue
+// 模块路径：src/webrtc/ring.uya → use webrtc.ring;
+
+export const RING_QUEUE_MAX_CAPACITY: usize = 4096;
+
+export error RingQueueConfigInvalid;
+export error RingQueueFull;
+export error RingQueueEmpty;
+
+// 基础 token queue：用于固定容量、无堆分配的跨线程句柄传递。
+export struct RingQueue {
+    slots: [u64: RING_QUEUE_MAX_CAPACITY] = [],
+    capacity: usize = 0,
+    head: usize = 0,
+    tail: usize = 0,
+    count: usize = 0,
+    push_count: u64 = 0u64,
+    pop_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+fn ring_queue_validate(queue: &RingQueue) !void {
+    if queue == null {
+        return error.RingQueueConfigInvalid;
+    }
+    if queue.capacity == 0 || queue.capacity > RING_QUEUE_MAX_CAPACITY {
+        return error.RingQueueConfigInvalid;
+    }
+    if queue.head >= queue.capacity || queue.tail >= queue.capacity {
+        return error.RingQueueConfigInvalid;
+    }
+    if queue.count > queue.capacity {
+        return error.RingQueueConfigInvalid;
+    }
+}
+
+fn ring_queue_next_index(queue: &RingQueue, index: usize) usize {
+    const next: usize = index + 1;
+    if next >= queue.capacity {
+        return 0;
+    }
+    return next;
+}
+
+export fn ring_queue_init(queue: &RingQueue, capacity: usize) !void {
+    if queue == null {
+        return error.RingQueueConfigInvalid;
+    }
+    if capacity == 0 || capacity > RING_QUEUE_MAX_CAPACITY {
+        return error.RingQueueConfigInvalid;
+    }
+
+    queue.capacity = capacity;
+    ring_queue_reset(queue);
+}
+
+export fn ring_queue_reset(queue: &RingQueue) void {
+    if queue == null {
+        return;
+    }
+
+    queue.head = 0;
+    queue.tail = 0;
+    queue.count = 0;
+    queue.push_count = 0u64;
+    queue.pop_count = 0u64;
+    queue.drop_count = 0u64;
+    queue.high_watermark = 0u64;
+}
+
+export fn ring_queue_capacity(queue: &RingQueue) usize {
+    if queue == null {
+        return 0;
+    }
+    return queue.capacity;
+}
+
+export fn ring_queue_len(queue: &RingQueue) usize {
+    if queue == null {
+        return 0;
+    }
+    return queue.count;
+}
+
+export fn ring_queue_is_empty(queue: &RingQueue) bool {
+    if queue == null {
+        return true;
+    }
+    return queue.count == 0;
+}
+
+export fn ring_queue_is_full(queue: &RingQueue) bool {
+    if queue == null || queue.capacity == 0 {
+        return false;
+    }
+    return queue.count == queue.capacity;
+}
+
+export fn ring_queue_push(queue: &RingQueue, value: u64) !void {
+    try ring_queue_validate(queue);
+    if queue.count == queue.capacity {
+        queue.drop_count = queue.drop_count + 1u64;
+        return error.RingQueueFull;
+    }
+
+    queue.slots[queue.tail] = value;
+    queue.tail = ring_queue_next_index(queue, queue.tail);
+    queue.count = queue.count + 1;
+    queue.push_count = queue.push_count + 1u64;
+
+    const depth: u64 = queue.count as u64;
+    if depth > queue.high_watermark {
+        queue.high_watermark = depth;
+    }
+}
+
+export fn ring_queue_peek(queue: &RingQueue) !u64 {
+    try ring_queue_validate(queue);
+    if queue.count == 0 {
+        return error.RingQueueEmpty;
+    }
+    return queue.slots[queue.head];
+}
+
+export fn ring_queue_pop(queue: &RingQueue) !u64 {
+    try ring_queue_validate(queue);
+    if queue.count == 0 {
+        return error.RingQueueEmpty;
+    }
+
+    const value: u64 = queue.slots[queue.head];
+    queue.head = ring_queue_next_index(queue, queue.head);
+    queue.count = queue.count - 1;
+    queue.pop_count = queue.pop_count + 1u64;
+    return value;
+}
