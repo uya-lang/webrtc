@@ -11,7 +11,7 @@ all: build
 
 build: $(BIN)
 
-$(BIN): Makefile src/main.uya
+$(BIN): Makefile src/main.uya src/webrtc/time.uya
 	mkdir -p $(BUILD_DIR)
 	rm -f $@
 	{ \
@@ -35,6 +35,9 @@ $(BIN): Makefile src/main.uya
 
 test: build
 	test -f src/main.uya
+	test -f src/webrtc/time.uya
+	rg -q "export fn monotonic_now" src/webrtc/time.uya
+	rg -q "CLOCK_MONOTONIC" src/webrtc/time.uya
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null

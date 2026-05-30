@@ -1,0 +1,84 @@
+use osal.CLOCK_MONOTONIC;
+use syscall.TimeSpec;
+use syscall.sys_clock_gettime;
+
+export const NSEC_PER_USEC: u64 = 1000u64;
+export const USEC_PER_MSEC: u64 = 1000u64;
+export const NSEC_PER_MSEC: u64 = 1000000u64;
+export const NSEC_PER_SEC: u64 = 1000000000u64;
+const MONOTONIC_MAX_NS: u64 = 0xffffffffffffffffu64;
+
+export error MonotonicClockFailed;
+export error MonotonicClockOutOfRange;
+
+// MonotonicInstant stores an absolute monotonic timestamp in nanoseconds.
+export struct MonotonicInstant {
+    ns: u64,
+}
+
+fn monotonic_timespec_to_ns(ts: &TimeSpec) !u64 {
+    if ts.tv_sec < 0i64 {
+        return error.MonotonicClockOutOfRange;
+    }
+    if ts.tv_nsec < 0i64 || ts.tv_nsec >= NSEC_PER_SEC as i64 {
+        return error.MonotonicClockOutOfRange;
+    }
+
+    const seconds: u64 = ts.tv_sec as u64;
+    const nanos: u64 = ts.tv_nsec as u64;
+    if seconds > (MONOTONIC_MAX_NS - nanos) / NSEC_PER_SEC {
+        return error.MonotonicClockOutOfRange;
+    }
+    return seconds * NSEC_PER_SEC + nanos;
+}
+
+fn monotonic_snapshot() !TimeSpec {
+    var ts: TimeSpec = TimeSpec{ tv_sec: 0i64, tv_nsec: 0i64 };
+    _ = sys_clock_gettime(CLOCK_MONOTONIC, &ts) catch {
+        return error.MonotonicClockFailed;
+    };
+    return ts;
+}
+
+export fn monotonic_now() !MonotonicInstant {
+    const ts: TimeSpec = try monotonic_snapshot();
+    const ns: u64 = try monotonic_timespec_to_ns(&ts);
+    return MonotonicInstant{ ns: ns };
+}
+
+export fn monotonic_now_ns() !u64 {
+    const now: MonotonicInstant = try monotonic_now();
+    return now.ns;
+}
+
+export fn monotonic_now_us() !u64 {
+    const now_ns: u64 = try monotonic_now_ns();
+    return now_ns / NSEC_PER_USEC;
+}
+
+export fn monotonic_elapsed_ns(start: MonotonicInstant, end: MonotonicInstant) u64 {
+    if end.ns <= start.ns {
+        return 0u64;
+    }
+    return end.ns - start.ns;
+}
+
+export fn monotonic_elapsed_us(start: MonotonicInstant, end: MonotonicInstant) u64 {
+    return monotonic_elapsed_ns(start, end) / NSEC_PER_USEC;
+}
+
+export fn monotonic_elapsed_since_ns(start: MonotonicInstant) !u64 {
+    const now: MonotonicInstant = try monotonic_now();
+    return monotonic_elapsed_ns(start, now);
+}
+
+export fn monotonic_deadline_after_ns(start: MonotonicInstant, delta_ns: u64) MonotonicInstant {
+    if delta_ns > MONOTONIC_MAX_NS - start.ns {
+        return MonotonicInstant{ ns: MONOTONIC_MAX_NS };
+    }
+    return MonotonicInstant{ ns: start.ns + delta_ns };
+}
+
+export fn monotonic_deadline_reached(now: MonotonicInstant, deadline: MonotonicInstant) bool {
+    return now.ns >= deadline.ns;
+}

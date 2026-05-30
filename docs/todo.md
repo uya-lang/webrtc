@@ -24,7 +24,7 @@
 - [x] 创建 `Makefile` 或 `uyabuild` 配置。
 - [x] 创建 `src/main.uya`，提供 CLI 占位：`--help`、`version`。
 - [x] 创建 `src/webrtc/error.uya`，定义统一错误。
-- [ ] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
+- [x] 创建 `src/webrtc/time.uya`，封装 monotonic clock。
 - [ ] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
 - [ ] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
 - [ ] 创建 `tests/` 基础测试入口。
