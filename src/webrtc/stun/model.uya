@@ -71,10 +71,39 @@ export struct StunMessageBuilder {
     transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [],
 }
 
+export fn stun_attribute_iterator_make() StunAttributeIterator {
+    var bytes: [byte: 1] = [];
+    return StunAttributeIterator{
+        bytes: bytes[0:0],
+        cursor: 0usize,
+    };
+}
+
+export fn stun_xor_mapped_address_make() StunXorMappedAddress {
+    var address_bytes: [byte: 16] = [];
+    return StunXorMappedAddress{
+        family: 0u8,
+        port: 0u16,
+        address_bytes: address_bytes,
+        address_len: 0usize,
+    };
+}
+
+export fn stun_message_builder_make() StunMessageBuilder {
+    var bytes: [byte: 1] = [];
+    var transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    return StunMessageBuilder{
+        bytes: bytes[0:0],
+        cursor: 0usize,
+        message_type: 0u16,
+        transaction_id: transaction_id,
+    };
+}
+
 export fn stun_message_type_encode(method: u16, message_class: u8) u16 {
     return (method & 0x000Fu16)
-        | ((method & 0x0070u16) << 1u16)
-        | ((method & 0x0F80u16) << 2u16)
-        | (((message_class as u16) & 0x0001u16) << 4u16)
-        | (((message_class as u16) & 0x0002u16) << 7u16);
+        | ((method & 0x0070u16) << 1)
+        | ((method & 0x0F80u16) << 2)
+        | (((message_class as u16) & 0x0001u16) << 4)
+        | (((message_class as u16) & 0x0002u16) << 7);
 }

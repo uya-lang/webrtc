@@ -77,6 +77,57 @@ export struct IceAgent {
     disconnected_timeout_ms: u32 = 5000u32,
 }
 
+export fn ice_credentials_make() IceCredentials {
+    var ufrag: [byte: ICE_MAX_UFRAG_BYTES] = [];
+    var pwd: [byte: ICE_MAX_PASSWORD_BYTES] = [];
+    return IceCredentials{
+        ufrag: ufrag,
+        ufrag_len: 0usize,
+        pwd: pwd,
+        pwd_len: 0usize,
+    };
+}
+
+export fn ice_connectivity_check_transaction_make() IceConnectivityCheckTransaction {
+    var transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    return IceConnectivityCheckTransaction{
+        pair_index: ICE_CANDIDATE_INDEX_NONE,
+        local_candidate_index: ICE_CANDIDATE_INDEX_NONE,
+        remote_candidate_index: ICE_CANDIDATE_INDEX_NONE,
+        request_priority: 0u32,
+        use_candidate: false,
+        sent_at_us: 0u64,
+        transaction_id: transaction_id,
+    };
+}
+
+export fn ice_agent_make() IceAgent {
+    const local_credentials: IceCredentials = ice_credentials_make();
+    const remote_credentials: IceCredentials = ice_credentials_make();
+    var local_candidates: [IceCandidate: ICE_MAX_LOCAL_CANDIDATES] = [];
+    var remote_candidates: [IceCandidate: ICE_MAX_REMOTE_CANDIDATES] = [];
+    var checklist: [CandidatePair: ICE_MAX_CANDIDATE_PAIRS] = [];
+    return IceAgent{
+        role: ICE_AGENT_ROLE_UNKNOWN,
+        state: ICE_AGENT_STATE_NEW,
+        gathering_state: ICE_GATHERING_STATE_NEW,
+        nomination_mode: ICE_NOMINATION_MODE_REGULAR,
+        tie_breaker: 0u64,
+        generation: 0u32,
+        local_credentials: local_credentials,
+        remote_credentials: remote_credentials,
+        local_candidates: local_candidates,
+        local_candidate_count: 0usize,
+        remote_candidates: remote_candidates,
+        remote_candidate_count: 0usize,
+        checklist: checklist,
+        checklist_count: 0usize,
+        selected_pair_index: ICE_CANDIDATE_INDEX_NONE,
+        consent_interval_ms: 15000u32,
+        disconnected_timeout_ms: 5000u32,
+    };
+}
+
 fn ice_remote_candidate_transport_is_supported(transport: u8) bool {
     return transport == ICE_CANDIDATE_TRANSPORT_UDP
         || transport == ICE_CANDIDATE_TRANSPORT_TCP_ACTIVE
@@ -108,7 +159,7 @@ fn ice_transport_address_has_valid_bounds(address: &IceTransportAddress) bool {
     return address.port != 0u16;
 }
 
-fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+fn ice_agent_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
         return false;
     }
@@ -142,7 +193,7 @@ fn ice_u64_delta_saturating_u32(end_us: u64, start_us: u64) u32 {
     return delta as u32;
 }
 
-fn ice_transport_address_copy(dst: &IceTransportAddress, src: &IceTransportAddress) !void {
+fn ice_agent_transport_address_copy(dst: &IceTransportAddress, src: &IceTransportAddress) !void {
     if dst == null || src == null || !ice_transport_address_has_valid_bounds(src) {
         return error.InvalidPacket;
     }
@@ -194,9 +245,9 @@ fn ice_remote_candidate_copy(dst: &IceCandidate, src: &IceCandidate) !void {
     dst.transport = src.transport;
     dst.candidate_type = src.candidate_type;
     dst.priority = src.priority;
-    try ice_transport_address_copy(&dst.address, &src.address);
+    try ice_agent_transport_address_copy(&dst.address, &src.address);
     if ice_candidate_has_related_address(src) {
-        try ice_transport_address_copy(&dst.related_address, &src.related_address);
+        try ice_agent_transport_address_copy(&dst.related_address, &src.related_address);
     }
     dst.base_candidate_index = ICE_CANDIDATE_INDEX_NONE;
     dst.network_id = src.network_id;
@@ -276,24 +327,36 @@ fn ice_connectivity_check_transaction_has_current_pair(
     if agent == null || transaction == null {
         return false;
     }
-    if (transaction.pair_index as usize) >= agent.checklist_count {
+    const pair_slot: usize = transaction.pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
         return false;
     }
-    if (transaction.local_candidate_index as usize) >= agent.local_candidate_count {
+    if pair_slot >= agent.checklist_count {
         return false;
     }
-    if (transaction.remote_candidate_index as usize) >= agent.remote_candidate_count {
+    const local_slot: usize = transaction.local_candidate_index as usize;
+    if local_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return false;
+    }
+    if local_slot >= agent.local_candidate_count {
+        return false;
+    }
+    const remote_slot: usize = transaction.remote_candidate_index as usize;
+    if remote_slot >= ICE_MAX_REMOTE_CANDIDATES {
+        return false;
+    }
+    if remote_slot >= agent.remote_candidate_count {
         return false;
     }
 
-    const pair: &CandidatePair = &agent.checklist[transaction.pair_index as usize];
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
     if !ice_connectivity_check_transaction_matches_pair(transaction, pair) {
         return false;
     }
 
     return candidate_pair_can_form(
-        &agent.local_candidates[transaction.local_candidate_index as usize],
-        &agent.remote_candidates[transaction.remote_candidate_index as usize],
+        &agent.local_candidates[local_slot],
+        &agent.remote_candidates[remote_slot],
     );
 }
 
@@ -329,6 +392,13 @@ fn ice_connectivity_check_write_username(
     return username_len;
 }
 
+fn ice_connectivity_check_result_make(message_class: u8, error_code: u16) IceConnectivityCheckResult {
+    return IceConnectivityCheckResult{
+        message_class: message_class,
+        error_code: error_code,
+    };
+}
+
 fn ice_connectivity_check_parse_response(
     packet: &[byte],
     expected_transaction_id: &[byte],
@@ -346,7 +416,7 @@ fn ice_connectivity_check_parse_response(
         && header.message_class != STUN_MESSAGE_CLASS_ERROR_RESPONSE {
         return error.InvalidPacket;
     }
-    if !ice_bytes_equal(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], expected_transaction_id) {
+    if !ice_agent_bytes_equal(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], expected_transaction_id) {
         return error.InvalidPacket;
     }
 
@@ -355,11 +425,9 @@ fn ice_connectivity_check_parse_response(
     var found_fingerprint: bool = false;
     var found_xor_mapped: bool = false;
     var found_error_code: bool = false;
-    var result: IceConnectivityCheckResult = IceConnectivityCheckResult{
-        message_class: header.message_class,
-    };
+    var result: IceConnectivityCheckResult = ice_connectivity_check_result_make(header.message_class, 0u16);
 
-    var iter: StunAttributeIterator = StunAttributeIterator{};
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
     stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
 
     while iter.cursor < iter.bytes.len {
@@ -396,7 +464,7 @@ fn ice_connectivity_check_parse_response(
         return error.InvalidPacket;
     }
 
-    return result;
+    return ice_connectivity_check_result_make(result.message_class, result.error_code);
 }
 
 fn ice_agent_role_supports_checklist(role: u8) bool {
@@ -430,7 +498,11 @@ export fn ice_agent_clear_checklist(agent: &IceAgent) void {
 
     if agent.selected_pair_index != ICE_CANDIDATE_INDEX_NONE
         && (agent.selected_pair_index as usize) < agent.checklist_count {
-        agent.checklist[agent.selected_pair_index as usize].selected = false;
+        const selected_pair_slot: usize = agent.selected_pair_index as usize;
+        if selected_pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+            return;
+        }
+        agent.checklist[selected_pair_slot].selected = false;
     }
 
     agent.checklist_count = 0;
@@ -472,10 +544,14 @@ export fn ice_agent_add_remote_candidate(agent: &IceAgent, candidate: &IceCandid
         return error.UnsupportedCapability;
     }
 
-    try ice_remote_candidate_copy(&agent.remote_candidates[agent.remote_candidate_count], candidate);
-    agent.remote_candidate_count = agent.remote_candidate_count + 1;
+    const insert_index: usize = agent.remote_candidate_count;
+    if insert_index >= ICE_MAX_REMOTE_CANDIDATES {
+        return error.UnsupportedCapability;
+    }
+    try ice_remote_candidate_copy(&agent.remote_candidates[insert_index], candidate);
+    agent.remote_candidate_count = insert_index + 1usize;
     ice_agent_clear_checklist(agent);
-    return (agent.remote_candidate_count - 1) as u16;
+    return insert_index as u16;
 }
 
 export fn ice_agent_rebuild_checklist(agent: &IceAgent) !usize {
@@ -506,7 +582,12 @@ export fn ice_agent_rebuild_checklist(agent: &IceAgent) !usize {
                     return error.UnsupportedCapability;
                 }
 
-                var pair: &CandidatePair = &agent.checklist[agent.checklist_count];
+                const pair_slot: usize = agent.checklist_count;
+                if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+                    ice_agent_clear_checklist(agent);
+                    return error.UnsupportedCapability;
+                }
+                var pair: &CandidatePair = &agent.checklist[pair_slot];
                 candidate_pair_init(pair, local_index as u16, remote_index as u16);
                 pair.priority = try candidate_pair_compute_priority(
                     local_candidate,
@@ -541,22 +622,30 @@ export fn ice_agent_select_checklist_pair(agent: &IceAgent, pair_index: u16, nom
     if agent == null {
         return error.InvalidPacket;
     }
-    if (pair_index as usize) >= agent.checklist_count {
+    const pair_slot: usize = pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
         return error.InvalidPacket;
     }
-    if agent.checklist[pair_index as usize].state != ICE_CANDIDATE_PAIR_STATE_SUCCEEDED {
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+    if agent.checklist[pair_slot].state != ICE_CANDIDATE_PAIR_STATE_SUCCEEDED {
         return error.InvalidPacket;
     }
 
     if agent.selected_pair_index != ICE_CANDIDATE_INDEX_NONE
         && (agent.selected_pair_index as usize) < agent.checklist_count {
-        agent.checklist[agent.selected_pair_index as usize].selected = false;
+        const selected_pair_slot: usize = agent.selected_pair_index as usize;
+        if selected_pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+            return error.InvalidPacket;
+        }
+        agent.checklist[selected_pair_slot].selected = false;
     }
 
-    agent.checklist[pair_index as usize].valid = true;
-    agent.checklist[pair_index as usize].selected = true;
+    agent.checklist[pair_slot].valid = true;
+    agent.checklist[pair_slot].selected = true;
     if nominated {
-        agent.checklist[pair_index as usize].nominated = true;
+        agent.checklist[pair_slot].nominated = true;
     }
     agent.selected_pair_index = pair_index;
 }
@@ -568,10 +657,14 @@ export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {
     if agent.selected_pair_index == ICE_CANDIDATE_INDEX_NONE {
         return false;
     }
-    if (agent.selected_pair_index as usize) >= agent.checklist_count {
+    const selected_pair_slot: usize = agent.selected_pair_index as usize;
+    if selected_pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
         return false;
     }
-    return candidate_pair_is_selected(&agent.checklist[agent.selected_pair_index as usize]);
+    if selected_pair_slot >= agent.checklist_count {
+        return false;
+    }
+    return candidate_pair_is_selected(&agent.checklist[selected_pair_slot]);
 }
 
 export fn ice_connectivity_check_transaction_init(
@@ -597,18 +690,29 @@ export fn ice_connectivity_check_transaction_init(
         || !ice_credentials_is_configured(&agent.remote_credentials) {
         return error.InvalidPacket;
     }
-    if (pair_index as usize) >= agent.checklist_count {
+    const pair_slot: usize = pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
         return error.InvalidPacket;
     }
 
-    const pair: &CandidatePair = &agent.checklist[pair_index as usize];
-    if (pair.local_candidate_index as usize) >= agent.local_candidate_count
-        || (pair.remote_candidate_index as usize) >= agent.remote_candidate_count {
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
+    const local_slot: usize = pair.local_candidate_index as usize;
+    const remote_slot: usize = pair.remote_candidate_index as usize;
+    if local_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if remote_slot >= ICE_MAX_REMOTE_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if local_slot >= agent.local_candidate_count || remote_slot >= agent.remote_candidate_count {
         return error.InvalidPacket;
     }
 
-    const local_candidate: &IceCandidate = &agent.local_candidates[pair.local_candidate_index as usize];
-    const remote_candidate: &IceCandidate = &agent.remote_candidates[pair.remote_candidate_index as usize];
+    const local_candidate: &IceCandidate = &agent.local_candidates[local_slot];
+    const remote_candidate: &IceCandidate = &agent.remote_candidates[remote_slot];
     if !candidate_pair_can_form(local_candidate, remote_candidate) || local_candidate.priority == 0u32 {
         return error.InvalidPacket;
     }
@@ -649,7 +753,7 @@ export fn ice_connectivity_check_build_binding_request(
         &agent.remote_credentials,
     );
 
-    var builder: StunMessageBuilder = StunMessageBuilder{};
+    var builder: StunMessageBuilder = stun_message_builder_make();
     try stun_builder_init_binding_request(&builder, packet, transaction.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_username(&builder, username[0:username_len]);
     try stun_builder_append_priority(&builder, transaction.request_priority);
@@ -670,7 +774,11 @@ export fn ice_connectivity_check_build_binding_request(
     try stun_builder_append_fingerprint(&builder);
 
     const packet_len: usize = try stun_builder_finish(&builder);
-    candidate_pair_note_check_sent(&agent.checklist[transaction.pair_index as usize], now_us);
+    const pair_slot: usize = transaction.pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    candidate_pair_note_check_sent(&agent.checklist[pair_slot], now_us);
     transaction.sent_at_us = now_us;
     agent.state = ICE_AGENT_STATE_CHECKING;
     return packet_len;
@@ -690,7 +798,11 @@ export fn ice_agent_connectivity_check_handle_response(
         return error.InvalidPacket;
     }
 
-    const pair: &CandidatePair = &agent.checklist[transaction.pair_index as usize];
+    const pair_slot: usize = transaction.pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
     if pair.request_count == 0u32 || pair.last_request_sent_at_us != transaction.sent_at_us {
         return error.InvalidPacket;
     }
@@ -707,14 +819,14 @@ export fn ice_agent_connectivity_check_handle_response(
             (agent.consent_interval_ms as u64) * 1000u64,
         );
         candidate_pair_note_check_succeeded(
-            &agent.checklist[transaction.pair_index as usize],
+            &agent.checklist[pair_slot],
             now_us,
             ice_u64_delta_saturating_u32(now_us, transaction.sent_at_us),
             consent_deadline_us,
         );
     } else {
-        candidate_pair_note_check_failed(&agent.checklist[transaction.pair_index as usize], now_us);
+        candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
     }
 
-    return result;
+    return ice_connectivity_check_result_make(result.message_class, result.error_code);
 }

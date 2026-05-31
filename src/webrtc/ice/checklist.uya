@@ -30,12 +30,32 @@ fn candidate_pair_counter_increment(counter: &u32) void {
     if counter == null {
         return;
     }
-    if counter != 0xFFFFFFFFu32 {
-        counter = counter + 1u32;
+    if *counter != 0xFFFFFFFFu32 {
+        *counter = *counter + 1u32;
     }
 }
 
-fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+fn candidate_pair_copy(dst: &CandidatePair, src: &CandidatePair) void {
+    if dst == null || src == null {
+        return;
+    }
+
+    dst.local_candidate_index = src.local_candidate_index;
+    dst.remote_candidate_index = src.remote_candidate_index;
+    dst.state = src.state;
+    dst.priority = src.priority;
+    dst.nominated = src.nominated;
+    dst.valid = src.valid;
+    dst.selected = src.selected;
+    dst.request_count = src.request_count;
+    dst.response_count = src.response_count;
+    dst.last_request_sent_at_us = src.last_request_sent_at_us;
+    dst.last_response_received_at_us = src.last_response_received_at_us;
+    dst.last_rtt_us = src.last_rtt_us;
+    dst.consent_deadline_us = src.consent_deadline_us;
+}
+
+fn ice_checklist_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
         return false;
     }
@@ -57,7 +77,7 @@ fn ice_candidate_foundation_equal(lhs: &IceCandidate, rhs: &IceCandidate) bool {
     if lhs.foundation_len != rhs.foundation_len {
         return false;
     }
-    return ice_bytes_equal(lhs.foundation[0:lhs.foundation_len], rhs.foundation[0:rhs.foundation_len]);
+    return ice_checklist_bytes_equal(lhs.foundation[0:lhs.foundation_len], rhs.foundation[0:rhs.foundation_len]);
 }
 
 fn candidate_pair_indexes_are_valid(
@@ -99,10 +119,21 @@ export fn candidate_pair_init(pair: &CandidatePair, local_candidate_index: u16, 
 export fn candidate_pair_priority(controlling_priority: u32, controlled_priority: u32) u64 {
     const g: u64 = controlling_priority as u64;
     const d: u64 = controlled_priority as u64;
-    const min_priority: u64 = if g < d { g } else { d };
-    const max_priority: u64 = if g > d { g } else { d };
-    const tie_breaker: u64 = if g > d { 1u64 } else { 0u64 };
-    return (min_priority << 32u32) + (max_priority << 1u32) + tie_breaker;
+    var min_priority: u64 = d;
+    if g < d {
+        min_priority = g;
+    }
+
+    var max_priority: u64 = d;
+    if g > d {
+        max_priority = g;
+    }
+
+    var tie_breaker: u64 = 0u64;
+    if g > d {
+        tie_breaker = 1u64;
+    }
+    return (min_priority << 32) + (max_priority << 1) + tie_breaker;
 }
 
 export fn candidate_pair_can_form(local_candidate: &IceCandidate, remote_candidate: &IceCandidate) bool {
@@ -133,16 +164,12 @@ export fn candidate_pair_compute_priority(
         return error.InvalidPacket;
     }
 
-    const controlling_priority: u32 = if local_is_controlling {
-        local_candidate.priority
-    } else {
-        remote_candidate.priority
-    };
-    const controlled_priority: u32 = if local_is_controlling {
-        remote_candidate.priority
-    } else {
-        local_candidate.priority
-    };
+    var controlling_priority: u32 = remote_candidate.priority;
+    var controlled_priority: u32 = local_candidate.priority;
+    if local_is_controlling {
+        controlling_priority = local_candidate.priority;
+        controlled_priority = remote_candidate.priority;
+    }
     return candidate_pair_priority(controlling_priority, controlled_priority);
 }
 
@@ -181,19 +208,20 @@ export fn candidate_pair_sort_by_priority_desc(pairs: &CandidatePair, pair_count
         return;
     }
 
+    var candidate: CandidatePair = CandidatePair{};
     var pair_index: usize = 1;
     while pair_index < pair_count {
-        const candidate: CandidatePair = pairs[pair_index];
+        candidate_pair_copy(&candidate, &pairs[pair_index]);
         var insert_index: usize = pair_index;
         while insert_index > 0usize {
             const previous_index: usize = insert_index - 1usize;
             if pairs[previous_index].priority >= candidate.priority {
                 break;
             }
-            pairs[insert_index] = pairs[previous_index];
+            candidate_pair_copy(&pairs[insert_index], &pairs[previous_index]);
             insert_index = previous_index;
         }
-        pairs[insert_index] = candidate;
+        candidate_pair_copy(&pairs[insert_index], &candidate);
         pair_index = pair_index + 1;
     }
 }
@@ -237,11 +265,11 @@ export fn candidate_pair_seed_initial_states(
             previous_index = previous_index + 1;
         }
 
-        pairs[pair_index].state = if has_waiting_pair_for_foundation {
-            ICE_CANDIDATE_PAIR_STATE_FROZEN
+        if has_waiting_pair_for_foundation {
+            pairs[pair_index].state = ICE_CANDIDATE_PAIR_STATE_FROZEN;
         } else {
-            ICE_CANDIDATE_PAIR_STATE_WAITING
-        };
+            pairs[pair_index].state = ICE_CANDIDATE_PAIR_STATE_WAITING;
+        }
         pair_index = pair_index + 1;
     }
 }

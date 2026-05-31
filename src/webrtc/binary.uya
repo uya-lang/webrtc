@@ -6,6 +6,8 @@ export error ByteWriterOutOfBounds;
 export error IntegerOverflow;
 export error InvalidAlignment;
 
+const BINARY_MAX_USIZE: usize = ~(0 as usize);
+
 export struct ByteReader {
     bytes: &[byte] = [],
     cursor: usize = 0,
@@ -50,14 +52,14 @@ fn byte_writer_reserve(writer: &ByteWriter, len: usize) !usize {
 }
 
 export fn checked_add_usize(lhs: usize, rhs: usize) !usize {
-    if rhs > @max_value(usize) - lhs {
+    if rhs > BINARY_MAX_USIZE - lhs {
         return error.IntegerOverflow;
     }
     return lhs + rhs;
 }
 
 export fn checked_mul_usize(lhs: usize, rhs: usize) !usize {
-    if lhs != 0 && rhs > @max_value(usize) / lhs {
+    if lhs != 0 && rhs > BINARY_MAX_USIZE / lhs {
         return error.IntegerOverflow;
     }
     return lhs * rhs;
@@ -75,16 +77,16 @@ export fn read_be_u16(src: &[byte]) !u16 {
     if src.len < 2 {
         return error.ByteReaderTruncated;
     }
-    return ((src[0] as u16) << 8u16) | (src[1] as u16);
+    return ((src[0] as u16) << 8) | (src[1] as u16);
 }
 
 export fn read_be_u32(src: &[byte]) !u32 {
     if src.len < 4 {
         return error.ByteReaderTruncated;
     }
-    return ((src[0] as u32) << 24u32)
-        | ((src[1] as u32) << 16u32)
-        | ((src[2] as u32) << 8u32)
+    return ((src[0] as u32) << 24)
+        | ((src[1] as u32) << 16)
+        | ((src[2] as u32) << 8)
         | (src[3] as u32);
 }
 
@@ -92,13 +94,13 @@ export fn read_be_u64(src: &[byte]) !u64 {
     if src.len < 8 {
         return error.ByteReaderTruncated;
     }
-    return ((src[0] as u64) << 56u64)
-        | ((src[1] as u64) << 48u64)
-        | ((src[2] as u64) << 40u64)
-        | ((src[3] as u64) << 32u64)
-        | ((src[4] as u64) << 24u64)
-        | ((src[5] as u64) << 16u64)
-        | ((src[6] as u64) << 8u64)
+    return ((src[0] as u64) << 56)
+        | ((src[1] as u64) << 48)
+        | ((src[2] as u64) << 40)
+        | ((src[3] as u64) << 32)
+        | ((src[4] as u64) << 24)
+        | ((src[5] as u64) << 16)
+        | ((src[6] as u64) << 8)
         | (src[7] as u64);
 }
 
@@ -106,7 +108,7 @@ export fn read_le_u16(src: &[byte]) !u16 {
     if src.len < 2 {
         return error.ByteReaderTruncated;
     }
-    return (src[0] as u16) | ((src[1] as u16) << 8u16);
+    return (src[0] as u16) | ((src[1] as u16) << 8);
 }
 
 export fn read_le_u32(src: &[byte]) !u32 {
@@ -114,9 +116,9 @@ export fn read_le_u32(src: &[byte]) !u32 {
         return error.ByteReaderTruncated;
     }
     return (src[0] as u32)
-        | ((src[1] as u32) << 8u32)
-        | ((src[2] as u32) << 16u32)
-        | ((src[3] as u32) << 24u32);
+        | ((src[1] as u32) << 8)
+        | ((src[2] as u32) << 16)
+        | ((src[3] as u32) << 24);
 }
 
 export fn read_le_u64(src: &[byte]) !u64 {
@@ -124,20 +126,20 @@ export fn read_le_u64(src: &[byte]) !u64 {
         return error.ByteReaderTruncated;
     }
     return (src[0] as u64)
-        | ((src[1] as u64) << 8u64)
-        | ((src[2] as u64) << 16u64)
-        | ((src[3] as u64) << 24u64)
-        | ((src[4] as u64) << 32u64)
-        | ((src[5] as u64) << 40u64)
-        | ((src[6] as u64) << 48u64)
-        | ((src[7] as u64) << 56u64);
+        | ((src[1] as u64) << 8)
+        | ((src[2] as u64) << 16)
+        | ((src[3] as u64) << 24)
+        | ((src[4] as u64) << 32)
+        | ((src[5] as u64) << 40)
+        | ((src[6] as u64) << 48)
+        | ((src[7] as u64) << 56);
 }
 
 export fn write_be_u16(dst: &[byte], value: u16) !void {
     if dst.len < 2 {
         return error.ByteWriterOutOfBounds;
     }
-    dst[0] = ((value >> 8u16) & 255u16) as byte;
+    dst[0] = ((value >> 8) & 255u16) as byte;
     dst[1] = (value & 255u16) as byte;
 }
 
@@ -145,9 +147,9 @@ export fn write_be_u32(dst: &[byte], value: u32) !void {
     if dst.len < 4 {
         return error.ByteWriterOutOfBounds;
     }
-    dst[0] = ((value >> 24u32) & 255u32) as byte;
-    dst[1] = ((value >> 16u32) & 255u32) as byte;
-    dst[2] = ((value >> 8u32) & 255u32) as byte;
+    dst[0] = ((value >> 24) & 255u32) as byte;
+    dst[1] = ((value >> 16) & 255u32) as byte;
+    dst[2] = ((value >> 8) & 255u32) as byte;
     dst[3] = (value & 255u32) as byte;
 }
 
@@ -155,13 +157,13 @@ export fn write_be_u64(dst: &[byte], value: u64) !void {
     if dst.len < 8 {
         return error.ByteWriterOutOfBounds;
     }
-    dst[0] = ((value >> 56u64) & 255u64) as byte;
-    dst[1] = ((value >> 48u64) & 255u64) as byte;
-    dst[2] = ((value >> 40u64) & 255u64) as byte;
-    dst[3] = ((value >> 32u64) & 255u64) as byte;
-    dst[4] = ((value >> 24u64) & 255u64) as byte;
-    dst[5] = ((value >> 16u64) & 255u64) as byte;
-    dst[6] = ((value >> 8u64) & 255u64) as byte;
+    dst[0] = ((value >> 56) & 255u64) as byte;
+    dst[1] = ((value >> 48) & 255u64) as byte;
+    dst[2] = ((value >> 40) & 255u64) as byte;
+    dst[3] = ((value >> 32) & 255u64) as byte;
+    dst[4] = ((value >> 24) & 255u64) as byte;
+    dst[5] = ((value >> 16) & 255u64) as byte;
+    dst[6] = ((value >> 8) & 255u64) as byte;
     dst[7] = (value & 255u64) as byte;
 }
 
@@ -170,7 +172,7 @@ export fn write_le_u16(dst: &[byte], value: u16) !void {
         return error.ByteWriterOutOfBounds;
     }
     dst[0] = (value & 255u16) as byte;
-    dst[1] = ((value >> 8u16) & 255u16) as byte;
+    dst[1] = ((value >> 8) & 255u16) as byte;
 }
 
 export fn write_le_u32(dst: &[byte], value: u32) !void {
@@ -178,9 +180,9 @@ export fn write_le_u32(dst: &[byte], value: u32) !void {
         return error.ByteWriterOutOfBounds;
     }
     dst[0] = (value & 255u32) as byte;
-    dst[1] = ((value >> 8u32) & 255u32) as byte;
-    dst[2] = ((value >> 16u32) & 255u32) as byte;
-    dst[3] = ((value >> 24u32) & 255u32) as byte;
+    dst[1] = ((value >> 8) & 255u32) as byte;
+    dst[2] = ((value >> 16) & 255u32) as byte;
+    dst[3] = ((value >> 24) & 255u32) as byte;
 }
 
 export fn write_le_u64(dst: &[byte], value: u64) !void {
@@ -188,13 +190,13 @@ export fn write_le_u64(dst: &[byte], value: u64) !void {
         return error.ByteWriterOutOfBounds;
     }
     dst[0] = (value & 255u64) as byte;
-    dst[1] = ((value >> 8u64) & 255u64) as byte;
-    dst[2] = ((value >> 16u64) & 255u64) as byte;
-    dst[3] = ((value >> 24u64) & 255u64) as byte;
-    dst[4] = ((value >> 32u64) & 255u64) as byte;
-    dst[5] = ((value >> 40u64) & 255u64) as byte;
-    dst[6] = ((value >> 48u64) & 255u64) as byte;
-    dst[7] = ((value >> 56u64) & 255u64) as byte;
+    dst[1] = ((value >> 8) & 255u64) as byte;
+    dst[2] = ((value >> 16) & 255u64) as byte;
+    dst[3] = ((value >> 24) & 255u64) as byte;
+    dst[4] = ((value >> 32) & 255u64) as byte;
+    dst[5] = ((value >> 40) & 255u64) as byte;
+    dst[6] = ((value >> 48) & 255u64) as byte;
+    dst[7] = ((value >> 56) & 255u64) as byte;
 }
 
 export fn byte_reader_init(reader: &ByteReader, bytes: &[byte]) void {
@@ -317,7 +319,10 @@ export fn byte_writer_backfill_u16(writer: &ByteWriter, offset: usize, value: u1
 }
 
 export fn constant_time_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
-    const max_len: usize = if lhs.len > rhs.len { lhs.len } else { rhs.len };
+    var max_len: usize = rhs.len;
+    if lhs.len > rhs.len {
+        max_len = lhs.len;
+    }
     var diff: u64 = (lhs.len as u64) ^ (rhs.len as u64);
     var i: usize = 0;
     while i < max_len {

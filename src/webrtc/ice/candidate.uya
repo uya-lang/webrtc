@@ -62,7 +62,7 @@ fn ice_bytes_copy(dst: &[byte], src: &[byte]) void {
     }
 }
 
-fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+fn ice_candidate_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
         return false;
     }
@@ -75,6 +75,36 @@ fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
         i = i + 1;
     }
     return true;
+}
+
+export fn ice_transport_address_make() IceTransportAddress {
+    var host: [byte: ICE_MAX_ADDRESS_BYTES] = [];
+    return IceTransportAddress{
+        family: ICE_ADDRESS_FAMILY_NONE,
+        host: host,
+        host_len: 0usize,
+        port: 0u16,
+    };
+}
+
+export fn ice_candidate_make() IceCandidate {
+    var foundation: [byte: ICE_MAX_FOUNDATION_BYTES] = [];
+    const address: IceTransportAddress = ice_transport_address_make();
+    const related_address: IceTransportAddress = ice_transport_address_make();
+    return IceCandidate{
+        foundation: foundation,
+        foundation_len: 0usize,
+        component_id: ICE_COMPONENT_RTP,
+        transport: ICE_CANDIDATE_TRANSPORT_UDP,
+        candidate_type: ICE_CANDIDATE_TYPE_UNKNOWN,
+        priority: 0u32,
+        address: address,
+        related_address: related_address,
+        base_candidate_index: ICE_CANDIDATE_INDEX_NONE,
+        network_id: 0u16,
+        network_cost: 0u16,
+        generation: 0u32,
+    };
 }
 
 export fn ice_transport_address_init(address: &IceTransportAddress) void {
@@ -126,7 +156,7 @@ export fn ice_transport_address_equal(lhs: &IceTransportAddress, rhs: &IceTransp
     if lhs.family != rhs.family || lhs.host_len != rhs.host_len || lhs.port != rhs.port {
         return false;
     }
-    return ice_bytes_equal(lhs.host[0:lhs.host_len], rhs.host[0:rhs.host_len]);
+    return ice_candidate_bytes_equal(lhs.host[0:lhs.host_len], rhs.host[0:rhs.host_len]);
 }
 
 export fn ice_candidate_init(candidate: &IceCandidate) void {
@@ -181,8 +211,8 @@ export fn ice_candidate_priority_from_parts(candidate_type: u8, local_preference
 
     const type_preference: u8 = try ice_candidate_type_preference(candidate_type);
     const component_preference: u32 = 256u32 - (component_id as u32);
-    return ((type_preference as u32) << 24u32)
-        + ((local_preference as u32) << 8u32)
+    return ((type_preference as u32) << 24)
+        + ((local_preference as u32) << 8)
         + component_preference;
 }
 

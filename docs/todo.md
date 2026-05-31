@@ -154,7 +154,7 @@
 - [x] 实现 candidate priority 计算。
 - [x] 实现 checklist。
 - [x] 实现 connectivity check transaction。
-- [ ] 实现 controlling / controlled role。
+- [x] 实现 controlling / controlled role。
 - [ ] 实现 nomination。
 - [ ] 实现 role conflict。
 - [ ] 实现 selected pair。

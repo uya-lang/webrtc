@@ -48,7 +48,7 @@ fn ice_test_set_related_address(candidate: &IceCandidate, family: u8, host: &[by
 
 fn ice_test_stun_find_attribute(packet: &[byte], attr_type: u16) !StunAttribute {
     const header: StunMessageHeader = try stun_header_parse(packet);
-    var iter: StunAttributeIterator = StunAttributeIterator{};
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
     stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
 
     while iter.cursor < iter.bytes.len {
@@ -118,7 +118,7 @@ test "ice agent model keeps owned credentials candidate pools and selected pair 
 }
 
 test "ice helpers expose stable default state for future gathering and checklist work" {
-    var candidate: IceCandidate = IceCandidate{};
+    var candidate: IceCandidate = ice_candidate_make();
     ice_candidate_init(&candidate);
     try expect(candidate.transport == ICE_CANDIDATE_TRANSPORT_UDP);
     try expect(candidate.component_id == ICE_COMPONENT_RTP);
@@ -129,7 +129,7 @@ test "ice helpers expose stable default state for future gathering and checklist
     try expect(pair.state == ICE_CANDIDATE_PAIR_STATE_FROZEN);
     try expect(!candidate_pair_is_selected(&pair));
 
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
     try expect(agent.state == ICE_AGENT_STATE_NEW);
     try expect(agent.role == ICE_AGENT_ROLE_CONTROLLING);
@@ -137,7 +137,7 @@ test "ice helpers expose stable default state for future gathering and checklist
 }
 
 test "candidate pair helpers follow RFC 8445 priority order and compatibility gates" {
-    var local_candidate: IceCandidate = IceCandidate{};
+    var local_candidate: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &local_candidate,
         "lf0" as &[byte],
@@ -149,7 +149,7 @@ test "candidate pair helpers follow RFC 8445 priority order and compatibility ga
         "192.0.2.10" as &[byte],
         5000u16,
     );
-    var remote_candidate: IceCandidate = IceCandidate{};
+    var remote_candidate: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &remote_candidate,
         "rf0" as &[byte],
@@ -163,7 +163,7 @@ test "candidate pair helpers follow RFC 8445 priority order and compatibility ga
     );
 
     try expect(candidate_pair_can_form(&local_candidate, &remote_candidate));
-    try expect(candidate_pair_priority(300u32, 200u32) == ((200u64 << 32u32) + (300u64 << 1u32) + 1u64));
+    try expect(candidate_pair_priority(300u32, 200u32) == 858993459801u64);
     try expect((try candidate_pair_compute_priority(&local_candidate, &remote_candidate, true)) == candidate_pair_priority(300u32, 200u32));
     try expect((try candidate_pair_compute_priority(&local_candidate, &remote_candidate, false)) == candidate_pair_priority(200u32, 300u32));
 
@@ -178,7 +178,7 @@ test "candidate pair helpers follow RFC 8445 priority order and compatibility ga
 }
 
 test "checklist rebuild sorts compatible pairs and seeds one waiting pair per foundation" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 55u64);
 
     try ice_test_init_remote_candidate(
@@ -262,7 +262,7 @@ test "checklist rebuild sorts compatible pairs and seeds one waiting pair per fo
 }
 
 test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 89u64);
 
     try ice_test_init_remote_candidate(
@@ -331,7 +331,7 @@ test "checklist rebuild filters incompatible pairs and selection is invalidated 
     try expect(agent.checklist[0].nominated);
     try expect(ice_agent_has_selected_pair(&agent));
 
-    var extra_remote: IceCandidate = IceCandidate{};
+    var extra_remote: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &extra_remote,
         "rf3" as &[byte],
@@ -354,14 +354,13 @@ test "checklist rebuild filters incompatible pairs and selection is invalidated 
 }
 
 test "checklist rebuild rejects fixed pair capacity without leaving partial state" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 144u64);
 
     var local_index: usize = 0;
     while local_index < 11usize {
-        var local_candidate: IceCandidate = IceCandidate{};
         try ice_test_init_remote_candidate(
-            &local_candidate,
+            &agent.local_candidates[local_index],
             "lfx" as &[byte],
             ICE_COMPONENT_RTP,
             ICE_CANDIDATE_TRANSPORT_UDP,
@@ -371,16 +370,14 @@ test "checklist rebuild rejects fixed pair capacity without leaving partial stat
             "192.0.2.90" as &[byte],
             7000u16 + (local_index as u16),
         );
-        agent.local_candidates[local_index] = local_candidate;
         local_index = local_index + 1;
     }
     agent.local_candidate_count = 11usize;
 
     var remote_index: usize = 0;
     while remote_index < 12usize {
-        var remote_candidate: IceCandidate = IceCandidate{};
         try ice_test_init_remote_candidate(
-            &remote_candidate,
+            &agent.remote_candidates[remote_index],
             "rfx" as &[byte],
             ICE_COMPONENT_RTP,
             ICE_CANDIDATE_TRANSPORT_UDP,
@@ -390,7 +387,6 @@ test "checklist rebuild rejects fixed pair capacity without leaving partial stat
             "198.51.100.90" as &[byte],
             8000u16 + (remote_index as u16),
         );
-        agent.remote_candidates[remote_index] = remote_candidate;
         remote_index = remote_index + 1;
     }
     agent.remote_candidate_count = 12usize;
@@ -402,7 +398,7 @@ test "checklist rebuild rejects fixed pair capacity without leaving partial stat
 }
 
 test "connectivity check transaction builds authenticated binding requests and marks pair in progress" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -419,7 +415,7 @@ test "connectivity check transaction builds authenticated binding requests and m
         21 as byte,
         23 as byte,
     ];
-    var transaction: IceConnectivityCheckTransaction = IceConnectivityCheckTransaction{};
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
     try ice_connectivity_check_transaction_init(
         &transaction,
         &agent,
@@ -471,7 +467,7 @@ test "connectivity check transaction builds authenticated binding requests and m
 }
 
 test "connectivity check success response updates pair timing consent and validity" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLED);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -488,7 +484,7 @@ test "connectivity check success response updates pair timing consent and validi
         41 as byte,
         42 as byte,
     ];
-    var transaction: IceConnectivityCheckTransaction = IceConnectivityCheckTransaction{};
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
     try ice_connectivity_check_transaction_init(
         &transaction,
         &agent,
@@ -498,10 +494,17 @@ test "connectivity check success response updates pair timing consent and validi
     );
 
     var request: [byte: 256] = [];
-    _ = try ice_connectivity_check_build_binding_request(&agent, &transaction, request[0:256], 2000u64);
+    const request_len: usize = try ice_connectivity_check_build_binding_request(&agent, &transaction, request[0:256], 2000u64);
+
+    const controlled_attr: StunAttribute =
+        try ice_test_stun_find_attribute(request[0:request_len], STUN_ATTRIBUTE_ICE_CONTROLLED);
+    try expect((try stun_parse_ice_role_tiebreaker(controlled_attr.value)) == agent.tie_breaker);
+    const missing_use_candidate: !StunAttribute =
+        ice_test_stun_find_attribute(request[0:request_len], STUN_ATTRIBUTE_USE_CANDIDATE);
+    try expect(missing_use_candidate.error_id == @error_id(error.InvalidPacket));
 
     var response_packet: [byte: 256] = [];
-    var response_builder: StunMessageBuilder = StunMessageBuilder{};
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
     var mapped_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 55 as byte];
     try stun_builder_init_binding_success_response(&response_builder, response_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 41000u16, mapped_ipv4[0:4]);
@@ -525,8 +528,37 @@ test "connectivity check success response updates pair timing consent and validi
     try expect(agent.checklist[0].consent_deadline_us == 15005600u64);
 }
 
+test "controlled agent rejects use-candidate connectivity checks" {
+    var agent: IceAgent = ice_agent_make();
+    const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLED);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        51 as byte,
+        52 as byte,
+        53 as byte,
+        54 as byte,
+        55 as byte,
+        56 as byte,
+        57 as byte,
+        58 as byte,
+        59 as byte,
+        60 as byte,
+        61 as byte,
+        62 as byte,
+    ];
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    const init_result: !void = ice_connectivity_check_transaction_init(
+        &transaction,
+        &agent,
+        pair_index,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+        true,
+    );
+    try expect(init_result.error_id == @error_id(error.InvalidPacket));
+}
+
 test "connectivity check error responses fail the pair and stale checklist transactions are rejected" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -543,7 +575,7 @@ test "connectivity check error responses fail the pair and stale checklist trans
         71 as byte,
         72 as byte,
     ];
-    var transaction: IceConnectivityCheckTransaction = IceConnectivityCheckTransaction{};
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
     try ice_connectivity_check_transaction_init(
         &transaction,
         &agent,
@@ -556,7 +588,7 @@ test "connectivity check error responses fail the pair and stale checklist trans
     _ = try ice_connectivity_check_build_binding_request(&agent, &transaction, request[0:256], 900u64);
 
     var error_packet: [byte: 256] = [];
-    var error_builder: StunMessageBuilder = StunMessageBuilder{};
+    var error_builder: StunMessageBuilder = stun_message_builder_make();
     try stun_builder_init_binding_error_response(&error_builder, error_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_error_code(&error_builder, 487u16, "role conflict" as &[byte]);
     try stun_builder_append_message_integrity(&error_builder, agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len]);
@@ -576,9 +608,9 @@ test "connectivity check error responses fail the pair and stale checklist trans
     try expect(agent.checklist[0].response_count == 1u32);
     try expect(agent.checklist[0].last_response_received_at_us == 1900u64);
 
-    var stale_agent: IceAgent = IceAgent{};
+    var stale_agent: IceAgent = ice_agent_make();
     const stale_pair_index: u16 = try ice_test_seed_connectivity_check_agent(&stale_agent, ICE_AGENT_ROLE_CONTROLLING);
-    var stale_transaction: IceConnectivityCheckTransaction = IceConnectivityCheckTransaction{};
+    var stale_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
     try ice_connectivity_check_transaction_init(
         &stale_transaction,
         &stale_agent,
@@ -588,7 +620,7 @@ test "connectivity check error responses fail the pair and stale checklist trans
     );
     _ = try ice_connectivity_check_build_binding_request(&stale_agent, &stale_transaction, request[0:256], 3000u64);
 
-    var extra_remote: IceCandidate = IceCandidate{};
+    var extra_remote: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &extra_remote,
         "rf-extra" as &[byte],
@@ -604,7 +636,7 @@ test "connectivity check error responses fail the pair and stale checklist trans
     try expect(stale_agent.checklist_count == 0usize);
 
     var success_packet: [byte: 256] = [];
-    var success_builder: StunMessageBuilder = StunMessageBuilder{};
+    var success_builder: StunMessageBuilder = stun_message_builder_make();
     var success_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 77 as byte];
     try stun_builder_init_binding_success_response(&success_builder, success_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_xor_mapped_address_ipv4(&success_builder, 42000u16, success_ipv4[0:4]);
@@ -654,10 +686,10 @@ test "candidate priority helpers follow RFC 8445 formula and reject invalid inpu
 }
 
 test "remote candidate addition upserts transport tuple and copies related metadata" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 13u64);
 
-    var first: IceCandidate = IceCandidate{};
+    var first: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &first,
         "rhost0" as &[byte],
@@ -681,7 +713,7 @@ test "remote candidate addition upserts transport tuple and copies related metad
     try expect(agent.remote_candidates[0].generation == 2u32);
     try expect(!ice_candidate_has_related_address(&agent.remote_candidates[0]));
 
-    var updated: IceCandidate = IceCandidate{};
+    var updated: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &updated,
         "rsrflx1" as &[byte],
@@ -717,10 +749,10 @@ test "remote candidate addition upserts transport tuple and copies related metad
 }
 
 test "remote candidate addition keeps distinct component and transport tuples" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 17u64);
 
-    var rtp_udp: IceCandidate = IceCandidate{};
+    var rtp_udp: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &rtp_udp,
         "r0" as &[byte],
@@ -732,7 +764,7 @@ test "remote candidate addition keeps distinct component and transport tuples" {
         "198.51.100.20" as &[byte],
         6100u16,
     );
-    var rtcp_udp: IceCandidate = IceCandidate{};
+    var rtcp_udp: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &rtcp_udp,
         "r1" as &[byte],
@@ -744,7 +776,7 @@ test "remote candidate addition keeps distinct component and transport tuples" {
         "198.51.100.20" as &[byte],
         6100u16,
     );
-    var rtp_tcp: IceCandidate = IceCandidate{};
+    var rtp_tcp: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &rtp_tcp,
         "r2" as &[byte],
@@ -766,10 +798,10 @@ test "remote candidate addition keeps distinct component and transport tuples" {
 }
 
 test "remote candidate addition rejects invalid candidates and clears stale entries" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 29u64);
 
-    var valid: IceCandidate = IceCandidate{};
+    var valid: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &valid,
         "valid0" as &[byte],
@@ -784,7 +816,7 @@ test "remote candidate addition rejects invalid candidates and clears stale entr
     try expect((try ice_agent_add_remote_candidate(&agent, &valid)) == 0u16);
     try expect(agent.remote_candidate_count == 1usize);
 
-    var missing_foundation: IceCandidate = IceCandidate{};
+    var missing_foundation: IceCandidate = ice_candidate_make();
     ice_candidate_init(&missing_foundation);
     missing_foundation.component_id = ICE_COMPONENT_RTP;
     missing_foundation.transport = ICE_CANDIDATE_TRANSPORT_UDP;
@@ -793,7 +825,7 @@ test "remote candidate addition rejects invalid candidates and clears stale entr
     const missing_foundation_result: !u16 = ice_agent_add_remote_candidate(&agent, &missing_foundation);
     try expect(missing_foundation_result.error_id == @error_id(error.InvalidPacket));
 
-    var unsupported_type: IceCandidate = IceCandidate{};
+    var unsupported_type: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &unsupported_type,
         "badtype" as &[byte],
@@ -808,7 +840,7 @@ test "remote candidate addition rejects invalid candidates and clears stale entr
     const unsupported_type_result: !u16 = ice_agent_add_remote_candidate(&agent, &unsupported_type);
     try expect(unsupported_type_result.error_id == @error_id(error.UnsupportedCapability));
 
-    var unsupported_component: IceCandidate = IceCandidate{};
+    var unsupported_component: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &unsupported_component,
         "badcomp" as &[byte],
@@ -829,12 +861,12 @@ test "remote candidate addition rejects invalid candidates and clears stale entr
 }
 
 test "remote candidate addition enforces fixed pool capacity" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 37u64);
 
     var index: usize = 0;
     while index < ICE_MAX_REMOTE_CANDIDATES {
-        var remote_candidate: IceCandidate = IceCandidate{};
+        var remote_candidate: IceCandidate = ice_candidate_make();
         try ice_test_init_remote_candidate(
             &remote_candidate,
             "pool" as &[byte],
@@ -851,7 +883,7 @@ test "remote candidate addition enforces fixed pool capacity" {
     }
     try expect(agent.remote_candidate_count == ICE_MAX_REMOTE_CANDIDATES);
 
-    var overflow_candidate: IceCandidate = IceCandidate{};
+    var overflow_candidate: IceCandidate = ice_candidate_make();
     try ice_test_init_remote_candidate(
         &overflow_candidate,
         "overflow" as &[byte],
@@ -868,19 +900,19 @@ test "remote candidate addition enforces fixed pool capacity" {
 }
 
 test "host candidate helpers copy bounded address foundation and equality state" {
-    var address: IceTransportAddress = IceTransportAddress{};
+    var address: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&address, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte], 5000u16);
     try expect(ice_transport_address_is_set(&address));
 
-    var same: IceTransportAddress = IceTransportAddress{};
+    var same: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&same, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte], 5000u16);
     try expect(ice_transport_address_equal(&address, &same));
 
-    var different: IceTransportAddress = IceTransportAddress{};
+    var different: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&different, ICE_ADDRESS_FAMILY_IPV6, "::1" as &[byte], 5000u16);
     try expect(!ice_transport_address_equal(&address, &different));
 
-    var candidate: IceCandidate = IceCandidate{};
+    var candidate: IceCandidate = ice_candidate_make();
     ice_candidate_init(&candidate);
     try ice_candidate_set_foundation(&candidate, "eth0v4udp" as &[byte]);
     try expect(candidate.foundation_len == 9);
@@ -888,10 +920,10 @@ test "host candidate helpers copy bounded address foundation and equality state"
 }
 
 test "host and srflx gathering assign candidate priorities by type component and network cost" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 41u64);
 
-    var fast_desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    var fast_desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
     ice_host_interface_descriptor_init(&fast_desc);
     try ice_host_interface_descriptor_set_name(&fast_desc, "eth0" as &[byte]);
     try ice_host_interface_descriptor_set_host(&fast_desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
@@ -899,7 +931,7 @@ test "host and srflx gathering assign candidate priorities by type component and
     fast_desc.network_cost = 10u16;
     fast_desc.is_up = true;
 
-    var slow_desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    var slow_desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
     ice_host_interface_descriptor_init(&slow_desc);
     try ice_host_interface_descriptor_set_name(&slow_desc, "wlan0" as &[byte]);
     try ice_host_interface_descriptor_set_host(&slow_desc, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.9" as &[byte]);
@@ -923,26 +955,54 @@ test "host and srflx gathering assign candidate priorities by type component and
         IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 6000u16 },
     );
 
-    const fast_rtp: &IceCandidate = &agent.local_candidates[fast_rtp_index as usize];
-    const fast_rtcp: &IceCandidate = &agent.local_candidates[fast_rtcp_index as usize];
-    const slow_rtp: &IceCandidate = &agent.local_candidates[slow_rtp_index as usize];
+    const fast_rtp_slot: usize = fast_rtp_index as usize;
+    const fast_rtcp_slot: usize = fast_rtcp_index as usize;
+    const slow_rtp_slot: usize = slow_rtp_index as usize;
+    if fast_rtp_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if fast_rtcp_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if slow_rtp_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if fast_rtp_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+    if fast_rtcp_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+    if slow_rtp_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+    const fast_rtp: &IceCandidate = &agent.local_candidates[fast_rtp_slot];
+    const fast_rtcp: &IceCandidate = &agent.local_candidates[fast_rtcp_slot];
+    const slow_rtp: &IceCandidate = &agent.local_candidates[slow_rtp_slot];
     try expect(fast_rtp.priority > fast_rtcp.priority);
     try expect(fast_rtp.priority > slow_rtp.priority);
 
-    var mapped: IceTransportAddress = IceTransportAddress{};
+    var mapped: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&mapped, ICE_ADDRESS_FAMILY_IPV4, "203.0.113.40" as &[byte], 40000u16);
-    var stun_server: IceTransportAddress = IceTransportAddress{};
+    var stun_server: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.1" as &[byte], 3478u16);
 
     const srflx_index: u16 = try ice_agent_add_srflx_candidate(&agent, fast_rtp_index, &mapped, &stun_server);
-    const srflx: &IceCandidate = &agent.local_candidates[srflx_index as usize];
+    const srflx_slot: usize = srflx_index as usize;
+    if srflx_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if srflx_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+    const srflx: &IceCandidate = &agent.local_candidates[srflx_slot];
     try expect(srflx.candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
     try expect(fast_rtp.priority > srflx.priority);
     try expect(srflx.priority > 0u32);
 }
 
 test "host candidate gathering from descriptors deduplicates per component and prunes stale host entries" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
     agent.generation = 9u32;
 
@@ -1034,7 +1094,7 @@ test "host candidate gathering from descriptors deduplicates per component and p
 }
 
 test "host candidate gathering skips unspecified addresses and zero-port bindings" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 11u64);
 
     var ports: [IceHostPortBinding: 2] = [
@@ -1076,11 +1136,11 @@ test "host candidate gathering skips unspecified addresses and zero-port binding
 }
 
 test "srflx candidate gathering builds binding request and adds related base metadata from success response" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 19u64);
     agent.generation = 4u32;
 
-    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    var desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
     ice_host_interface_descriptor_init(&desc);
     try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
     try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
@@ -1093,7 +1153,7 @@ test "srflx candidate gathering builds binding request and adds related base met
         IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
     );
 
-    var stun_server: IceTransportAddress = IceTransportAddress{};
+    var stun_server: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.1" as &[byte], 3478u16);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -1110,7 +1170,7 @@ test "srflx candidate gathering builds binding request and adds related base met
         11 as byte,
         12 as byte,
     ];
-    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    var transaction: IceSrflxGatherTransaction = ice_srflx_gather_transaction_make();
     try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
 
     var request: [byte: 128] = [];
@@ -1127,7 +1187,7 @@ test "srflx candidate gathering builds binding request and adds related base met
     try stun_verify_fingerprint(request[0:request_len]);
 
     var response: [byte: 128] = [];
-    var response_builder: StunMessageBuilder = StunMessageBuilder{};
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
     var mapped_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 40 as byte];
     try stun_builder_init_binding_success_response(&response_builder, response[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 40000u16, mapped_ipv4[0:4]);
@@ -1152,11 +1212,11 @@ test "srflx candidate gathering builds binding request and adds related base met
 }
 
 test "srflx candidate gathering deduplicates repeated mapped addresses and host regather prunes stale srflx entries" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 23u64);
     agent.generation = 8u32;
 
-    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    var desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
     ice_host_interface_descriptor_init(&desc);
     try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
     try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "10.0.0.4" as &[byte]);
@@ -1169,7 +1229,7 @@ test "srflx candidate gathering deduplicates repeated mapped addresses and host 
         IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
     );
 
-    var stun_server: IceTransportAddress = IceTransportAddress{};
+    var stun_server: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.2" as &[byte], 3478u16);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -1186,11 +1246,11 @@ test "srflx candidate gathering deduplicates repeated mapped addresses and host 
         31 as byte,
         32 as byte,
     ];
-    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    var transaction: IceSrflxGatherTransaction = ice_srflx_gather_transaction_make();
     try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
 
     var response: [byte: 128] = [];
-    var response_builder: StunMessageBuilder = StunMessageBuilder{};
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
     var mapped_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 44 as byte];
     try stun_builder_init_binding_success_response(&response_builder, response[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 41000u16, mapped_ipv4[0:4]);
@@ -1226,10 +1286,10 @@ test "srflx candidate gathering deduplicates repeated mapped addresses and host 
 }
 
 test "srflx candidate gathering rejects mismatched transaction ids and non-success responses" {
-    var agent: IceAgent = IceAgent{};
+    var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 31u64);
 
-    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    var desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
     ice_host_interface_descriptor_init(&desc);
     try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
     try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.20" as &[byte]);
@@ -1242,7 +1302,7 @@ test "srflx candidate gathering rejects mismatched transaction ids and non-succe
         IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5500u16 },
     );
 
-    var stun_server: IceTransportAddress = IceTransportAddress{};
+    var stun_server: IceTransportAddress = ice_transport_address_make();
     try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.9" as &[byte], 3478u16);
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -1259,7 +1319,7 @@ test "srflx candidate gathering rejects mismatched transaction ids and non-succe
         71 as byte,
         72 as byte,
     ];
-    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    var transaction: IceSrflxGatherTransaction = ice_srflx_gather_transaction_make();
     try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
 
     var mismatched_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
@@ -1277,7 +1337,7 @@ test "srflx candidate gathering rejects mismatched transaction ids and non-succe
         92 as byte,
     ];
     var success_packet: [byte: 128] = [];
-    var success_builder: StunMessageBuilder = StunMessageBuilder{};
+    var success_builder: StunMessageBuilder = stun_message_builder_make();
     var mapped_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 77 as byte];
     try stun_builder_init_binding_success_response(&success_builder, success_packet[0:128], mismatched_txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_xor_mapped_address_ipv4(&success_builder, 42000u16, mapped_ipv4[0:4]);
@@ -1288,7 +1348,7 @@ test "srflx candidate gathering rejects mismatched transaction ids and non-succe
     try expect(mismatched_result.error_id == @error_id(error.InvalidPacket));
 
     var error_packet: [byte: 128] = [];
-    var error_builder: StunMessageBuilder = StunMessageBuilder{};
+    var error_builder: StunMessageBuilder = stun_message_builder_make();
     try stun_builder_init_binding_error_response(&error_builder, error_packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
     try stun_builder_append_error_code(&error_builder, 400u16, "bad request" as &[byte]);
     try stun_builder_append_fingerprint(&error_builder);

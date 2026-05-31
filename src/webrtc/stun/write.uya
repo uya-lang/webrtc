@@ -94,7 +94,8 @@ export fn stun_builder_append_priority(builder: &StunMessageBuilder, priority: u
 }
 
 export fn stun_builder_append_use_candidate(builder: &StunMessageBuilder) !void {
-    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_USE_CANDIDATE, []);
+    var empty_bytes: [byte: 1] = [];
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_USE_CANDIDATE, empty_bytes[0:0]);
 }
 
 export fn stun_builder_append_ice_controlled(builder: &StunMessageBuilder, tiebreaker: u64) !void {
@@ -120,7 +121,7 @@ export fn stun_builder_append_xor_mapped_address_ipv4(builder: &StunMessageBuild
 
     value[0] = 0 as byte;
     value[1] = STUN_ADDRESS_FAMILY_IPV4 as byte;
-    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16));
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16) as u16));
 
     var i: usize = 0;
     while i < 4 {
@@ -142,16 +143,17 @@ export fn stun_builder_append_xor_mapped_address_ipv6(builder: &StunMessageBuild
 
     value[0] = 0 as byte;
     value[1] = STUN_ADDRESS_FAMILY_IPV6 as byte;
-    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16));
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16) as u16));
 
     var i: usize = 0;
     while i < 4 {
         value[4 + i] = address[i] ^ cookie_bytes[i];
         i = i + 1;
     }
-    while i < 16 {
-        value[4 + i] = address[i] ^ builder.transaction_id[i - 4];
-        i = i + 1;
+    var transaction_index: usize = 0;
+    while transaction_index < STUN_TRANSACTION_ID_BYTES {
+        value[8 + transaction_index] = address[4 + transaction_index] ^ builder.transaction_id[transaction_index];
+        transaction_index = transaction_index + 1;
     }
 
     return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS, value[0:20]);

@@ -22,12 +22,12 @@ const STUN_SHA256_BLOCK_BYTES: usize = 64usize;
 
 fn stun_message_type_decode_method(raw_type: u16) u16 {
     return (raw_type & 0x000Fu16)
-        | ((raw_type & 0x00E0u16) >> 1u16)
-        | ((raw_type & 0x3E00u16) >> 2u16);
+        | ((raw_type & 0x00E0u16) >> 1)
+        | ((raw_type & 0x3E00u16) >> 2);
 }
 
 fn stun_message_type_decode_class(raw_type: u16) u8 {
-    return ((((raw_type >> 4u16) & 0x0001u16) | ((raw_type >> 7u16) & 0x0002u16)) as u8);
+    return ((((raw_type >> 4) & 0x0001u16) | ((raw_type >> 7) & 0x0002u16)) as u8);
 }
 
 fn stun_copy_transaction_id(dst: &[byte], src: &[byte]) void {
@@ -91,9 +91,9 @@ fn stun_crc32(bytes: &[byte]) u32 {
         var bit_index: usize = 0;
         while bit_index < 8 {
             if (crc & 1u32) != 0u32 {
-                crc = (crc >> 1u32) ^ STUN_CRC32_POLYNOMIAL;
+                crc = (crc >> 1) ^ STUN_CRC32_POLYNOMIAL;
             } else {
-                crc = crc >> 1u32;
+                crc = crc >> 1;
             }
             bit_index = bit_index + 1;
         }
@@ -105,11 +105,13 @@ fn stun_crc32(bytes: &[byte]) u32 {
 }
 
 fn stun_u32_rotate_left(value: u32, count: u32) u32 {
-    return (value << count) | (value >> (32u32 - count));
+    const shift: i32 = count as i32;
+    return (value << shift) | (value >> (32 - shift));
 }
 
 fn stun_u32_rotate_right(value: u32, count: u32) u32 {
-    return (value >> count) | (value << (32u32 - count));
+    const shift: i32 = count as i32;
+    return (value >> shift) | (value << (32 - shift));
 }
 
 fn stun_u32_add(lhs: u32, rhs: u32) u32 {
@@ -151,11 +153,11 @@ fn stun_sha1_process_block(block: &[byte], h0: &u32, h1: &u32, h2: &u32, h3: &u3
         index = index + 1;
     }
 
-    var a: u32 = h0;
-    var b: u32 = h1;
-    var c: u32 = h2;
-    var d: u32 = h3;
-    var e: u32 = h4;
+    var a: u32 = *h0;
+    var b: u32 = *h1;
+    var c: u32 = *h2;
+    var d: u32 = *h3;
+    var e: u32 = *h4;
 
     var round: usize = 0;
     while round < 80usize {
@@ -199,11 +201,11 @@ fn stun_sha1_process_block(block: &[byte], h0: &u32, h1: &u32, h2: &u32, h3: &u3
         round = round + 1;
     }
 
-    h0 = stun_u32_add(h0, a);
-    h1 = stun_u32_add(h1, b);
-    h2 = stun_u32_add(h2, c);
-    h3 = stun_u32_add(h3, d);
-    h4 = stun_u32_add(h4, e);
+    *h0 = stun_u32_add(*h0, a);
+    *h1 = stun_u32_add(*h1, b);
+    *h2 = stun_u32_add(*h2, c);
+    *h3 = stun_u32_add(*h3, d);
+    *h4 = stun_u32_add(*h4, e);
 }
 
 fn stun_sha1_update_chunk(
@@ -218,11 +220,11 @@ fn stun_sha1_update_chunk(
 ) !void {
     var index: usize = 0;
     while index < part.len {
-        block[block_len] = part[index];
-        block_len = block_len + 1;
-        if block_len == STUN_SHA1_BLOCK_BYTES {
+        block[*block_len] = part[index];
+        *block_len = *block_len + 1;
+        if *block_len == STUN_SHA1_BLOCK_BYTES {
             try stun_sha1_process_block(block[0:STUN_SHA1_BLOCK_BYTES], h0, h1, h2, h3, h4);
-            block_len = 0;
+            *block_len = 0usize;
         }
         index = index + 1;
     }
@@ -271,10 +273,17 @@ fn stun_sha1_digest4(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[by
 }
 
 fn stun_hmac_sha1_digest3(key: &[byte], part0: &[byte], part1: &[byte], part2: &[byte], out: &[byte]) !void {
+    var empty_bytes: [byte: 1] = [];
     var key_block: [byte: STUN_SHA1_BLOCK_BYTES] = [];
     if key.len > STUN_SHA1_BLOCK_BYTES {
         var key_digest: [byte: STUN_MESSAGE_INTEGRITY_BYTES] = [];
-        try stun_sha1_digest4(key, [], [], [], key_digest[0:STUN_MESSAGE_INTEGRITY_BYTES]);
+        try stun_sha1_digest4(
+            key,
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            key_digest[0:STUN_MESSAGE_INTEGRITY_BYTES],
+        );
 
         var digest_index: usize = 0;
         while digest_index < STUN_MESSAGE_INTEGRITY_BYTES {
@@ -300,7 +309,13 @@ fn stun_hmac_sha1_digest3(key: &[byte], part0: &[byte], part1: &[byte], part2: &
 
     var inner_digest: [byte: STUN_MESSAGE_INTEGRITY_BYTES] = [];
     try stun_sha1_digest4(inner_pad[0:STUN_SHA1_BLOCK_BYTES], part0, part1, part2, inner_digest[0:STUN_MESSAGE_INTEGRITY_BYTES]);
-    try stun_sha1_digest4(outer_pad[0:STUN_SHA1_BLOCK_BYTES], inner_digest[0:STUN_MESSAGE_INTEGRITY_BYTES], [], [], out);
+    try stun_sha1_digest4(
+        outer_pad[0:STUN_SHA1_BLOCK_BYTES],
+        inner_digest[0:STUN_MESSAGE_INTEGRITY_BYTES],
+        empty_bytes[0:0],
+        empty_bytes[0:0],
+        out,
+    );
 }
 
 fn stun_sha256_choice(x: u32, y: u32, z: u32) u32 {
@@ -320,11 +335,11 @@ fn stun_sha256_big_sigma1(x: u32) u32 {
 }
 
 fn stun_sha256_small_sigma0(x: u32) u32 {
-    return stun_u32_rotate_right(x, 7u32) ^ stun_u32_rotate_right(x, 18u32) ^ (x >> 3u32);
+    return stun_u32_rotate_right(x, 7u32) ^ stun_u32_rotate_right(x, 18u32) ^ (x >> 3);
 }
 
 fn stun_sha256_small_sigma1(x: u32) u32 {
-    return stun_u32_rotate_right(x, 17u32) ^ stun_u32_rotate_right(x, 19u32) ^ (x >> 10u32);
+    return stun_u32_rotate_right(x, 17u32) ^ stun_u32_rotate_right(x, 19u32) ^ (x >> 10);
 }
 
 fn stun_sha256_process_block(
@@ -349,23 +364,39 @@ fn stun_sha256_process_block(
         index = index + 1;
     }
     while index < 64usize {
+        const prev2_index: usize = index - 2usize;
+        const prev7_index: usize = index - 7usize;
+        const prev15_index: usize = index - 15usize;
+        const prev16_index: usize = index - 16usize;
+        if prev2_index >= 64usize {
+            return error.InvalidPacket;
+        }
+        if prev7_index >= 64usize {
+            return error.InvalidPacket;
+        }
+        if prev15_index >= 64usize {
+            return error.InvalidPacket;
+        }
+        if prev16_index >= 64usize {
+            return error.InvalidPacket;
+        }
         schedule[index] = stun_u32_add4(
-            stun_sha256_small_sigma1(schedule[index - 2usize]),
-            schedule[index - 7usize],
-            stun_sha256_small_sigma0(schedule[index - 15usize]),
-            schedule[index - 16usize],
+            stun_sha256_small_sigma1(schedule[prev2_index]),
+            schedule[prev7_index],
+            stun_sha256_small_sigma0(schedule[prev15_index]),
+            schedule[prev16_index],
         );
         index = index + 1;
     }
 
-    var a: u32 = h0;
-    var b: u32 = h1;
-    var c: u32 = h2;
-    var d: u32 = h3;
-    var e: u32 = h4;
-    var f: u32 = h5;
-    var g: u32 = h6;
-    var h: u32 = h7;
+    var a: u32 = *h0;
+    var b: u32 = *h1;
+    var c: u32 = *h2;
+    var d: u32 = *h3;
+    var e: u32 = *h4;
+    var f: u32 = *h5;
+    var g: u32 = *h6;
+    var h: u32 = *h7;
     const round_k: [u32: 64] = [
         0x428A2F98u32, 0x71374491u32, 0xB5C0FBCFu32, 0xE9B5DBA5u32,
         0x3956C25Bu32, 0x59F111F1u32, 0x923F82A4u32, 0xAB1C5ED5u32,
@@ -406,14 +437,14 @@ fn stun_sha256_process_block(
         round = round + 1;
     }
 
-    h0 = stun_u32_add(h0, a);
-    h1 = stun_u32_add(h1, b);
-    h2 = stun_u32_add(h2, c);
-    h3 = stun_u32_add(h3, d);
-    h4 = stun_u32_add(h4, e);
-    h5 = stun_u32_add(h5, f);
-    h6 = stun_u32_add(h6, g);
-    h7 = stun_u32_add(h7, h);
+    *h0 = stun_u32_add(*h0, a);
+    *h1 = stun_u32_add(*h1, b);
+    *h2 = stun_u32_add(*h2, c);
+    *h3 = stun_u32_add(*h3, d);
+    *h4 = stun_u32_add(*h4, e);
+    *h5 = stun_u32_add(*h5, f);
+    *h6 = stun_u32_add(*h6, g);
+    *h7 = stun_u32_add(*h7, h);
 }
 
 fn stun_sha256_update_chunk(
@@ -431,11 +462,11 @@ fn stun_sha256_update_chunk(
 ) !void {
     var index: usize = 0;
     while index < part.len {
-        block[block_len] = part[index];
-        block_len = block_len + 1;
-        if block_len == STUN_SHA256_BLOCK_BYTES {
+        block[*block_len] = part[index];
+        *block_len = *block_len + 1;
+        if *block_len == STUN_SHA256_BLOCK_BYTES {
             try stun_sha256_process_block(block[0:STUN_SHA256_BLOCK_BYTES], h0, h1, h2, h3, h4, h5, h6, h7);
-            block_len = 0;
+            *block_len = 0usize;
         }
         index = index + 1;
     }
@@ -490,10 +521,17 @@ fn stun_sha256_digest4(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[
 }
 
 fn stun_hmac_sha256_digest3(key: &[byte], part0: &[byte], part1: &[byte], part2: &[byte], out: &[byte]) !void {
+    var empty_bytes: [byte: 1] = [];
     var key_block: [byte: STUN_SHA256_BLOCK_BYTES] = [];
     if key.len > STUN_SHA256_BLOCK_BYTES {
         var key_digest: [byte: STUN_MESSAGE_INTEGRITY_SHA256_BYTES] = [];
-        try stun_sha256_digest4(key, [], [], [], key_digest[0:STUN_MESSAGE_INTEGRITY_SHA256_BYTES]);
+        try stun_sha256_digest4(
+            key,
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            key_digest[0:STUN_MESSAGE_INTEGRITY_SHA256_BYTES],
+        );
 
         var digest_index: usize = 0;
         while digest_index < STUN_MESSAGE_INTEGRITY_SHA256_BYTES {
@@ -528,8 +566,8 @@ fn stun_hmac_sha256_digest3(key: &[byte], part0: &[byte], part1: &[byte], part2:
     try stun_sha256_digest4(
         outer_pad[0:STUN_SHA256_BLOCK_BYTES],
         inner_digest[0:STUN_MESSAGE_INTEGRITY_SHA256_BYTES],
-        [],
-        [],
+        empty_bytes[0:0],
+        empty_bytes[0:0],
         out,
     );
 }
@@ -673,6 +711,7 @@ export fn stun_message_integrity_compute(packet_prefix: &[byte], message_length:
         return error.PacketTooShort;
     }
 
+    var empty_bytes: [byte: 1] = [];
     var header_prefix: [byte: 4] = [];
     header_prefix[0] = packet_prefix[0];
     header_prefix[1] = packet_prefix[1];
@@ -682,7 +721,7 @@ export fn stun_message_integrity_compute(packet_prefix: &[byte], message_length:
         key,
         header_prefix[0:4],
         packet_prefix[4:packet_prefix.len - 4],
-        [],
+        empty_bytes[0:0],
         out,
     );
 }
@@ -699,6 +738,7 @@ export fn stun_message_integrity_sha256_compute(packet_prefix: &[byte], message_
         return error.PacketTooShort;
     }
 
+    var empty_bytes: [byte: 1] = [];
     var header_prefix: [byte: 4] = [];
     header_prefix[0] = packet_prefix[0];
     header_prefix[1] = packet_prefix[1];
@@ -708,7 +748,7 @@ export fn stun_message_integrity_sha256_compute(packet_prefix: &[byte], message_
         key,
         header_prefix[0:4],
         packet_prefix[4:packet_prefix.len - 4],
-        [],
+        empty_bytes[0:0],
         out,
     );
 }
@@ -716,7 +756,7 @@ export fn stun_message_integrity_sha256_compute(packet_prefix: &[byte], message_
 export fn stun_verify_message_integrity(packet: &[byte], key: &[byte]) !void {
     const header: StunMessageHeader = try stun_header_parse(packet);
 
-    var iter: StunAttributeIterator = StunAttributeIterator{};
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
     stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
 
     while iter.cursor < iter.bytes.len {
@@ -742,7 +782,7 @@ export fn stun_verify_message_integrity(packet: &[byte], key: &[byte]) !void {
 export fn stun_verify_message_integrity_sha256(packet: &[byte], key: &[byte]) !void {
     const header: StunMessageHeader = try stun_header_parse(packet);
 
-    var iter: StunAttributeIterator = StunAttributeIterator{};
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
     stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
 
     while iter.cursor < iter.bytes.len {
@@ -784,7 +824,7 @@ export fn stun_fingerprint_compute(bytes: &[byte]) u32 {
 export fn stun_verify_fingerprint(packet: &[byte]) !void {
     const header: StunMessageHeader = try stun_header_parse(packet);
 
-    var iter: StunAttributeIterator = StunAttributeIterator{};
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
     stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
 
     while iter.cursor < iter.bytes.len {
@@ -818,10 +858,9 @@ export fn stun_parse_xor_mapped_address(value: &[byte], transaction_id: &[byte])
 
     const family: u8 = value[1] as u8;
     const x_port: u16 = try read_be_u16(value[2:2]);
-    var out: StunXorMappedAddress = StunXorMappedAddress{
-        family: family,
-        port: x_port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16),
-    };
+    var out: StunXorMappedAddress = stun_xor_mapped_address_make();
+    out.family = family;
+    out.port = x_port ^ ((STUN_MAGIC_COOKIE >> 16) as u16);
 
     var cookie_bytes: [byte: 4] = [];
     try stun_xor_cookie_bytes(cookie_bytes[0:4]);
