@@ -5,6 +5,7 @@ use webrtc.crypto.ghash;
 use webrtc.binary;
 use webrtc.crypto.hash;
 use webrtc.crypto.hmac;
+use webrtc.crypto.kdf;
 use webrtc.crypto.random;
 
 fn crypto_test_check_constant_time_compare_edges() i32 {
@@ -344,6 +345,80 @@ fn crypto_test_check_aes_gcm_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_hkdf_vectors() i32 {
+    var salt: [byte: 13] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte,
+        0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte,
+    ];
+    var ikm: [byte: 22] = [
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+    ];
+    var info: [byte: 10] = [
+        0xf0 as byte, 0xf1 as byte, 0xf2 as byte, 0xf3 as byte, 0xf4 as byte,
+        0xf5 as byte, 0xf6 as byte, 0xf7 as byte, 0xf8 as byte, 0xf9 as byte,
+    ];
+    var prk: [byte: 32] = [];
+    var okm: [byte: 42] = [];
+    var expected_prk: [byte: 32] = [
+        0x07 as byte, 0x77 as byte, 0x09 as byte, 0x36 as byte, 0x2c as byte, 0x2e as byte, 0x32 as byte, 0xdf as byte,
+        0x0d as byte, 0xdc as byte, 0x3f as byte, 0x0d as byte, 0xc4 as byte, 0x7b as byte, 0xba as byte, 0x63 as byte,
+        0x90 as byte, 0xb6 as byte, 0xc7 as byte, 0x3b as byte, 0xb5 as byte, 0x0f as byte, 0x9c as byte, 0x31 as byte,
+        0x22 as byte, 0xec as byte, 0x84 as byte, 0x4a as byte, 0xd7 as byte, 0xc2 as byte, 0xb3 as byte, 0xe5 as byte,
+    ];
+    var expected_okm: [byte: 42] = [
+        0x3c as byte, 0xb2 as byte, 0x5f as byte, 0x25 as byte, 0xfa as byte, 0xac as byte, 0xd5 as byte, 0x7a as byte,
+        0x90 as byte, 0x43 as byte, 0x4f as byte, 0x64 as byte, 0xd0 as byte, 0x36 as byte, 0x2f as byte, 0x2a as byte,
+        0x2d as byte, 0x2d as byte, 0x0a as byte, 0x90 as byte, 0xcf as byte, 0x1a as byte, 0x5a as byte, 0x4c as byte,
+        0x5d as byte, 0xb0 as byte, 0x2d as byte, 0x56 as byte, 0xec as byte, 0xc4 as byte, 0xc5 as byte, 0xbf as byte,
+        0x34 as byte, 0x00 as byte, 0x72 as byte, 0x08 as byte, 0xd5 as byte, 0xb8 as byte, 0x87 as byte, 0x18 as byte,
+        0x58 as byte, 0x65 as byte,
+    ];
+
+    if crypto_hkdf_extract_sha256(salt[0:13], ikm[0:22], prk[0:32]).error_id != 0 {
+        return 100;
+    }
+    if !constant_time_bytes_equal(prk[0:32], expected_prk[0:32]) {
+        return 101;
+    }
+    if crypto_hkdf_expand_sha256(prk[0:32], info[0:10], okm[0:42]).error_id != 0 {
+        return 102;
+    }
+    if !constant_time_bytes_equal(okm[0:42], expected_okm[0:42]) {
+        return 103;
+    }
+
+    return 0;
+}
+
+fn crypto_test_check_tls12_prf_vectors() i32 {
+    var secret: [byte: 6] = ['s' as byte, 'e' as byte, 'c' as byte, 'r' as byte, 'e' as byte, 't' as byte];
+    var label: [byte: 10] = ['t' as byte, 'e' as byte, 's' as byte, 't' as byte, ' ' as byte, 'l' as byte, 'a' as byte, 'b' as byte, 'e' as byte, 'l' as byte];
+    var seed: [byte: 16] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+    ];
+    var out: [byte: 48] = [];
+    var expected: [byte: 48] = [
+        0x69 as byte, 0x9f as byte, 0xfa as byte, 0x3e as byte, 0xe3 as byte, 0x9a as byte, 0x62 as byte, 0x86 as byte,
+        0x14 as byte, 0xb9 as byte, 0x76 as byte, 0x3e as byte, 0x8d as byte, 0x50 as byte, 0x95 as byte, 0x27 as byte,
+        0x4b as byte, 0x8a as byte, 0xa2 as byte, 0x77 as byte, 0x3a as byte, 0x2a as byte, 0xe2 as byte, 0xc8 as byte,
+        0x8d as byte, 0x77 as byte, 0x87 as byte, 0xe9 as byte, 0xdf as byte, 0x04 as byte, 0x19 as byte, 0x07 as byte,
+        0x1f as byte, 0xac as byte, 0xc2 as byte, 0x73 as byte, 0x18 as byte, 0x5d as byte, 0x66 as byte, 0xed as byte,
+        0x1d as byte, 0x21 as byte, 0xd3 as byte, 0x52 as byte, 0x7f as byte, 0xd3 as byte, 0x1f as byte, 0x28 as byte,
+    ];
+
+    if crypto_tls12_prf_sha256(secret[0:6], label[0:10], seed[0:16], out[0:48]).error_id != 0 {
+        return 110;
+    }
+    if !constant_time_bytes_equal(out[0:48], expected[0:48]) {
+        return 111;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -397,6 +472,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_aes_gcm_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_hkdf_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_tls12_prf_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

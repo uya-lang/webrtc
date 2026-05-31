@@ -1,0 +1,133 @@
+// webrtc.crypto.kdf - Phase 7 HKDF / TLS PRF helpers
+// 模块路径：src/webrtc/crypto/kdf.uya → use webrtc.crypto.kdf;
+
+use webrtc.crypto.hash;
+use webrtc.crypto.hmac;
+use webrtc.errors;
+
+export const CRYPTO_HKDF_SHA256_MAX_OUTPUT_BYTES: usize = 255usize * CRYPTO_SHA256_DIGEST_BYTES;
+
+export fn crypto_hkdf_extract_sha256(salt: &[byte], ikm: &[byte], out_prk: &[byte]) !void {
+    if out_prk.len < CRYPTO_SHA256_DIGEST_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var zero_salt: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+    if salt.len == 0usize {
+        return crypto_hmac_sha256_digest(zero_salt[0:CRYPTO_SHA256_DIGEST_BYTES], ikm, out_prk);
+    }
+    return crypto_hmac_sha256_digest(salt, ikm, out_prk);
+}
+
+export fn crypto_hkdf_expand_sha256(prk: &[byte], info: &[byte], out_okm: &[byte]) !void {
+    if prk.len != CRYPTO_SHA256_DIGEST_BYTES {
+        return error.InvalidPacket;
+    }
+    if out_okm.len > CRYPTO_HKDF_SHA256_MAX_OUTPUT_BYTES {
+        return error.UnsupportedCapability;
+    }
+    if out_okm.len == 0usize {
+        return;
+    }
+
+    var previous: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+    var buffer: [byte: CRYPTO_SHA256_DIGEST_BYTES + 255usize + 1usize] = [];
+    var block_index: usize = 1usize;
+    var written: usize = 0usize;
+
+    while written < out_okm.len {
+        var cursor: usize = 0usize;
+        if block_index > 1usize {
+            var prev_index: usize = 0usize;
+            while prev_index < CRYPTO_SHA256_DIGEST_BYTES {
+                buffer[cursor] = previous[prev_index];
+                cursor = cursor + 1usize;
+                prev_index = prev_index + 1usize;
+            }
+        }
+
+        var info_index: usize = 0usize;
+        while info_index < info.len {
+            buffer[cursor] = info[info_index];
+            cursor = cursor + 1usize;
+            info_index = info_index + 1usize;
+        }
+        buffer[cursor] = block_index as byte;
+        cursor = cursor + 1usize;
+
+        try crypto_hmac_sha256_digest(prk, buffer[0:cursor], previous[0:CRYPTO_SHA256_DIGEST_BYTES]);
+
+        var take_index: usize = 0usize;
+        while take_index < CRYPTO_SHA256_DIGEST_BYTES && written < out_okm.len {
+            out_okm[written] = previous[take_index];
+            written = written + 1usize;
+            take_index = take_index + 1usize;
+        }
+
+        block_index = block_index + 1usize;
+    }
+}
+
+fn crypto_tls12_p_hash_sha256(secret: &[byte], seed: &[byte], out: &[byte]) !void {
+    if out.len == 0usize {
+        return;
+    }
+
+    var a: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+    var buffer: [byte: CRYPTO_SHA256_DIGEST_BYTES + 255usize] = [];
+    var chunk: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+    try crypto_hmac_sha256_digest(secret, seed, a[0:CRYPTO_SHA256_DIGEST_BYTES]);
+
+    var written: usize = 0usize;
+    while written < out.len {
+        var cursor: usize = 0usize;
+        var index: usize = 0usize;
+        while index < CRYPTO_SHA256_DIGEST_BYTES {
+            buffer[cursor] = a[index];
+            cursor = cursor + 1usize;
+            index = index + 1usize;
+        }
+        index = 0usize;
+        while index < seed.len {
+            buffer[cursor] = seed[index];
+            cursor = cursor + 1usize;
+            index = index + 1usize;
+        }
+
+        try crypto_hmac_sha256_digest(secret, buffer[0:cursor], chunk[0:CRYPTO_SHA256_DIGEST_BYTES]);
+        index = 0usize;
+        while index < CRYPTO_SHA256_DIGEST_BYTES && written < out.len {
+            out[written] = chunk[index];
+            written = written + 1usize;
+            index = index + 1usize;
+        }
+
+        try crypto_hmac_sha256_digest(secret, a[0:CRYPTO_SHA256_DIGEST_BYTES], a[0:CRYPTO_SHA256_DIGEST_BYTES]);
+    }
+}
+
+export fn crypto_tls12_prf_sha256(secret: &[byte], label: &[byte], seed: &[byte], out: &[byte]) !void {
+    if label.len + seed.len > 255usize {
+        return error.UnsupportedCapability;
+    }
+    if out.len == 0usize {
+        return;
+    }
+
+    var label_and_seed: [byte: 255] = [];
+    var cursor: usize = 0usize;
+    var index: usize = 0usize;
+    while index < label.len {
+        label_and_seed[cursor] = label[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < seed.len {
+        label_and_seed[cursor] = seed[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+
+    return crypto_tls12_p_hash_sha256(secret, label_and_seed[0:cursor], out);
+}

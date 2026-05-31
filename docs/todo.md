@@ -200,7 +200,7 @@
 - [x] 实现 AES-CTR。
 - [x] 实现 AES-GCM。
 - [x] 实现 GHASH。
-- [ ] 实现 HKDF / TLS PRF 所需函数。
+- [x] 实现 HKDF / TLS PRF 所需函数。
 - [ ] 实现 P-256 field arithmetic。
 - [ ] 实现 ECDHE P-256。
 - [ ] 实现 ECDSA P-256 sign/verify。
