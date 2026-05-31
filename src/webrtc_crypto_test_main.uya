@@ -1,5 +1,6 @@
 use libc.printf;
 use webrtc.crypto.aes;
+use webrtc.crypto.ghash;
 use webrtc.binary;
 use webrtc.crypto.hash;
 use webrtc.crypto.hmac;
@@ -239,6 +240,38 @@ fn crypto_test_check_aes_ctr_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_ghash_vectors() i32 {
+    var h: [byte: 16] = [
+        0x66 as byte, 0xe9 as byte, 0x4b as byte, 0xd4 as byte, 0xef as byte, 0x8a as byte, 0x2c as byte, 0x3b as byte,
+        0x88 as byte, 0x4c as byte, 0xfa as byte, 0x59 as byte, 0xca as byte, 0x34 as byte, 0x2b as byte, 0x2e as byte,
+    ];
+    var x: [byte: 16] = [
+        0x03 as byte, 0x88 as byte, 0xda as byte, 0xce as byte, 0x60 as byte, 0xb6 as byte, 0xa3 as byte, 0x92 as byte,
+        0xf3 as byte, 0x28 as byte, 0xc2 as byte, 0xb9 as byte, 0x71 as byte, 0xb2 as byte, 0xfe as byte, 0x78 as byte,
+    ];
+    var expected: [byte: 16] = [
+        0x5e as byte, 0x2e as byte, 0xc7 as byte, 0x46 as byte, 0x91 as byte, 0x70 as byte, 0x62 as byte, 0x88 as byte,
+        0x2c as byte, 0x85 as byte, 0xb0 as byte, 0x68 as byte, 0x53 as byte, 0x53 as byte, 0xde as byte, 0xb7 as byte,
+    ];
+    var product: [byte: 16] = [];
+    var digest: [byte: 16] = [];
+
+    if crypto_ghash_multiply(h[0:16], x[0:16], product[0:16]).error_id != 0 {
+        return 80;
+    }
+    if !constant_time_bytes_equal(product[0:16], expected[0:16]) {
+        return 81;
+    }
+    if crypto_ghash_digest(h[0:16], x[0:16], digest[0:16]).error_id != 0 {
+        return 82;
+    }
+    if !constant_time_bytes_equal(digest[0:16], expected[0:16]) {
+        return 83;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -280,6 +313,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_aes_ctr_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_ghash_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

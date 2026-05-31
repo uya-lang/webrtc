@@ -1,0 +1,107 @@
+// webrtc.crypto.ghash - Phase 7 GHASH primitive
+// 模块路径：src/webrtc/crypto/ghash.uya → use webrtc.crypto.ghash;
+
+use webrtc.errors;
+
+export const CRYPTO_GHASH_BLOCK_BYTES: usize = 16usize;
+
+fn crypto_ghash_xor_block(dst: &[byte], src: &[byte]) void {
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        dst[index] = dst[index] ^ src[index];
+        index = index + 1usize;
+    }
+}
+
+fn crypto_ghash_shift_right_one(block: &[byte]) byte {
+    var carry: byte = 0 as byte;
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        const next_carry: byte = (block[index] & 0x01 as byte) << 7;
+        block[index] = (block[index] >> 1) | carry;
+        carry = next_carry;
+        index = index + 1usize;
+    }
+    return carry;
+}
+
+fn crypto_ghash_bit_is_set(block: &[byte], bit_index: usize) bool {
+    const byte_index: usize = bit_index / 8usize;
+    const bit_offset: usize = 7usize - (bit_index & 7usize);
+    return (block[byte_index] & ((1usize << bit_offset) as byte)) != 0 as byte;
+}
+
+export fn crypto_ghash_multiply(h: &[byte], x: &[byte], out: &[byte]) !void {
+    if h.len != CRYPTO_GHASH_BLOCK_BYTES || x.len != CRYPTO_GHASH_BLOCK_BYTES || out.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var z: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var v: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        v[index] = h[index];
+        index = index + 1usize;
+    }
+
+    var bit_index: usize = 0usize;
+    while bit_index < 128usize {
+        if crypto_ghash_bit_is_set(x, bit_index) {
+            crypto_ghash_xor_block(z[0:CRYPTO_GHASH_BLOCK_BYTES], v[0:CRYPTO_GHASH_BLOCK_BYTES]);
+        }
+
+        const lsb_set: bool = (v[CRYPTO_GHASH_BLOCK_BYTES - 1usize] & 0x01 as byte) != 0 as byte;
+        _ = crypto_ghash_shift_right_one(v[0:CRYPTO_GHASH_BLOCK_BYTES]);
+        if lsb_set {
+            v[0] = v[0] ^ 0xe1 as byte;
+        }
+        bit_index = bit_index + 1usize;
+    }
+
+    index = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        out[index] = z[index];
+        index = index + 1usize;
+    }
+}
+
+export fn crypto_ghash_digest(h: &[byte], data: &[byte], out: &[byte]) !void {
+    if h.len != CRYPTO_GHASH_BLOCK_BYTES || out.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var accumulator: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var block: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var next: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var offset: usize = 0usize;
+
+    while offset < data.len {
+        var index: usize = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES {
+            block[index] = 0 as byte;
+            index = index + 1usize;
+        }
+        index = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES && offset + index < data.len {
+            block[index] = data[offset + index];
+            index = index + 1usize;
+        }
+
+        crypto_ghash_xor_block(accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+        try crypto_ghash_multiply(h, accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], next[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+        index = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES {
+            accumulator[index] = next[index];
+            index = index + 1usize;
+        }
+
+        offset = offset + CRYPTO_GHASH_BLOCK_BYTES;
+    }
+
+    var out_index: usize = 0usize;
+    while out_index < CRYPTO_GHASH_BLOCK_BYTES {
+        out[out_index] = accumulator[out_index];
+        out_index = out_index + 1usize;
+    }
+}
