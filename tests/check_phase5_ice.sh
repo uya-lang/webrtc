@@ -47,6 +47,8 @@ rg -Fq 'test "host candidate gathering skips unspecified addresses and zero-port
 rg -Fq 'test "srflx candidate gathering builds binding request and adds related base metadata from success response"' src/webrtc_ice_test.uya
 rg -Fq 'test "srflx candidate gathering deduplicates repeated mapped addresses and host regather prunes stale srflx entries"' src/webrtc_ice_test.uya
 rg -Fq 'test "srflx candidate gathering rejects mismatched transaction ids and non-success responses"' src/webrtc_ice_test.uya
+rg -Fq 'test "relay candidate gathering injects TURN allocate success responses into ICE local candidates"' src/webrtc_ice_test.uya
+rg -Fq 'test "relay candidate gathering deduplicates repeated allocate responses and host regather prunes stale relay entries"' src/webrtc_ice_test.uya
 
 rg -Fq "export const ICE_MAX_FOUNDATION_BYTES" src/webrtc/ice/candidate.uya
 rg -Fq "export const ICE_COMPONENT_RTP" src/webrtc/ice/candidate.uya
@@ -122,18 +124,26 @@ rg -Fq "export struct IceHostInterfaceDescriptor" src/webrtc/ice/gather.uya
 rg -Fq "export struct IceHostGatherResult" src/webrtc/ice/gather.uya
 rg -Fq "export struct IceSrflxGatherTransaction" src/webrtc/ice/gather.uya
 rg -Fq "export struct IceSrflxGatherResult" src/webrtc/ice/gather.uya
+rg -Fq "export struct IceRelayGatherTransaction" src/webrtc/ice/gather.uya
+rg -Fq "export struct IceRelayGatherResult" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_host_interface_descriptor_set_name" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_host_interface_descriptor_set_host" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_prune_host_candidates" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_prune_srflx_candidates" src/webrtc/ice/gather.uya
+rg -Fq "export fn ice_agent_prune_relay_candidates" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_add_host_candidate" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_srflx_gather_transaction_init" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_srflx_build_binding_request" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_add_srflx_candidate" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_gather_srflx_candidate_from_response" src/webrtc/ice/gather.uya
+rg -Fq "export fn ice_relay_gather_transaction_init" src/webrtc/ice/gather.uya
+rg -Fq "export fn ice_agent_add_relay_candidate" src/webrtc/ice/gather.uya
+rg -Fq "export fn ice_agent_gather_relay_candidate_from_allocate_response" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_gather_host_candidates_from_descriptors" src/webrtc/ice/gather.uya
 rg -Fq "export fn ice_agent_gather_host_candidates" src/webrtc/ice/gather.uya
 rg -Fq "ICE_CANDIDATE_TYPE_HOST" src/webrtc/ice/gather.uya
 rg -Fq "ICE_CANDIDATE_TYPE_SRFLX" src/webrtc/ice/gather.uya
+rg -Fq "ICE_CANDIDATE_TYPE_RELAY" src/webrtc/ice/gather.uya
 rg -Fq "stun_parse_xor_mapped_address" src/webrtc/ice/gather.uya
+rg -Fq "turn_allocate_success_response_parse" src/webrtc/ice/gather.uya
 rg -Fq "stun_builder_init_binding_request" src/webrtc/ice/gather.uya

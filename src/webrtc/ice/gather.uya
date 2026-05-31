@@ -1,4 +1,4 @@
-// webrtc.ice.gather - host/srflx candidate gathering、接口枚举与去重
+// webrtc.ice.gather - host/srflx/relay candidate gathering、接口枚举与去重
 // 模块路径：src/webrtc/ice/gather.uya → use webrtc.ice.gather;
 
 use webrtc.errors;
@@ -7,6 +7,7 @@ use webrtc.ice.candidate;
 use webrtc.stun.model;
 use webrtc.stun.parse;
 use webrtc.stun.write;
+use webrtc.turn.parse;
 
 export const ICE_MAX_INTERFACE_NAME_BYTES: usize = 32;
 export const ICE_MAX_HOST_PORT_BINDINGS: usize = 4;
@@ -104,6 +105,18 @@ export struct IceSrflxGatherTransaction {
 }
 
 export struct IceSrflxGatherResult {
+    candidate_count: usize = 0,
+    duplicate_count: usize = 0,
+}
+
+export struct IceRelayGatherTransaction {
+    base_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE,
+    base_candidate_generation: u32 = 0u32,
+    turn_server: IceTransportAddress = IceTransportAddress{},
+    transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [],
+}
+
+export struct IceRelayGatherResult {
     candidate_count: usize = 0,
     duplicate_count: usize = 0,
 }
@@ -221,6 +234,18 @@ fn ice_srflx_foundation_hash(base_candidate: &IceCandidate, stun_server: &IceTra
     return hash;
 }
 
+fn ice_relay_foundation_hash(base_candidate: &IceCandidate, turn_server: &IceTransportAddress) u64 {
+    var hash: u64 = ICE_FNV64_OFFSET_BASIS;
+    hash = ice_hash_fnv1a_u8(hash, ICE_CANDIDATE_TYPE_RELAY);
+    hash = ice_hash_fnv1a_u8(hash, base_candidate.address.family);
+    hash = ice_hash_fnv1a_extend(hash, base_candidate.address.host[0:base_candidate.address.host_len]);
+    hash = ice_hash_fnv1a_u8(hash, base_candidate.transport);
+    hash = ice_hash_fnv1a_u8(hash, turn_server.family);
+    hash = ice_hash_fnv1a_extend(hash, turn_server.host[0:turn_server.host_len]);
+    hash = ice_hash_fnv1a_u16_be(hash, turn_server.port);
+    return hash;
+}
+
 fn ice_host_interface_has_prefix(desc: &IceHostInterfaceDescriptor, prefix: &[byte]) bool {
     if desc.host_len < prefix.len {
         return false;
@@ -248,6 +273,13 @@ fn ice_host_interface_is_unspecified(desc: &IceHostInterfaceDescriptor) bool {
 
 fn ice_srflx_gather_result_make(candidate_count: usize, duplicate_count: usize) IceSrflxGatherResult {
     return IceSrflxGatherResult{
+        candidate_count: candidate_count,
+        duplicate_count: duplicate_count,
+    };
+}
+
+fn ice_relay_gather_result_make(candidate_count: usize, duplicate_count: usize) IceRelayGatherResult {
+    return IceRelayGatherResult{
         candidate_count: candidate_count,
         duplicate_count: duplicate_count,
     };
@@ -604,6 +636,17 @@ export fn ice_srflx_gather_transaction_make() IceSrflxGatherTransaction {
     };
 }
 
+export fn ice_relay_gather_transaction_make() IceRelayGatherTransaction {
+    const turn_server: IceTransportAddress = ice_transport_address_make();
+    var transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    return IceRelayGatherTransaction{
+        base_candidate_index: ICE_CANDIDATE_INDEX_NONE,
+        base_candidate_generation: 0u32,
+        turn_server: turn_server,
+        transaction_id: transaction_id,
+    };
+}
+
 export fn ice_host_interface_descriptor_init(desc: &IceHostInterfaceDescriptor) void {
     if desc == null {
         return;
@@ -687,6 +730,38 @@ export fn ice_agent_prune_srflx_candidates(agent: &IceAgent) usize {
     var read_index: usize = 0;
     while read_index < agent.local_candidate_count {
         if agent.local_candidates[read_index].candidate_type != ICE_CANDIDATE_TYPE_SRFLX {
+            if write_index != read_index {
+                agent.local_candidates[write_index] = agent.local_candidates[read_index];
+            }
+            write_index = write_index + 1;
+        }
+        read_index = read_index + 1;
+    }
+
+    const pruned: usize = agent.local_candidate_count - write_index;
+    while write_index < agent.local_candidate_count {
+        ice_candidate_init(&agent.local_candidates[write_index]);
+        write_index = write_index + 1;
+    }
+
+    agent.local_candidate_count = agent.local_candidate_count - pruned;
+    ice_agent_refresh_local_candidate_priorities(agent);
+    if pruned != 0usize {
+        ice_agent_clear_checklist(agent);
+        agent.checklist_dirty = true;
+    }
+    return pruned;
+}
+
+export fn ice_agent_prune_relay_candidates(agent: &IceAgent) usize {
+    if agent == null || agent.local_candidate_count == 0 {
+        return 0;
+    }
+
+    var write_index: usize = 0;
+    var read_index: usize = 0;
+    while read_index < agent.local_candidate_count {
+        if agent.local_candidates[read_index].candidate_type != ICE_CANDIDATE_TYPE_RELAY {
             if write_index != read_index {
                 agent.local_candidates[write_index] = agent.local_candidates[read_index];
             }
@@ -844,6 +919,52 @@ export fn ice_srflx_build_binding_request(transaction: &IceSrflxGatherTransactio
     return stun_builder_finish(&builder);
 }
 
+export fn ice_relay_gather_transaction_init(
+    transaction: &IceRelayGatherTransaction,
+    agent: &IceAgent,
+    base_candidate_index: u16,
+    turn_server: &IceTransportAddress,
+    transaction_id: &[byte],
+) !void {
+    if transaction == null || agent == null || turn_server == null {
+        return error.InvalidPacket;
+    }
+    if transaction_id.len != STUN_TRANSACTION_ID_BYTES {
+        return error.InvalidPacket;
+    }
+    if !ice_transport_address_is_set(turn_server) {
+        return error.InvalidPacket;
+    }
+    const base_candidate_slot: usize = base_candidate_index as usize;
+    if base_candidate_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if base_candidate_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+
+    const base_candidate: &IceCandidate = &agent.local_candidates[base_candidate_slot];
+    if base_candidate.candidate_type != ICE_CANDIDATE_TYPE_HOST || !ice_transport_address_is_set(&base_candidate.address) {
+        return error.InvalidPacket;
+    }
+    if base_candidate.transport != ICE_CANDIDATE_TRANSPORT_UDP {
+        return error.UnsupportedCapability;
+    }
+    if base_candidate.address.family != turn_server.family {
+        return error.InvalidPacket;
+    }
+
+    transaction.base_candidate_index = base_candidate_index;
+    transaction.base_candidate_generation = base_candidate.generation;
+    try ice_gather_transport_address_copy(&transaction.turn_server, turn_server);
+
+    var i: usize = 0;
+    while i < STUN_TRANSACTION_ID_BYTES {
+        transaction.transaction_id[i] = transaction_id[i];
+        i = i + 1;
+    }
+}
+
 export fn ice_agent_add_srflx_candidate(
     agent: &IceAgent,
     base_candidate_index: u16,
@@ -913,6 +1034,78 @@ export fn ice_agent_add_srflx_candidate(
     return (agent.local_candidate_count - 1) as u16;
 }
 
+export fn ice_agent_add_relay_candidate(
+    agent: &IceAgent,
+    base_candidate_index: u16,
+    relayed_address: &IceTransportAddress,
+    turn_server: &IceTransportAddress,
+) !u16 {
+    if agent == null || relayed_address == null || turn_server == null {
+        return error.InvalidPacket;
+    }
+    if !ice_transport_address_is_set(relayed_address) || !ice_transport_address_is_set(turn_server) {
+        return error.InvalidPacket;
+    }
+    const base_candidate_slot: usize = base_candidate_index as usize;
+    if base_candidate_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if base_candidate_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+
+    const base_candidate: &IceCandidate = &agent.local_candidates[base_candidate_slot];
+    if base_candidate.candidate_type != ICE_CANDIDATE_TYPE_HOST || !ice_transport_address_is_set(&base_candidate.address) {
+        return error.InvalidPacket;
+    }
+    if base_candidate.transport != ICE_CANDIDATE_TRANSPORT_UDP {
+        return error.UnsupportedCapability;
+    }
+    if base_candidate.address.family != turn_server.family {
+        return error.InvalidPacket;
+    }
+    ice_agent_note_local_gathering_started(agent);
+
+    var candidate_local: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&candidate_local);
+    candidate_local.component_id = base_candidate.component_id;
+    candidate_local.transport = base_candidate.transport;
+    candidate_local.candidate_type = ICE_CANDIDATE_TYPE_RELAY;
+    candidate_local.network_id = base_candidate.network_id;
+    candidate_local.network_cost = base_candidate.network_cost;
+    candidate_local.generation = base_candidate.generation;
+    candidate_local.base_candidate_index = base_candidate_index;
+    try ice_gather_transport_address_copy(&candidate_local.address, relayed_address);
+    try ice_gather_transport_address_copy(&candidate_local.related_address, &base_candidate.address);
+    try ice_write_foundation_hex(&candidate_local, ice_relay_foundation_hash(base_candidate, turn_server));
+
+    var existing_index: usize = 0;
+    while existing_index < agent.local_candidate_count {
+        if ice_local_candidate_matches_transport(
+            &agent.local_candidates[existing_index],
+            candidate_local.component_id,
+            candidate_local.transport,
+            &candidate_local.address,
+        ) {
+            return existing_index as u16;
+        }
+        existing_index = existing_index + 1;
+    }
+
+    if agent.local_candidate_count >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.UnsupportedCapability;
+    }
+
+    agent.local_candidates[agent.local_candidate_count] = candidate_local;
+    agent.local_candidate_count = agent.local_candidate_count + 1;
+    ice_agent_refresh_local_candidate_priorities(agent);
+    agent.checklist_dirty = true;
+    if !ice_agent_has_selected_pair(agent) {
+        ice_agent_clear_checklist(agent);
+    }
+    return (agent.local_candidate_count - 1) as u16;
+}
+
 export fn ice_agent_gather_srflx_candidate_from_response(
     agent: &IceAgent,
     transaction: &IceSrflxGatherTransaction,
@@ -951,6 +1144,52 @@ export fn ice_agent_gather_srflx_candidate_from_response(
     return ice_srflx_gather_result_make(1usize, 0usize);
 }
 
+export fn ice_agent_gather_relay_candidate_from_allocate_response(
+    agent: &IceAgent,
+    transaction: &IceRelayGatherTransaction,
+    packet: &[byte],
+) !IceRelayGatherResult {
+    if agent == null || transaction == null {
+        return error.InvalidPacket;
+    }
+    const base_candidate_slot: usize = transaction.base_candidate_index as usize;
+    if base_candidate_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if base_candidate_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+
+    const base_candidate: &IceCandidate = &agent.local_candidates[base_candidate_slot];
+    if base_candidate.candidate_type != ICE_CANDIDATE_TYPE_HOST {
+        return error.InvalidPacket;
+    }
+    if base_candidate.generation != transaction.base_candidate_generation {
+        return error.InvalidPacket;
+    }
+
+    const response = try turn_allocate_success_response_parse(packet, transaction.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+    var result: IceRelayGatherResult = ice_relay_gather_result_make(0usize, 0usize);
+
+    var relayed_index: usize = 0;
+    while relayed_index < response.relayed_address_count {
+        var relayed_address: IceTransportAddress = ice_transport_address_make();
+        try ice_stun_xor_mapped_to_transport_address(&relayed_address, &response.relayed_addresses[relayed_index]);
+
+        const before_count: usize = agent.local_candidate_count;
+        _ = try ice_agent_add_relay_candidate(agent, transaction.base_candidate_index, &relayed_address, &transaction.turn_server);
+        if agent.local_candidate_count == before_count {
+            result.duplicate_count = result.duplicate_count + 1usize;
+        } else {
+            result.candidate_count = result.candidate_count + 1usize;
+        }
+
+        relayed_index = relayed_index + 1usize;
+    }
+
+    return result;
+}
+
 export fn ice_agent_gather_host_candidates_from_descriptors(
     agent: &IceAgent,
     descriptors: &IceHostInterfaceDescriptor,
@@ -971,8 +1210,9 @@ export fn ice_agent_gather_host_candidates_from_descriptors(
     ice_agent_note_local_gathering_started(agent);
 
     var result: IceHostGatherResult = IceHostGatherResult{};
-    // Rebuilding the host base set invalidates derived srflx candidates that reference old indices.
+    // Rebuilding the host base set invalidates derived srflx/relay candidates that reference old indices.
     _ = ice_agent_prune_srflx_candidates(agent);
+    _ = ice_agent_prune_relay_candidates(agent);
     result.pruned_host_count = ice_agent_prune_host_candidates(agent);
 
     var index: usize = 0;
@@ -1023,8 +1263,9 @@ export fn ice_agent_gather_host_candidates(
     ice_agent_note_local_gathering_started(agent);
 
     var result: IceHostGatherResult = IceHostGatherResult{};
-    // Rebuilding the host base set invalidates derived srflx candidates that reference old indices.
+    // Rebuilding the host base set invalidates derived srflx/relay candidates that reference old indices.
     _ = ice_agent_prune_srflx_candidates(agent);
+    _ = ice_agent_prune_relay_candidates(agent);
     result.pruned_host_count = ice_agent_prune_host_candidates(agent);
 
     var current: &IfAddrs = list;
