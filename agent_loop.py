@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from datetime import datetime
@@ -32,9 +33,23 @@ TOOLCHAIN_BUG_SECTIONS = (
 )
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
+CODEX_SANDBOX = os.environ.get("CODEX_SANDBOX", "").strip()
+VALID_CODEX_SANDBOXES = {
+    "read-only",
+    "workspace-write",
+    "danger-full-access",
+}
 SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
 HEARTBEAT_SECONDS = max(1, int(os.environ.get("AGENT_HEARTBEAT", "15")))
 MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
+
+if CODEX_SANDBOX and CODEX_SANDBOX not in VALID_CODEX_SANDBOXES:
+    raise SystemExit(
+        "unsupported CODEX_SANDBOX={!r}; expected one of: {}".format(
+            CODEX_SANDBOX,
+            ", ".join(sorted(VALID_CODEX_SANDBOXES)),
+        )
+    )
 
 
 def parse_args():
@@ -653,13 +668,10 @@ def run_codex(
     if log_file is None:
         log_file = make_log_file(log_dir, runnable_tasks)
 
-    cmd = [
-        CODEX_CMD,
-        "exec",
-        "--cd",
-        str(root),
-        prompt,
-    ]
+    cmd = [CODEX_CMD, "exec"]
+    if CODEX_SANDBOX:
+        cmd.extend(["--sandbox", CODEX_SANDBOX])
+    cmd.extend(["--cd", str(root), prompt])
 
     with log_file.open("w", encoding="utf-8") as handle:
         handle.write(f"[{now()}] START BATCH\n")
@@ -670,7 +682,7 @@ def run_codex(
         handle.write(f"TOOLCHAIN_BUG_DIR: {path_label(root, toolchain_bug_dir)}\n")
         handle.write(f"TOOLCHAIN_BUG_REPRO_DIR: {path_label(root, toolchain_bug_repro_dir)}\n\n")
         handle.write(summarize_tasks(runnable_tasks, limit=50) + "\n\n")
-        handle.write("CMD: " + " ".join(cmd[:4]) + " <prompt>\n\n")
+        handle.write("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
         handle.flush()
 
         try:
