@@ -3,6 +3,7 @@ use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
 use webrtc.ice.gather;
+use webrtc.sdp.parse;
 use webrtc.stun.model;
 use webrtc.stun.parse;
 use webrtc.stun.write;
@@ -20,6 +21,199 @@ fn ice_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
         i = i + 1;
     }
     return true;
+}
+
+fn ice_test_ascii_lower(value: byte) byte {
+    if value >= 'A' as byte && value <= 'Z' as byte {
+        return value + 32 as byte;
+    }
+    return value;
+}
+
+fn ice_test_bytes_equal_ignore_ascii_case(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < lhs.len {
+        if ice_test_ascii_lower(lhs[i]) != ice_test_ascii_lower(rhs[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn ice_test_bytes_contains(value: &[byte], needle: byte) bool {
+    var i: usize = 0;
+    while i < value.len {
+        if value[i] == needle {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn ice_test_parse_decimal_u16(value: &[byte]) !u16 {
+    if value.len == 0 {
+        return error.InvalidPacket;
+    }
+
+    var out: u32 = 0u32;
+    var i: usize = 0;
+    while i < value.len {
+        const digit: byte = value[i];
+        if digit < '0' as byte || digit > '9' as byte {
+            return error.InvalidPacket;
+        }
+        out = (out * 10u32) + ((digit - ('0' as byte)) as u32);
+        if out > 65535u32 {
+            return error.InvalidPacket;
+        }
+        i = i + 1;
+    }
+    return out as u16;
+}
+
+fn ice_test_parse_decimal_u32(value: &[byte]) !u32 {
+    if value.len == 0 {
+        return error.InvalidPacket;
+    }
+
+    var out: u64 = 0u64;
+    var i: usize = 0;
+    while i < value.len {
+        const digit: byte = value[i];
+        if digit < '0' as byte || digit > '9' as byte {
+            return error.InvalidPacket;
+        }
+        out = (out * 10u64) + ((digit - ('0' as byte)) as u64);
+        if out > @max_value(u32) {
+            return error.InvalidPacket;
+        }
+        i = i + 1;
+    }
+    return out as u32;
+}
+
+fn ice_test_import_remote_candidate_from_browser_sdp(
+    agent: &IceAgent,
+    sdp: &[byte],
+    media_index: usize,
+    candidate_index: usize,
+    refresh_remote_credentials: bool,
+) !u16 {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+
+    const session = try sdp_parse_session_description_bytes(sdp);
+    if media_index >= session.media_section_count {
+        return error.InvalidPacket;
+    }
+
+    const media = &session.media_sections[media_index];
+    if candidate_index >= media.candidate_count {
+        return error.InvalidPacket;
+    }
+
+    if refresh_remote_credentials {
+        if media.ice_ufrag.len == 0 || media.ice_pwd.len == 0 {
+            return error.InvalidPacket;
+        }
+        try ice_credentials_set(&agent.remote_credentials, media.ice_ufrag, media.ice_pwd);
+    }
+
+    const sdp_candidate = &media.candidates[candidate_index];
+    var runtime_candidate: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&runtime_candidate);
+    try ice_candidate_set_foundation(&runtime_candidate, sdp_candidate.foundation);
+    runtime_candidate.component_id = sdp_candidate.component_id;
+    runtime_candidate.priority = sdp_candidate.priority;
+
+    var transport_is_tcp: bool = false;
+    if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.transport, "udp" as &[byte]) {
+        runtime_candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    } else if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.transport, "tcp" as &[byte]) {
+        transport_is_tcp = true;
+    } else {
+        return error.UnsupportedCapability;
+    }
+
+    if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.candidate_type, "host" as &[byte]) {
+        runtime_candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    } else if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.candidate_type, "srflx" as &[byte]) {
+        runtime_candidate.candidate_type = ICE_CANDIDATE_TYPE_SRFLX;
+    } else if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.candidate_type, "prflx" as &[byte]) {
+        runtime_candidate.candidate_type = ICE_CANDIDATE_TYPE_PRFLX;
+    } else if ice_test_bytes_equal_ignore_ascii_case(sdp_candidate.candidate_type, "relay" as &[byte]) {
+        runtime_candidate.candidate_type = ICE_CANDIDATE_TYPE_RELAY;
+    } else {
+        return error.UnsupportedCapability;
+    }
+
+    var family: u8 = ICE_ADDRESS_FAMILY_IPV4;
+    if ice_test_bytes_contains(sdp_candidate.address, ':' as byte) {
+        family = ICE_ADDRESS_FAMILY_IPV6;
+    }
+    try ice_transport_address_set(&runtime_candidate.address, family, sdp_candidate.address, sdp_candidate.port);
+
+    var related_host: &[byte] = "" as &[byte];
+    var related_port: u16 = 0u16;
+    var saw_tcptype: bool = false;
+
+    var extension_index: usize = 0;
+    while extension_index < sdp_candidate.extension_token_count {
+        if extension_index + 1usize >= sdp_candidate.extension_token_count {
+            return error.InvalidPacket;
+        }
+
+        const key: &[byte] = sdp_candidate.extension_tokens[extension_index];
+        const value: &[byte] = sdp_candidate.extension_tokens[extension_index + 1usize];
+
+        if ice_test_bytes_equal_ignore_ascii_case(key, "generation" as &[byte]) {
+            runtime_candidate.generation = try ice_test_parse_decimal_u32(value);
+        } else if ice_test_bytes_equal_ignore_ascii_case(key, "network-id" as &[byte]) {
+            runtime_candidate.network_id = try ice_test_parse_decimal_u16(value);
+        } else if ice_test_bytes_equal_ignore_ascii_case(key, "network-cost" as &[byte]) {
+            runtime_candidate.network_cost = try ice_test_parse_decimal_u16(value);
+        } else if ice_test_bytes_equal_ignore_ascii_case(key, "raddr" as &[byte]) {
+            related_host = value;
+        } else if ice_test_bytes_equal_ignore_ascii_case(key, "rport" as &[byte]) {
+            related_port = try ice_test_parse_decimal_u16(value);
+        } else if ice_test_bytes_equal_ignore_ascii_case(key, "tcptype" as &[byte]) {
+            saw_tcptype = true;
+            if ice_test_bytes_equal_ignore_ascii_case(value, "active" as &[byte]) {
+                runtime_candidate.transport = ICE_CANDIDATE_TRANSPORT_TCP_ACTIVE;
+            } else if ice_test_bytes_equal_ignore_ascii_case(value, "passive" as &[byte]) {
+                runtime_candidate.transport = ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE;
+            } else if ice_test_bytes_equal_ignore_ascii_case(value, "so" as &[byte]) {
+                runtime_candidate.transport = ICE_CANDIDATE_TRANSPORT_TCP_SO;
+            } else {
+                return error.UnsupportedCapability;
+            }
+        }
+
+        extension_index = extension_index + 2usize;
+    }
+
+    if transport_is_tcp && !saw_tcptype {
+        return error.InvalidPacket;
+    }
+    if (related_host.len == 0 && related_port != 0u16) || (related_host.len != 0 && related_port == 0u16) {
+        return error.InvalidPacket;
+    }
+    if related_host.len != 0 {
+        var related_family: u8 = ICE_ADDRESS_FAMILY_IPV4;
+        if ice_test_bytes_contains(related_host, ':' as byte) {
+            related_family = ICE_ADDRESS_FAMILY_IPV6;
+        }
+        try ice_transport_address_set(&runtime_candidate.related_address, related_family, related_host, related_port);
+    }
+
+    return ice_agent_add_remote_candidate(agent, &runtime_candidate);
 }
 
 fn ice_test_init_remote_candidate(
@@ -1014,6 +1208,217 @@ test "ice state change events queue unique snapshots for nomination and trickle 
         3u64,
     );
     try ice_test_expect_no_state_change_event(&controlling_agent);
+}
+
+test "chrome trickle interop imports browser candidates and preserves selected pair across remote updates" {
+    const chrome_initial_offer: &[byte] =
+        "v=0\n"
+        "o=- 4962321072185932848 2 IN IP4 127.0.0.1\n"
+        "s=-\n"
+        "t=0 0\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:audio\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:chromeAudio\n"
+        "a=ice-pwd:chromeAudioPwd1234567890\n"
+        "a=fingerprint:sha-256 4A:AD\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:1 1 udp 2122260223 192.0.2.10 54400 typ host generation 0 network-id 1 network-cost 10\n";
+    const chrome_trickle_update: &[byte] =
+        "v=0\n"
+        "o=- 4962321072185932848 2 IN IP4 127.0.0.1\n"
+        "s=-\n"
+        "t=0 0\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:audio\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:chromeAudio\n"
+        "a=ice-pwd:chromeAudioPwd1234567890\n"
+        "a=fingerprint:sha-256 4A:AD\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:9 1 udp 1686052607 198.51.100.40 3478 typ srflx raddr 192.0.2.10 rport 54400 generation 0 network-id 1 network-cost 10\n";
+
+    var agent: IceAgent = ice_agent_make();
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 410u64);
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[0],
+        "lf-chrome" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        2130706431u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "10.0.0.5" as &[byte],
+        5000u16,
+    );
+    agent.local_candidate_count = 1usize;
+    ice_agent_note_local_gathering_complete(&agent);
+
+    try expect((try ice_test_import_remote_candidate_from_browser_sdp(
+        &agent,
+        chrome_initial_offer,
+        0usize,
+        0usize,
+        true,
+    )) == 0u16);
+    try expect(ice_test_bytes_equal(
+        agent.remote_credentials.ufrag[0:agent.remote_credentials.ufrag_len],
+        "chromeAudio" as &[byte],
+    ));
+    try expect(ice_test_bytes_equal(
+        agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len],
+        "chromeAudioPwd1234567890" as &[byte],
+    ));
+    try expect(agent.remote_candidate_count == 1usize);
+    try expect(agent.remote_candidates[0].transport == ICE_CANDIDATE_TRANSPORT_UDP);
+    try expect(agent.remote_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_HOST);
+    try expect(agent.remote_candidates[0].generation == 0u32);
+    try expect(agent.remote_candidates[0].network_id == 1u16);
+    try expect(agent.remote_candidates[0].network_cost == 10u16);
+
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 1usize);
+    agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    ice_agent_note_remote_gathering_complete(&agent);
+    try ice_agent_select_checklist_pair(&agent, 0u16, true);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(ice_agent_trickle_is_complete(&agent));
+
+    try expect((try ice_test_import_remote_candidate_from_browser_sdp(
+        &agent,
+        chrome_trickle_update,
+        0usize,
+        0usize,
+        false,
+    )) == 1u16);
+    try expect(agent.remote_candidate_count == 2usize);
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_GATHERING);
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(!ice_agent_trickle_is_complete(&agent));
+    try expect(agent.remote_candidates[1].candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
+    try expect(agent.remote_candidates[1].generation == 0u32);
+    try expect(agent.remote_candidates[1].network_id == 1u16);
+    try expect(agent.remote_candidates[1].network_cost == 10u16);
+    try expect(ice_candidate_has_related_address(&agent.remote_candidates[1]));
+    try expect(ice_test_bytes_equal(
+        agent.remote_candidates[1].related_address.host[0:agent.remote_candidates[1].related_address.host_len],
+        "192.0.2.10" as &[byte],
+    ));
+    try expect(agent.remote_candidates[1].related_address.port == 54400u16);
+
+    ice_agent_note_remote_gathering_complete(&agent);
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 2usize);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(ice_agent_trickle_is_complete(&agent));
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(agent.checklist[agent.selected_pair_index as usize].remote_candidate_index == 0u16);
+}
+
+test "firefox trickle interop maps browser credentials and candidate extensions into ICE agent state" {
+    const firefox_initial_offer: &[byte] =
+        "v=0\n"
+        "o=mozilla...THIS_IS_SDPARTA-98.0 37202 0 IN IP4 0.0.0.0\n"
+        "s=-\n"
+        "t=0 0\n"
+        "a=fingerprint:sha-256 60:88\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 120\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:sdparta_1\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:firefoxVideo\n"
+        "a=ice-pwd:firefoxVideoPwd123456\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:1 1 UDP 2122252543 198.51.100.20 60002 typ host generation 0\n"
+        "a=rtpmap:120 VP8/90000\n";
+    const firefox_trickle_update: &[byte] =
+        "v=0\n"
+        "o=mozilla...THIS_IS_SDPARTA-98.0 37202 0 IN IP4 0.0.0.0\n"
+        "s=-\n"
+        "t=0 0\n"
+        "a=fingerprint:sha-256 60:88\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 120\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:sdparta_1\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:firefoxVideo\n"
+        "a=ice-pwd:firefoxVideoPwd123456\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:3 1 UDP 1685921535 203.0.113.44 62000 typ srflx raddr 198.51.100.20 rport 60002 generation 0\n"
+        "a=rtpmap:120 VP8/90000\n";
+
+    var agent: IceAgent = ice_agent_make();
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 411u64);
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[0],
+        "lf-firefox" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        2130706431u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "10.0.0.6" as &[byte],
+        5002u16,
+    );
+    agent.local_candidate_count = 1usize;
+    ice_agent_note_local_gathering_complete(&agent);
+
+    try expect((try ice_test_import_remote_candidate_from_browser_sdp(
+        &agent,
+        firefox_initial_offer,
+        0usize,
+        0usize,
+        true,
+    )) == 0u16);
+    try expect(ice_test_bytes_equal(
+        agent.remote_credentials.ufrag[0:agent.remote_credentials.ufrag_len],
+        "firefoxVideo" as &[byte],
+    ));
+    try expect(ice_test_bytes_equal(
+        agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len],
+        "firefoxVideoPwd123456" as &[byte],
+    ));
+    try expect(agent.remote_candidates[0].transport == ICE_CANDIDATE_TRANSPORT_UDP);
+    try expect(agent.remote_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_HOST);
+    try expect(agent.remote_candidates[0].generation == 0u32);
+
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 1usize);
+    agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    ice_agent_note_remote_gathering_complete(&agent);
+    try ice_agent_select_checklist_pair(&agent, 0u16, true);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(ice_agent_trickle_is_complete(&agent));
+
+    try expect((try ice_test_import_remote_candidate_from_browser_sdp(
+        &agent,
+        firefox_trickle_update,
+        0usize,
+        0usize,
+        false,
+    )) == 1u16);
+    try expect(agent.remote_candidate_count == 2usize);
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_GATHERING);
+    try expect(agent.remote_candidates[1].transport == ICE_CANDIDATE_TRANSPORT_UDP);
+    try expect(agent.remote_candidates[1].candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
+    try expect(ice_candidate_has_related_address(&agent.remote_candidates[1]));
+    try expect(ice_test_bytes_equal(
+        agent.remote_candidates[1].related_address.host[0:agent.remote_candidates[1].related_address.host_len],
+        "198.51.100.20" as &[byte],
+    ));
+    try expect(agent.remote_candidates[1].related_address.port == 60002u16);
+
+    ice_agent_note_remote_gathering_complete(&agent);
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 2usize);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(ice_agent_trickle_is_complete(&agent));
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(agent.checklist[agent.selected_pair_index as usize].remote_candidate_index == 0u16);
 }
 
 test "dual agents complete selected pair across nomination request and success response" {
