@@ -100,6 +100,39 @@ fn crypto_test_check_sha1_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_sha256_vectors() i32 {
+    var empty: [byte: 1] = [];
+    var abc: [byte: 3] = ['a' as byte, 'b' as byte, 'c' as byte];
+    var digest: [byte: 32] = [];
+    var expected_empty: [byte: 32] = [
+        0xe3 as byte, 0xb0 as byte, 0xc4 as byte, 0x42 as byte, 0x98 as byte, 0xfc as byte, 0x1c as byte, 0x14 as byte,
+        0x9a as byte, 0xfb as byte, 0xf4 as byte, 0xc8 as byte, 0x99 as byte, 0x6f as byte, 0xb9 as byte, 0x24 as byte,
+        0x27 as byte, 0xae as byte, 0x41 as byte, 0xe4 as byte, 0x64 as byte, 0x9b as byte, 0x93 as byte, 0x4c as byte,
+        0xa4 as byte, 0x95 as byte, 0x99 as byte, 0x1b as byte, 0x78 as byte, 0x52 as byte, 0xb8 as byte, 0x55 as byte,
+    ];
+    var expected_abc: [byte: 32] = [
+        0xba as byte, 0x78 as byte, 0x16 as byte, 0xbf as byte, 0x8f as byte, 0x01 as byte, 0xcf as byte, 0xea as byte,
+        0x41 as byte, 0x41 as byte, 0x40 as byte, 0xde as byte, 0x5d as byte, 0xae as byte, 0x22 as byte, 0x23 as byte,
+        0xb0 as byte, 0x03 as byte, 0x61 as byte, 0xa3 as byte, 0x96 as byte, 0x17 as byte, 0x7a as byte, 0x9c as byte,
+        0xb4 as byte, 0x10 as byte, 0xff as byte, 0x61 as byte, 0xf2 as byte, 0x00 as byte, 0x15 as byte, 0xad as byte,
+    ];
+
+    if crypto_sha256_digest(empty[0:0], digest[0:32]).error_id != 0 {
+        return 40;
+    }
+    if !constant_time_bytes_equal(digest[0:32], expected_empty[0:32]) {
+        return 41;
+    }
+    if crypto_sha256_digest(abc[0:3], digest[0:32]).error_id != 0 {
+        return 42;
+    }
+    if !constant_time_bytes_equal(digest[0:32], expected_abc[0:32]) {
+        return 43;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -117,6 +150,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_sha1_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_sha256_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

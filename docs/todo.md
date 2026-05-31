@@ -194,7 +194,7 @@
 - [x] 先增加 constant-time 比较测试和随机源失败测试。
 - [ ] 先建立 AES/GHASH/HMAC microbench 基线。
 - [x] 实现 SHA-1。
-- [ ] 实现 SHA-256。
+- [x] 实现 SHA-256。
 - [ ] 实现 HMAC-SHA1。
 - [ ] 实现 HMAC-SHA256。
 - [ ] 实现 AES-CTR。
