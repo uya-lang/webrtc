@@ -421,7 +421,7 @@ test "connectivity check transaction builds authenticated binding requests and m
         &agent,
         pair_index,
         txid[0:STUN_TRANSACTION_ID_BYTES],
-        true,
+        false,
     );
 
     var packet: [byte: 256] = [];
@@ -452,10 +452,9 @@ test "connectivity check transaction builds authenticated binding requests and m
     const controlling_attr: StunAttribute =
         try ice_test_stun_find_attribute(packet[0:packet_len], STUN_ATTRIBUTE_ICE_CONTROLLING);
     try expect((try stun_parse_ice_role_tiebreaker(controlling_attr.value)) == agent.tie_breaker);
-
-    const use_candidate_attr: StunAttribute =
-        try ice_test_stun_find_attribute(packet[0:packet_len], STUN_ATTRIBUTE_USE_CANDIDATE);
-    try stun_parse_use_candidate(use_candidate_attr.value);
+    const missing_use_candidate: !StunAttribute =
+        ice_test_stun_find_attribute(packet[0:packet_len], STUN_ATTRIBUTE_USE_CANDIDATE);
+    try expect(missing_use_candidate.error_id == @error_id(error.InvalidPacket));
     try stun_verify_message_integrity(packet[0:packet_len], agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len]);
     try stun_verify_fingerprint(packet[0:packet_len]);
 
@@ -464,6 +463,144 @@ test "connectivity check transaction builds authenticated binding requests and m
     try expect(agent.checklist[0].request_count == 1u32);
     try expect(agent.checklist[0].last_request_sent_at_us == 1000u64);
     try expect(transaction.sent_at_us == 1000u64);
+}
+
+test "regular nomination waits for a valid pair and marks a successful nomination" {
+    var agent: IceAgent = ice_agent_make();
+    const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
+
+    var early_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        24 as byte,
+        26 as byte,
+        28 as byte,
+        30 as byte,
+        32 as byte,
+        34 as byte,
+        36 as byte,
+        38 as byte,
+        40 as byte,
+        42 as byte,
+        44 as byte,
+        46 as byte,
+    ];
+    var early_nomination: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    const early_nomination_result: !void = ice_connectivity_check_transaction_init(
+        &early_nomination,
+        &agent,
+        pair_index,
+        early_txid[0:STUN_TRANSACTION_ID_BYTES],
+        true,
+    );
+    try expect(early_nomination_result.error_id == @error_id(error.InvalidPacket));
+
+    var probe_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        48 as byte,
+        50 as byte,
+        52 as byte,
+        54 as byte,
+        56 as byte,
+        58 as byte,
+        60 as byte,
+        62 as byte,
+        64 as byte,
+        66 as byte,
+        68 as byte,
+        70 as byte,
+    ];
+    var probe_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &probe_transaction,
+        &agent,
+        pair_index,
+        probe_txid[0:STUN_TRANSACTION_ID_BYTES],
+        false,
+    );
+
+    var probe_request: [byte: 256] = [];
+    _ = try ice_connectivity_check_build_binding_request(&agent, &probe_transaction, probe_request[0:256], 3000u64);
+
+    var probe_response_packet: [byte: 256] = [];
+    var probe_response_builder: StunMessageBuilder = stun_message_builder_make();
+    var probe_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 91 as byte];
+    try stun_builder_init_binding_success_response(
+        &probe_response_builder,
+        probe_response_packet[0:256],
+        probe_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    try stun_builder_append_xor_mapped_address_ipv4(&probe_response_builder, 41001u16, probe_ipv4[0:4]);
+    try stun_builder_append_message_integrity(&probe_response_builder, agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len]);
+    try stun_builder_append_fingerprint(&probe_response_builder);
+    const probe_response_len: usize = try stun_builder_finish(&probe_response_builder);
+
+    _ = try ice_agent_connectivity_check_handle_response(
+        &agent,
+        &probe_transaction,
+        probe_response_packet[0:probe_response_len],
+        5200u64,
+    );
+    try expect(agent.checklist[0].valid);
+    try expect(agent.checklist[0].state == ICE_CANDIDATE_PAIR_STATE_SUCCEEDED);
+    try expect(!agent.checklist[0].nominated);
+
+    var nomination_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        72 as byte,
+        74 as byte,
+        76 as byte,
+        78 as byte,
+        80 as byte,
+        82 as byte,
+        84 as byte,
+        86 as byte,
+        88 as byte,
+        90 as byte,
+        92 as byte,
+        94 as byte,
+    ];
+    var nomination_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &nomination_transaction,
+        &agent,
+        pair_index,
+        nomination_txid[0:STUN_TRANSACTION_ID_BYTES],
+        true,
+    );
+
+    var nomination_request: [byte: 256] = [];
+    const nomination_request_len: usize = try ice_connectivity_check_build_binding_request(
+        &agent,
+        &nomination_transaction,
+        nomination_request[0:256],
+        7000u64,
+    );
+
+    const use_candidate_attr: StunAttribute =
+        try ice_test_stun_find_attribute(nomination_request[0:nomination_request_len], STUN_ATTRIBUTE_USE_CANDIDATE);
+    try stun_parse_use_candidate(use_candidate_attr.value);
+
+    var nomination_response_packet: [byte: 256] = [];
+    var nomination_response_builder: StunMessageBuilder = stun_message_builder_make();
+    var nomination_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 92 as byte];
+    try stun_builder_init_binding_success_response(
+        &nomination_response_builder,
+        nomination_response_packet[0:256],
+        nomination_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    try stun_builder_append_xor_mapped_address_ipv4(&nomination_response_builder, 41002u16, nomination_ipv4[0:4]);
+    try stun_builder_append_message_integrity(
+        &nomination_response_builder,
+        agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len],
+    );
+    try stun_builder_append_fingerprint(&nomination_response_builder);
+    const nomination_response_len: usize = try stun_builder_finish(&nomination_response_builder);
+
+    _ = try ice_agent_connectivity_check_handle_response(
+        &agent,
+        &nomination_transaction,
+        nomination_response_packet[0:nomination_response_len],
+        9100u64,
+    );
+    try expect(agent.checklist[0].nominated);
+    try expect(agent.checklist[0].response_count == 2u32);
 }
 
 test "connectivity check success response updates pair timing consent and validity" {
@@ -526,6 +663,47 @@ test "connectivity check success response updates pair timing consent and validi
     try expect(agent.checklist[0].last_response_received_at_us == 5600u64);
     try expect(agent.checklist[0].last_rtt_us == 3600u32);
     try expect(agent.checklist[0].consent_deadline_us == 15005600u64);
+}
+
+test "aggressive nomination mode allows use-candidate on the first controlling check" {
+    var agent: IceAgent = ice_agent_make();
+    const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
+    agent.nomination_mode = ICE_NOMINATION_MODE_AGGRESSIVE;
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        96 as byte,
+        97 as byte,
+        98 as byte,
+        99 as byte,
+        100 as byte,
+        101 as byte,
+        102 as byte,
+        103 as byte,
+        104 as byte,
+        105 as byte,
+        106 as byte,
+        107 as byte,
+    ];
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &transaction,
+        &agent,
+        pair_index,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+        true,
+    );
+
+    var packet: [byte: 256] = [];
+    const packet_len: usize = try ice_connectivity_check_build_binding_request(
+        &agent,
+        &transaction,
+        packet[0:256],
+        6100u64,
+    );
+
+    const use_candidate_attr: StunAttribute =
+        try ice_test_stun_find_attribute(packet[0:packet_len], STUN_ATTRIBUTE_USE_CANDIDATE);
+    try stun_parse_use_candidate(use_candidate_attr.value);
 }
 
 test "controlled agent rejects use-candidate connectivity checks" {

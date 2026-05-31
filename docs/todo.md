@@ -155,7 +155,7 @@
 - [x] 实现 checklist。
 - [x] 实现 connectivity check transaction。
 - [x] 实现 controlling / controlled role。
-- [ ] 实现 nomination。
+- [x] 实现 nomination。
 - [ ] 实现 role conflict。
 - [ ] 实现 selected pair。
 - [ ] 实现 consent freshness。

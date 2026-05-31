@@ -20,7 +20,9 @@ rg -Fq 'test "checklist rebuild sorts compatible pairs and seeds one waiting pai
 rg -Fq 'test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes"' src/webrtc_ice_test.uya
 rg -Fq 'test "checklist rebuild rejects fixed pair capacity without leaving partial state"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check transaction builds authenticated binding requests and marks pair in progress"' src/webrtc_ice_test.uya
+rg -Fq 'test "regular nomination waits for a valid pair and marks a successful nomination"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check success response updates pair timing consent and validity"' src/webrtc_ice_test.uya
+rg -Fq 'test "aggressive nomination mode allows use-candidate on the first controlling check"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check error responses fail the pair and stale checklist transactions are rejected"' src/webrtc_ice_test.uya
 rg -Fq 'test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition upserts transport tuple and copies related metadata"' src/webrtc_ice_test.uya

@@ -471,6 +471,17 @@ fn ice_agent_role_supports_checklist(role: u8) bool {
     return role == ICE_AGENT_ROLE_CONTROLLING || role == ICE_AGENT_ROLE_CONTROLLED;
 }
 
+fn ice_agent_nomination_mode_is_supported(mode: u8) bool {
+    return mode == ICE_NOMINATION_MODE_REGULAR || mode == ICE_NOMINATION_MODE_AGGRESSIVE;
+}
+
+fn ice_agent_pair_is_ready_for_regular_nomination(pair: &CandidatePair) bool {
+    if pair == null {
+        return false;
+    }
+    return pair.valid && pair.state == ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+}
+
 export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
     if agent == null {
         return;
@@ -683,6 +694,9 @@ export fn ice_connectivity_check_transaction_init(
     if !ice_agent_role_supports_checklist(agent.role) {
         return error.InvalidPacket;
     }
+    if !ice_agent_nomination_mode_is_supported(agent.nomination_mode) {
+        return error.UnsupportedCapability;
+    }
     if use_candidate && agent.role != ICE_AGENT_ROLE_CONTROLLING {
         return error.InvalidPacket;
     }
@@ -714,6 +728,11 @@ export fn ice_connectivity_check_transaction_init(
     const local_candidate: &IceCandidate = &agent.local_candidates[local_slot];
     const remote_candidate: &IceCandidate = &agent.remote_candidates[remote_slot];
     if !candidate_pair_can_form(local_candidate, remote_candidate) || local_candidate.priority == 0u32 {
+        return error.InvalidPacket;
+    }
+    if use_candidate
+        && agent.nomination_mode == ICE_NOMINATION_MODE_REGULAR
+        && !ice_agent_pair_is_ready_for_regular_nomination(pair) {
         return error.InvalidPacket;
     }
 
@@ -824,6 +843,9 @@ export fn ice_agent_connectivity_check_handle_response(
             ice_u64_delta_saturating_u32(now_us, transaction.sent_at_us),
             consent_deadline_us,
         );
+        if transaction.use_candidate {
+            agent.checklist[pair_slot].nominated = true;
+        }
     } else {
         candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
     }
