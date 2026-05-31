@@ -160,7 +160,7 @@
 - [x] 实现 selected pair。
 - [x] 实现 consent freshness。
 - [x] 实现 trickle ICE 状态。
-- [ ] 实现 ICE state change event。
+- [x] 实现 ICE state change event。
 - [ ] 增加 loopback 双 agent 测试。
 - [ ] 增加 Chrome/Firefox trickle interop 测试。
 

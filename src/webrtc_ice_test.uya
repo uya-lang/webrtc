@@ -61,6 +61,42 @@ fn ice_test_stun_find_attribute(packet: &[byte], attr_type: u16) !StunAttribute 
     return error.InvalidPacket;
 }
 
+fn ice_test_drain_state_change_events(agent: &IceAgent) void {
+    while true {
+        const event: !IceStateChangeEvent = ice_agent_pop_state_change_event(agent);
+        if event.error_id != 0 {
+            return;
+        }
+    }
+}
+
+fn ice_test_expect_no_state_change_event(agent: &IceAgent) !void {
+    const event: !IceStateChangeEvent = ice_agent_pop_state_change_event(agent);
+    try expect(event.error_id == @error_id(error.RingQueueEmpty));
+}
+
+fn ice_test_expect_state_change_event(
+    agent: &IceAgent,
+    previous_state: u8,
+    current_state: u8,
+    selected_pair_index: u16,
+    gathering_state: u8,
+    remote_gathering_state: u8,
+    trickle_complete: bool,
+    generation: u32,
+    sequence: u64,
+) !void {
+    const event: IceStateChangeEvent = try ice_agent_pop_state_change_event(agent);
+    try expect(event.previous_state == previous_state);
+    try expect(event.current_state == current_state);
+    try expect(event.selected_pair_index == selected_pair_index);
+    try expect(event.gathering_state == gathering_state);
+    try expect(event.remote_gathering_state == remote_gathering_state);
+    try expect(event.trickle_complete == trickle_complete);
+    try expect(event.generation == generation);
+    try expect(event.sequence == sequence);
+}
+
 fn ice_test_seed_connectivity_check_agent(agent: &IceAgent, role: u8) !u16 {
     ice_agent_init(agent, role, 0x1122334455667788u64);
     try ice_credentials_set(&agent.local_credentials, "localuf" as &[byte], "local-password" as &[byte]);
@@ -211,7 +247,9 @@ test "ice agent model keeps owned credentials candidate pools and selected pair 
     try expect(ICE_MAX_LOCAL_CANDIDATES > 0);
     try expect(ICE_MAX_REMOTE_CANDIDATES > 0);
     try expect(ICE_MAX_CANDIDATE_PAIRS > 0);
+    try expect(ICE_AGENT_STATE_EVENT_QUEUE_CAPACITY > 0);
     try expect(@size_of(IceCredentials) > 0);
+    try expect(@size_of(IceStateChangeEvent) > 0);
     try expect(@size_of(IceAgent) > 0);
 }
 
@@ -902,6 +940,82 @@ test "aggressive nomination mode allows use-candidate on the first controlling c
     try stun_parse_use_candidate(use_candidate_attr.value);
 }
 
+test "ice state change events queue unique snapshots for nomination and trickle transitions" {
+    var controlling_agent: IceAgent = ice_agent_make();
+    var controlled_agent: IceAgent = ice_agent_make();
+    try ice_test_complete_selected_pair_agents(&controlling_agent, &controlled_agent);
+
+    try expect(ice_agent_state_change_event_len(&controlling_agent) == 2usize);
+    try expect(ice_agent_state_change_event_len(&controlled_agent) == 1usize);
+
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_NEW,
+        ICE_AGENT_STATE_CHECKING,
+        ICE_CANDIDATE_INDEX_NONE,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        0u64,
+    );
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_CHECKING,
+        ICE_AGENT_STATE_COMPLETED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        1u64,
+    );
+    try ice_test_expect_state_change_event(
+        &controlled_agent,
+        ICE_AGENT_STATE_NEW,
+        ICE_AGENT_STATE_COMPLETED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        0u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+    try ice_test_expect_no_state_change_event(&controlled_agent);
+
+    ice_agent_note_local_gathering_started(&controlling_agent);
+    try expect(ice_agent_state_change_event_len(&controlling_agent) == 1usize);
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_COMPLETED,
+        ICE_AGENT_STATE_CONNECTED,
+        0u16,
+        ICE_GATHERING_STATE_GATHERING,
+        ICE_GATHERING_STATE_COMPLETE,
+        false,
+        0u32,
+        2u64,
+    );
+
+    ice_agent_note_local_gathering_started(&controlling_agent);
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+
+    ice_agent_note_local_gathering_complete(&controlling_agent);
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_CONNECTED,
+        ICE_AGENT_STATE_COMPLETED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        3u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+}
+
 test "dual agents complete selected pair across nomination request and success response" {
     var controlling_agent: IceAgent = ice_agent_make();
     var controlled_agent: IceAgent = ice_agent_make();
@@ -919,6 +1033,204 @@ test "dual agents complete selected pair across nomination request and success r
     try expect(controlling_agent.state == ICE_AGENT_STATE_COMPLETED);
     try expect(controlling_agent.checklist[0].consent_deadline_us == 15002200u64);
     try expect(controlled_agent.checklist[0].consent_deadline_us == 15001800u64);
+}
+
+test "ice state change events track consent disconnect failure and recovery" {
+    var controlling_agent: IceAgent = ice_agent_make();
+    var controlled_agent: IceAgent = ice_agent_make();
+    try ice_test_complete_selected_pair_agents(&controlling_agent, &controlled_agent);
+    ice_test_drain_state_change_events(&controlling_agent);
+    ice_test_drain_state_change_events(&controlled_agent);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        180 as byte,
+        181 as byte,
+        182 as byte,
+        183 as byte,
+        184 as byte,
+        185 as byte,
+        186 as byte,
+        187 as byte,
+        188 as byte,
+        189 as byte,
+        190 as byte,
+        191 as byte,
+    ];
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try expect((try ice_agent_consent_tick(&controlling_agent, 15002200u64)));
+    try ice_agent_consent_check_transaction_init(
+        &transaction,
+        &controlling_agent,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+
+    var packet: [byte: 256] = [];
+    _ = try ice_connectivity_check_build_binding_request(
+        &controlling_agent,
+        &transaction,
+        packet[0:256],
+        15002200u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+
+    try expect((try ice_agent_consent_tick(&controlling_agent, 20002200u64)));
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_COMPLETED,
+        ICE_AGENT_STATE_DISCONNECTED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        2u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+
+    var retry_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        192 as byte,
+        193 as byte,
+        194 as byte,
+        195 as byte,
+        196 as byte,
+        197 as byte,
+        198 as byte,
+        199 as byte,
+        200 as byte,
+        201 as byte,
+        202 as byte,
+        203 as byte,
+    ];
+    var retry_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_agent_consent_check_transaction_init(
+        &retry_transaction,
+        &controlling_agent,
+        retry_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    _ = try ice_connectivity_check_build_binding_request(
+        &controlling_agent,
+        &retry_transaction,
+        packet[0:256],
+        20002200u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+
+    var response_packet: [byte: 256] = [];
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
+    var mapped_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 56 as byte];
+    try stun_builder_init_binding_success_response(
+        &response_builder,
+        response_packet[0:256],
+        retry_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 41000u16, mapped_ipv4[0:4]);
+    try stun_builder_append_message_integrity(
+        &response_builder,
+        controlling_agent.remote_credentials.pwd[0:controlling_agent.remote_credentials.pwd_len],
+    );
+    try stun_builder_append_fingerprint(&response_builder);
+    const response_len: usize = try stun_builder_finish(&response_builder);
+
+    _ = try ice_agent_connectivity_check_handle_response(
+        &controlling_agent,
+        &retry_transaction,
+        response_packet[0:response_len],
+        20004000u64,
+    );
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_DISCONNECTED,
+        ICE_AGENT_STATE_COMPLETED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        3u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
+
+    var fail_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        204 as byte,
+        205 as byte,
+        206 as byte,
+        207 as byte,
+        208 as byte,
+        209 as byte,
+        210 as byte,
+        211 as byte,
+        212 as byte,
+        213 as byte,
+        214 as byte,
+        215 as byte,
+    ];
+    var fail_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try expect((try ice_agent_consent_tick(&controlling_agent, 35004000u64)));
+    try ice_agent_consent_check_transaction_init(
+        &fail_transaction,
+        &controlling_agent,
+        fail_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    _ = try ice_connectivity_check_build_binding_request(
+        &controlling_agent,
+        &fail_transaction,
+        packet[0:256],
+        35004000u64,
+    );
+
+    try expect((try ice_agent_consent_tick(&controlling_agent, 40004000u64)));
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_COMPLETED,
+        ICE_AGENT_STATE_DISCONNECTED,
+        0u16,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        4u64,
+    );
+
+    var final_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        216 as byte,
+        217 as byte,
+        218 as byte,
+        219 as byte,
+        220 as byte,
+        221 as byte,
+        222 as byte,
+        223 as byte,
+        224 as byte,
+        225 as byte,
+        226 as byte,
+        227 as byte,
+    ];
+    var final_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_agent_consent_check_transaction_init(
+        &final_transaction,
+        &controlling_agent,
+        final_txid[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    _ = try ice_connectivity_check_build_binding_request(
+        &controlling_agent,
+        &final_transaction,
+        packet[0:256],
+        40004000u64,
+    );
+
+    try expect(!(try ice_agent_consent_tick(&controlling_agent, 45004000u64)));
+    try ice_test_expect_state_change_event(
+        &controlling_agent,
+        ICE_AGENT_STATE_DISCONNECTED,
+        ICE_AGENT_STATE_FAILED,
+        ICE_CANDIDATE_INDEX_NONE,
+        ICE_GATHERING_STATE_COMPLETE,
+        ICE_GATHERING_STATE_COMPLETE,
+        true,
+        0u32,
+        5u64,
+    );
+    try ice_test_expect_no_state_change_event(&controlling_agent);
 }
 
 test "local trickle candidate addition reopens completed state until checklist rebuild" {
