@@ -15,11 +15,13 @@ rg -Fq 'test "ice candidate model owns transport address and related address met
 rg -Fq 'test "candidate pair model tracks checklist state nomination and timing fields"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice agent model keeps owned credentials candidate pools and selected pair slot"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice helpers expose stable default state for future gathering and checklist work"' src/webrtc_ice_test.uya
+rg -Fq 'test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition upserts transport tuple and copies related metadata"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition keeps distinct component and transport tuples"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition rejects invalid candidates and clears stale entries"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition enforces fixed pool capacity"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate helpers copy bounded address foundation and equality state"' src/webrtc_ice_test.uya
+rg -Fq 'test "host and srflx gathering assign candidate priorities by type component and network cost"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate gathering from descriptors deduplicates per component and prunes stale host entries"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate gathering skips unspecified addresses and zero-port bindings"' src/webrtc_ice_test.uya
 rg -Fq 'test "srflx candidate gathering builds binding request and adds related base metadata from success response"' src/webrtc_ice_test.uya
@@ -36,6 +38,8 @@ rg -Fq "export fn ice_candidate_has_related_address" src/webrtc/ice/candidate.uy
 rg -Fq "export fn ice_transport_address_set" src/webrtc/ice/candidate.uya
 rg -Fq "export fn ice_transport_address_equal" src/webrtc/ice/candidate.uya
 rg -Fq "export fn ice_candidate_set_foundation" src/webrtc/ice/candidate.uya
+rg -Fq "export fn ice_candidate_type_preference" src/webrtc/ice/candidate.uya
+rg -Fq "export fn ice_candidate_priority_from_parts" src/webrtc/ice/candidate.uya
 
 rg -Fq "export const ICE_CANDIDATE_PAIR_STATE_FROZEN" src/webrtc/ice/checklist.uya
 rg -Fq "export const ICE_CANDIDATE_PAIR_STATE_SUCCEEDED" src/webrtc/ice/checklist.uya

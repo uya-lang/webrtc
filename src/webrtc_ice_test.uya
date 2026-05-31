@@ -86,6 +86,39 @@ test "ice helpers expose stable default state for future gathering and checklist
     try expect(!ice_agent_has_selected_pair(&agent));
 }
 
+test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs" {
+    try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_HOST)) == 126u8);
+    try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_PRFLX)) == 110u8);
+    try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_SRFLX)) == 100u8);
+    try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_RELAY)) == 0u8);
+
+    try expect((try ice_candidate_priority_from_parts(
+        ICE_CANDIDATE_TYPE_HOST,
+        65535u16,
+        ICE_COMPONENT_RTP,
+    )) == 2130706431u32);
+    try expect((try ice_candidate_priority_from_parts(
+        ICE_CANDIDATE_TYPE_SRFLX,
+        65535u16,
+        ICE_COMPONENT_RTP,
+    )) == 1694498815u32);
+    try expect((try ice_candidate_priority_from_parts(
+        ICE_CANDIDATE_TYPE_HOST,
+        65535u16,
+        ICE_COMPONENT_RTCP,
+    )) == 2130706430u32);
+
+    const unsupported_type: !u8 = ice_candidate_type_preference(ICE_CANDIDATE_TYPE_UNKNOWN);
+    try expect(unsupported_type.error_id == @error_id(error.UnsupportedCapability));
+
+    const invalid_component: !u32 = ice_candidate_priority_from_parts(
+        ICE_CANDIDATE_TYPE_HOST,
+        1u16,
+        0u16,
+    );
+    try expect(invalid_component.error_id == @error_id(error.InvalidPacket));
+}
+
 test "remote candidate addition upserts transport tuple and copies related metadata" {
     var agent: IceAgent = IceAgent{};
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 13u64);
@@ -318,6 +351,60 @@ test "host candidate helpers copy bounded address foundation and equality state"
     try ice_candidate_set_foundation(&candidate, "eth0v4udp" as &[byte]);
     try expect(candidate.foundation_len == 9);
     try expect(ice_test_bytes_equal(candidate.foundation[0:candidate.foundation_len], "eth0v4udp" as &[byte]));
+}
+
+test "host and srflx gathering assign candidate priorities by type component and network cost" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 41u64);
+
+    var fast_desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    ice_host_interface_descriptor_init(&fast_desc);
+    try ice_host_interface_descriptor_set_name(&fast_desc, "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&fast_desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
+    fast_desc.network_id = 4u16;
+    fast_desc.network_cost = 10u16;
+    fast_desc.is_up = true;
+
+    var slow_desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    ice_host_interface_descriptor_init(&slow_desc);
+    try ice_host_interface_descriptor_set_name(&slow_desc, "wlan0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&slow_desc, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.9" as &[byte]);
+    slow_desc.network_id = 9u16;
+    slow_desc.network_cost = 90u16;
+    slow_desc.is_up = true;
+
+    const fast_rtp_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &fast_desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
+    );
+    const fast_rtcp_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &fast_desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTCP, port: 5001u16 },
+    );
+    const slow_rtp_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &slow_desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 6000u16 },
+    );
+
+    const fast_rtp: &IceCandidate = &agent.local_candidates[fast_rtp_index as usize];
+    const fast_rtcp: &IceCandidate = &agent.local_candidates[fast_rtcp_index as usize];
+    const slow_rtp: &IceCandidate = &agent.local_candidates[slow_rtp_index as usize];
+    try expect(fast_rtp.priority > fast_rtcp.priority);
+    try expect(fast_rtp.priority > slow_rtp.priority);
+
+    var mapped: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&mapped, ICE_ADDRESS_FAMILY_IPV4, "203.0.113.40" as &[byte], 40000u16);
+    var stun_server: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.1" as &[byte], 3478u16);
+
+    const srflx_index: u16 = try ice_agent_add_srflx_candidate(&agent, fast_rtp_index, &mapped, &stun_server);
+    const srflx: &IceCandidate = &agent.local_candidates[srflx_index as usize];
+    try expect(srflx.candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
+    try expect(fast_rtp.priority > srflx.priority);
+    try expect(srflx.priority > 0u32);
 }
 
 test "host candidate gathering from descriptors deduplicates per component and prunes stale host entries" {

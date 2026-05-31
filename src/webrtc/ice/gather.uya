@@ -123,6 +123,20 @@ fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     return true;
 }
 
+fn ice_bytes_less(lhs: &[byte], rhs: &[byte]) bool {
+    const shared_len: usize = if lhs.len < rhs.len { lhs.len } else { rhs.len };
+
+    var i: usize = 0;
+    while i < shared_len {
+        if lhs[i] != rhs[i] {
+            return lhs[i] < rhs[i];
+        }
+        i = i + 1;
+    }
+
+    return lhs.len < rhs.len;
+}
+
 fn ice_ascii_lower(value: byte) byte {
     if value >= 'A' as byte && value <= 'Z' as byte {
         return value + 32 as byte;
@@ -302,6 +316,107 @@ fn ice_transport_address_copy(dst: &IceTransportAddress, src: &IceTransportAddre
         return error.InvalidPacket;
     }
     try ice_transport_address_set(dst, src.family, src.host[0:src.host_len], src.port);
+}
+
+fn ice_candidate_transport_preference(transport: u8) u8 {
+    if transport == ICE_CANDIDATE_TRANSPORT_UDP {
+        return 4u8;
+    }
+    if transport == ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE {
+        return 3u8;
+    }
+    if transport == ICE_CANDIDATE_TRANSPORT_TCP_ACTIVE {
+        return 2u8;
+    }
+    if transport == ICE_CANDIDATE_TRANSPORT_TCP_SO {
+        return 1u8;
+    }
+    return 0u8;
+}
+
+fn ice_candidate_address_family_preference(family: u8) u8 {
+    if family == ICE_ADDRESS_FAMILY_IPV6 {
+        return 2u8;
+    }
+    if family == ICE_ADDRESS_FAMILY_IPV4 {
+        return 1u8;
+    }
+    return 0u8;
+}
+
+fn ice_local_candidate_outranks(lhs: &IceCandidate, lhs_index: usize, rhs: &IceCandidate, rhs_index: usize) bool {
+    if lhs.network_cost != rhs.network_cost {
+        return lhs.network_cost < rhs.network_cost;
+    }
+
+    const lhs_transport_pref: u8 = ice_candidate_transport_preference(lhs.transport);
+    const rhs_transport_pref: u8 = ice_candidate_transport_preference(rhs.transport);
+    if lhs_transport_pref != rhs_transport_pref {
+        return lhs_transport_pref > rhs_transport_pref;
+    }
+
+    const lhs_family_pref: u8 = ice_candidate_address_family_preference(lhs.address.family);
+    const rhs_family_pref: u8 = ice_candidate_address_family_preference(rhs.address.family);
+    if lhs_family_pref != rhs_family_pref {
+        return lhs_family_pref > rhs_family_pref;
+    }
+
+    if lhs.network_id != rhs.network_id {
+        return lhs.network_id > rhs.network_id;
+    }
+    if lhs.generation != rhs.generation {
+        return lhs.generation > rhs.generation;
+    }
+    if lhs.base_candidate_index != rhs.base_candidate_index {
+        return lhs.base_candidate_index < rhs.base_candidate_index;
+    }
+
+    if !ice_bytes_equal(lhs.address.host[0:lhs.address.host_len], rhs.address.host[0:rhs.address.host_len]) {
+        return ice_bytes_less(lhs.address.host[0:lhs.address.host_len], rhs.address.host[0:rhs.address.host_len]);
+    }
+    if lhs.address.port != rhs.address.port {
+        return lhs.address.port < rhs.address.port;
+    }
+
+    return lhs_index < rhs_index;
+}
+
+fn ice_agent_refresh_local_candidate_priorities(agent: &IceAgent) void {
+    if agent == null {
+        return;
+    }
+
+    var candidate_index: usize = 0;
+    while candidate_index < agent.local_candidate_count {
+        const candidate: &IceCandidate = &agent.local_candidates[candidate_index];
+
+        var outrank_count: usize = 0;
+        var other_index: usize = 0;
+        while other_index < agent.local_candidate_count {
+            if other_index != candidate_index {
+                const other: &IceCandidate = &agent.local_candidates[other_index];
+                if other.candidate_type == candidate.candidate_type
+                    && other.component_id == candidate.component_id
+                    && ice_local_candidate_outranks(other, other_index, candidate, candidate_index) {
+                    outrank_count = outrank_count + 1;
+                }
+            }
+            other_index = other_index + 1;
+        }
+
+        const local_preference: u16 = (65535usize - outrank_count) as u16;
+        const priority_result: !u32 = ice_candidate_priority_from_parts(
+            candidate.candidate_type,
+            local_preference,
+            candidate.component_id,
+        );
+        if priority_result.error_id != 0 {
+            agent.local_candidates[candidate_index].priority = 0u32;
+        } else {
+            agent.local_candidates[candidate_index].priority = priority_result.value;
+        }
+        candidate_index = candidate_index + 1;
+    }
 }
 
 fn ice_stun_xor_mapped_to_transport_address(dst: &IceTransportAddress, mapped: &StunXorMappedAddress) !void {
@@ -521,6 +636,7 @@ export fn ice_agent_prune_srflx_candidates(agent: &IceAgent) usize {
     }
 
     agent.local_candidate_count = agent.local_candidate_count - pruned;
+    ice_agent_refresh_local_candidate_priorities(agent);
     return pruned;
 }
 
@@ -548,6 +664,7 @@ export fn ice_agent_prune_host_candidates(agent: &IceAgent) usize {
     }
 
     agent.local_candidate_count = agent.local_candidate_count - pruned;
+    ice_agent_refresh_local_candidate_priorities(agent);
     return pruned;
 }
 
@@ -584,6 +701,7 @@ export fn ice_agent_add_host_candidate(agent: &IceAgent, desc: &IceHostInterface
 
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
+    ice_agent_refresh_local_candidate_priorities(agent);
     return (agent.local_candidate_count - 1) as u16;
 }
 
@@ -699,6 +817,7 @@ export fn ice_agent_add_srflx_candidate(
 
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
+    ice_agent_refresh_local_candidate_priorities(agent);
     return (agent.local_candidate_count - 1) as u16;
 }
 

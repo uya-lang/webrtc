@@ -158,6 +158,34 @@ export fn ice_candidate_set_foundation(candidate: &IceCandidate, foundation: &[b
     ice_bytes_copy(candidate.foundation[0:ICE_MAX_FOUNDATION_BYTES], foundation);
 }
 
+export fn ice_candidate_type_preference(candidate_type: u8) !u8 {
+    if candidate_type == ICE_CANDIDATE_TYPE_HOST {
+        return 126u8;
+    }
+    if candidate_type == ICE_CANDIDATE_TYPE_PRFLX {
+        return 110u8;
+    }
+    if candidate_type == ICE_CANDIDATE_TYPE_SRFLX {
+        return 100u8;
+    }
+    if candidate_type == ICE_CANDIDATE_TYPE_RELAY {
+        return 0u8;
+    }
+    return error.UnsupportedCapability;
+}
+
+export fn ice_candidate_priority_from_parts(candidate_type: u8, local_preference: u16, component_id: u16) !u32 {
+    if component_id == 0u16 || component_id > 256u16 {
+        return error.InvalidPacket;
+    }
+
+    const type_preference: u8 = try ice_candidate_type_preference(candidate_type);
+    const component_preference: u32 = 256u32 - (component_id as u32);
+    return ((type_preference as u32) << 24u32)
+        + ((local_preference as u32) << 8u32)
+        + component_preference;
+}
+
 export fn ice_candidate_has_related_address(candidate: &IceCandidate) bool {
     if candidate == null {
         return false;

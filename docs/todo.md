@@ -151,7 +151,7 @@
 - [x] 实现 host candidate gathering。
 - [x] 实现 STUN server reflexive candidate gathering。
 - [x] 实现 remote candidate 添加。
-- [ ] 实现 candidate priority 计算。
+- [x] 实现 candidate priority 计算。
 - [ ] 实现 checklist。
 - [ ] 实现 connectivity check transaction。
 - [ ] 实现 controlling / controlled role。
