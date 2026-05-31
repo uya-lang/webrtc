@@ -26,6 +26,15 @@ export struct CandidatePair {
     consent_deadline_us: u64 = 0u64,
 }
 
+fn candidate_pair_counter_increment(counter: &u32) void {
+    if counter == null {
+        return;
+    }
+    if counter != 0xFFFFFFFFu32 {
+        counter = counter + 1u32;
+    }
+}
+
 fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
         return false;
@@ -237,9 +246,50 @@ export fn candidate_pair_seed_initial_states(
     }
 }
 
+export fn candidate_pair_note_check_sent(pair: &CandidatePair, sent_at_us: u64) void {
+    if pair == null {
+        return;
+    }
+
+    candidate_pair_counter_increment(&pair.request_count);
+    pair.last_request_sent_at_us = sent_at_us;
+    pair.state = ICE_CANDIDATE_PAIR_STATE_IN_PROGRESS;
+}
+
+export fn candidate_pair_note_check_succeeded(
+    pair: &CandidatePair,
+    response_at_us: u64,
+    rtt_us: u32,
+    consent_deadline_us: u64,
+) void {
+    if pair == null {
+        return;
+    }
+
+    candidate_pair_counter_increment(&pair.response_count);
+    pair.last_response_received_at_us = response_at_us;
+    pair.last_rtt_us = rtt_us;
+    pair.consent_deadline_us = consent_deadline_us;
+    pair.valid = true;
+    pair.state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+}
+
+export fn candidate_pair_note_check_failed(pair: &CandidatePair, response_at_us: u64) void {
+    if pair == null {
+        return;
+    }
+
+    candidate_pair_counter_increment(&pair.response_count);
+    pair.last_response_received_at_us = response_at_us;
+    pair.consent_deadline_us = 0u64;
+    pair.valid = false;
+    pair.selected = false;
+    pair.state = ICE_CANDIDATE_PAIR_STATE_FAILED;
+}
+
 export fn candidate_pair_is_selected(pair: &CandidatePair) bool {
     if pair == null {
         return false;
     }
-    return pair.selected && pair.state == ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    return pair.selected && pair.valid;
 }
