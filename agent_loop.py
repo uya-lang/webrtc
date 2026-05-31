@@ -41,6 +41,11 @@ SESSION_ID_PATTERN = re.compile(
     r"session id:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
     re.IGNORECASE,
 )
+MISSING_ROLLOUT_ERROR_PATTERN = re.compile(
+    r"thread/resume failed: no rollout found for thread id\s+"
+    r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    re.IGNORECASE,
+)
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
 # agent_loop expects child codex runs to be able to stage and commit work.
@@ -873,6 +878,17 @@ def normalize_session_id(value):
     return candidate
 
 
+def parse_missing_rollout_session_id(value):
+    if not isinstance(value, str):
+        return None
+
+    match = MISSING_ROLLOUT_ERROR_PATTERN.search(value.strip())
+    if match is None:
+        return None
+
+    return match.group(1).lower()
+
+
 def parse_session_id_from_log(log_file):
     if not isinstance(log_file, Path) or not log_file.exists():
         return None
@@ -965,6 +981,31 @@ def remember_session_id(state, session_id, log_file=None):
 
     if state.get("last_session") != record:
         state["last_session"] = record
+        changed = True
+
+    return changed
+
+
+def forget_session_id(state, session_id):
+    normalized_session_id = normalize_session_id(session_id)
+    if normalized_session_id is None or not isinstance(state, dict):
+        return False
+
+    changed = False
+    current = state.get("current")
+    if (
+        isinstance(current, dict)
+        and normalize_session_id(current.get("session_id")) == normalized_session_id
+    ):
+        current["session_id"] = None
+        changed = True
+
+    last_session = state.get("last_session")
+    if (
+        isinstance(last_session, dict)
+        and normalize_session_id(last_session.get("session_id")) == normalized_session_id
+    ):
+        state["last_session"] = None
         changed = True
 
     return changed
@@ -1819,12 +1860,12 @@ def run_codex(
     if log_file is None:
         log_file = make_log_file(log_dir, runnable_tasks)
 
-    normalized_resume_session_id = normalize_session_id(resume_session_id)
-    cmd = build_codex_exec_command(root, prompt, resume_session_id=normalized_resume_session_id)
-
     current_task = runnable_tasks[0]["text"] if runnable_tasks else "无"
     display = LiveOutputDisplay(sys.stdout)
     log_path_text = path_label(root, log_file)
+    resume_session_id_for_attempt = normalize_session_id(resume_session_id)
+    attempted_without_resume = False
+    returncode = 1
 
     with log_file.open("wb") as handle:
         def write_log_text(text):
@@ -1847,224 +1888,269 @@ def run_codex(
         log_size += write_log_text(f"TOOLCHAIN_BUG_DIR: {path_label(root, toolchain_bug_dir)}\n")
         log_size += write_log_text(f"TOOLCHAIN_BUG_REPRO_DIR: {path_label(root, toolchain_bug_repro_dir)}\n\n")
         log_size += write_log_text(summarize_tasks(runnable_tasks, limit=50) + "\n\n")
-        log_size += write_log_text("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
-        if normalized_resume_session_id is not None:
-            log_size += write_log_text(f"RESUME_SESSION_ID: {normalized_resume_session_id}\n\n")
+        while True:
+            cmd = build_codex_exec_command(
+                root,
+                prompt,
+                resume_session_id=resume_session_id_for_attempt,
+            )
+            if attempted_without_resume:
+                log_size += write_log_text("[agent] retrying without session resume\n\n")
 
-        display.start(current_task)
+            log_size += write_log_text("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
+            if resume_session_id_for_attempt is not None:
+                log_size += write_log_text(f"RESUME_SESSION_ID: {resume_session_id_for_attempt}\n\n")
 
-        process = None
-        selector = None
-        pipe_open = False
-        returncode = 1
+            display.start(current_task)
 
-        try:
+            process = None
+            selector = None
+            pipe_open = False
+            missing_rollout_session_id = None
+
             try:
-                process = subprocess.Popen(
-                    cmd,
-                    cwd=root,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    bufsize=0,
-                    text=False,
-                    start_new_session=True,
-                )
-            except FileNotFoundError:
-                message = f"[{now()}] ERROR: command not found: {CODEX_CMD}\n"
-                log_size += write_log_text(message)
-                display.write(message)
-                return False, log_file
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        cwd=root,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        bufsize=0,
+                        text=False,
+                        start_new_session=True,
+                    )
+                except FileNotFoundError:
+                    message = f"[{now()}] ERROR: command not found: {CODEX_CMD}\n"
+                    log_size += write_log_text(message)
+                    display.write(message)
+                    return False, log_file
 
-            selector = selectors.DefaultSelector()
-            if process.stdout is not None:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                pipe_open = True
+                selector = selectors.DefaultSelector()
+                if process.stdout is not None:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    pipe_open = True
 
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-            scan_buffer = ""
-            decoder_flushed = False
-
-            def note_result_detected():
-                nonlocal result_seen_monotonic
-                if result_seen_monotonic is not None:
-                    return
-
-                result_seen_monotonic = time.monotonic()
-                print(
-                    "[agent] result detected: waiting briefly for codex to exit "
-                    f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
-                )
-
-            def scan_stream_text(text):
-                nonlocal scan_buffer
-                if not text:
-                    return
-
-                scan_buffer += text
-                while "\n" in scan_buffer:
-                    line, scan_buffer = scan_buffer.split("\n", 1)
-                    session_id = normalize_session_id(line.rstrip("\r"))
-                    if (
-                        session_id is not None
-                        and state is not None
-                        and state_file is not None
-                        and remember_session_id(state, session_id, log_file=log_path_text)
-                    ):
-                        save_state(state_file, state)
-
-                    if line.rstrip("\r").startswith(RESULT_PREFIX):
-                        note_result_detected()
-
-            def flush_decoder_tail():
-                nonlocal scan_buffer, decoder_flushed
-                if decoder_flushed:
-                    return
-
-                tail_text = decoder.decode(b"", final=True)
-                decoder_flushed = True
-                if tail_text:
-                    display.write(tail_text)
-                    scan_stream_text(tail_text)
-                if scan_buffer:
-                    session_id = normalize_session_id(scan_buffer.rstrip("\r"))
-                    if (
-                        session_id is not None
-                        and state is not None
-                        and state_file is not None
-                        and remember_session_id(state, session_id, log_file=log_path_text)
-                    ):
-                        save_state(state_file, state)
-                    if scan_buffer.rstrip("\r").startswith(RESULT_PREFIX):
-                        note_result_detected()
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 scan_buffer = ""
+                decoder_flushed = False
 
-            start_monotonic = time.monotonic()
-            next_heartbeat = start_monotonic + HEARTBEAT_SECONDS
-            last_reported_size = log_size
-            last_log_size = log_size
-            last_log_update_monotonic = start_monotonic
-            last_log_update_at = now()
-            result_seen_monotonic = None
-            terminate_sent_monotonic = None
+                def note_result_detected():
+                    nonlocal result_seen_monotonic
+                    if result_seen_monotonic is not None:
+                        return
 
-            if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-                state["current"]["pid"] = process.pid
-                state["current"]["heartbeat_at"] = now()
-                state["current"]["elapsed_seconds"] = 0
-                state["current"]["log_bytes"] = last_log_size
-                state["current"]["log_updated_at"] = last_log_update_at
-                save_state(state_file, state)
+                    result_seen_monotonic = time.monotonic()
+                    print(
+                        "[agent] result detected: waiting briefly for codex to exit "
+                        f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
+                    )
 
-            while True:
-                current_monotonic = time.monotonic()
-                heartbeat_in = max(0.0, next_heartbeat - current_monotonic)
-                timeout = min(1.0, heartbeat_in) if heartbeat_in > 0 else 0.0
+                def scan_stream_text(text):
+                    nonlocal missing_rollout_session_id, scan_buffer
+                    if not text:
+                        return
 
-                if pipe_open:
-                    events = selector.select(timeout)
-                    for key, _mask in events:
-                        chunk = os.read(key.fileobj.fileno(), 4096)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            pipe_open = False
-                            continue
+                    scan_buffer += text
+                    while "\n" in scan_buffer:
+                        line, scan_buffer = scan_buffer.split("\n", 1)
+                        line_text = line.rstrip("\r")
+                        session_id = normalize_session_id(line_text)
+                        if (
+                            session_id is not None
+                            and state is not None
+                            and state_file is not None
+                            and remember_session_id(state, session_id, log_file=log_path_text)
+                        ):
+                            save_state(state_file, state)
 
-                        log_size += write_log_bytes(chunk)
-                        last_log_size = log_size
-                        last_log_update_monotonic = time.monotonic()
-                        last_log_update_at = now()
-
-                        text_chunk = decoder.decode(chunk)
-                        if text_chunk:
-                            display.write(text_chunk)
-                            scan_stream_text(text_chunk)
-                elif timeout > 0:
-                    time.sleep(timeout)
-
-                current_monotonic = time.monotonic()
-                returncode = process.poll()
-
-                if not pipe_open:
-                    flush_decoder_tail()
-
-                if result_seen_monotonic is not None:
-                    if (
-                        terminate_sent_monotonic is None
-                        and current_monotonic - result_seen_monotonic >= RESULT_EXIT_GRACE_SECONDS
-                    ):
-                        print("[agent] codex still running after final result; sending SIGTERM")
-                        send_signal_to_process_group(process, signal.SIGTERM)
-                        terminate_sent_monotonic = current_monotonic
-
-                    if (
-                        terminate_sent_monotonic is not None
-                        and current_monotonic - terminate_sent_monotonic >= RESULT_KILL_GRACE_SECONDS
-                    ):
-                        print("[agent] codex ignored SIGTERM after final result; sending SIGKILL")
-                        send_signal_to_process_group(process, signal.SIGKILL)
-                        terminate_sent_monotonic = current_monotonic + 10_000
-
-                if current_monotonic >= next_heartbeat:
-                    elapsed_seconds = int(current_monotonic - start_monotonic)
-                    synced_current_task = current_task
-                    if state is not None:
-                        sync_current_in_progress_tasks_from_todo(state, todo_file)
-                        current_state = state.get("current")
-                        if isinstance(current_state, dict):
-                            synced_task = current_state.get("current_task")
-                            if isinstance(synced_task, str) and synced_task.strip():
-                                synced_current_task = synced_task.strip()
-
-                    delta_bytes = max(0, last_log_size - last_reported_size)
-                    if delta_bytes > 0:
-                        log_note = f"+{format_bytes(delta_bytes)} output"
-                    else:
-                        quiet_for = int(current_monotonic - last_log_update_monotonic)
-                        log_note = f"no new output for {format_duration(quiet_for)}"
-
-                    if display.enabled:
-                        display.update(
-                            current_task=synced_current_task,
-                            elapsed_seconds=elapsed_seconds,
-                            log_path=log_path_text,
-                            log_note=log_note,
+                        missing_rollout_session_id = (
+                            missing_rollout_session_id
+                            or parse_missing_rollout_session_id(line_text)
                         )
-                    else:
-                        print(
-                            "[agent] heartbeat: "
-                            f"{format_duration(elapsed_seconds)} running | "
-                            f"current={synced_current_task} | "
-                            f"log={log_path_text} | "
-                            f"{log_note}"
+                        if line_text.startswith(RESULT_PREFIX):
+                            note_result_detected()
+
+                def flush_decoder_tail():
+                    nonlocal decoder_flushed, missing_rollout_session_id, scan_buffer
+                    if decoder_flushed:
+                        return
+
+                    tail_text = decoder.decode(b"", final=True)
+                    decoder_flushed = True
+                    if tail_text:
+                        display.write(tail_text)
+                        scan_stream_text(tail_text)
+                    if scan_buffer:
+                        line_text = scan_buffer.rstrip("\r")
+                        session_id = normalize_session_id(line_text)
+                        if (
+                            session_id is not None
+                            and state is not None
+                            and state_file is not None
+                            and remember_session_id(state, session_id, log_file=log_path_text)
+                        ):
+                            save_state(state_file, state)
+                        missing_rollout_session_id = (
+                            missing_rollout_session_id
+                            or parse_missing_rollout_session_id(line_text)
                         )
+                        if line_text.startswith(RESULT_PREFIX):
+                            note_result_detected()
+                    scan_buffer = ""
 
-                    if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-                        state["current"]["elapsed_seconds"] = elapsed_seconds
-                        state["current"]["heartbeat_at"] = now()
-                        state["current"]["log_bytes"] = last_log_size
-                        state["current"]["log_updated_at"] = last_log_update_at
-                        save_state(state_file, state)
+                start_monotonic = time.monotonic()
+                next_heartbeat = start_monotonic + HEARTBEAT_SECONDS
+                last_reported_size = log_size
+                last_log_size = log_size
+                last_log_update_monotonic = start_monotonic
+                last_log_update_at = now()
+                result_seen_monotonic = None
+                terminate_sent_monotonic = None
 
-                    last_reported_size = last_log_size
-                    next_heartbeat = current_monotonic + HEARTBEAT_SECONDS
+                if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                    state["current"]["pid"] = process.pid
+                    state["current"]["heartbeat_at"] = now()
+                    state["current"]["elapsed_seconds"] = 0
+                    state["current"]["log_bytes"] = last_log_size
+                    state["current"]["log_updated_at"] = last_log_update_at
+                    save_state(state_file, state)
 
-                if returncode is not None and not pipe_open:
-                    elapsed_seconds = int(current_monotonic - start_monotonic)
-                    if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-                        state["current"]["elapsed_seconds"] = elapsed_seconds
-                        state["current"]["heartbeat_at"] = now()
-                        state["current"]["log_bytes"] = last_log_size
-                        state["current"]["log_updated_at"] = last_log_update_at
-                        save_state(state_file, state)
-                    break
+                while True:
+                    current_monotonic = time.monotonic()
+                    heartbeat_in = max(0.0, next_heartbeat - current_monotonic)
+                    timeout = min(1.0, heartbeat_in) if heartbeat_in > 0 else 0.0
 
-            write_log_text(f"\n[{now()}] EXIT CODE: {returncode}\n")
-        finally:
-            if selector is not None:
-                selector.close()
-            if process is not None and process.stdout is not None:
-                process.stdout.close()
-            display.finish()
+                    if pipe_open:
+                        events = selector.select(timeout)
+                        for key, _mask in events:
+                            chunk = os.read(key.fileobj.fileno(), 4096)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                pipe_open = False
+                                continue
+
+                            log_size += write_log_bytes(chunk)
+                            last_log_size = log_size
+                            last_log_update_monotonic = time.monotonic()
+                            last_log_update_at = now()
+
+                            text_chunk = decoder.decode(chunk)
+                            if text_chunk:
+                                display.write(text_chunk)
+                                scan_stream_text(text_chunk)
+                    elif timeout > 0:
+                        time.sleep(timeout)
+
+                    current_monotonic = time.monotonic()
+                    returncode = process.poll()
+
+                    if not pipe_open:
+                        flush_decoder_tail()
+
+                    if result_seen_monotonic is not None:
+                        if (
+                            terminate_sent_monotonic is None
+                            and current_monotonic - result_seen_monotonic >= RESULT_EXIT_GRACE_SECONDS
+                        ):
+                            print("[agent] codex still running after final result; sending SIGTERM")
+                            send_signal_to_process_group(process, signal.SIGTERM)
+                            terminate_sent_monotonic = current_monotonic
+
+                        if (
+                            terminate_sent_monotonic is not None
+                            and current_monotonic - terminate_sent_monotonic >= RESULT_KILL_GRACE_SECONDS
+                        ):
+                            print("[agent] codex ignored SIGTERM after final result; sending SIGKILL")
+                            send_signal_to_process_group(process, signal.SIGKILL)
+                            terminate_sent_monotonic = current_monotonic + 10_000
+
+                    if current_monotonic >= next_heartbeat:
+                        elapsed_seconds = int(current_monotonic - start_monotonic)
+                        synced_current_task = current_task
+                        if state is not None:
+                            sync_current_in_progress_tasks_from_todo(state, todo_file)
+                            current_state = state.get("current")
+                            if isinstance(current_state, dict):
+                                synced_task = current_state.get("current_task")
+                                if isinstance(synced_task, str) and synced_task.strip():
+                                    synced_current_task = synced_task.strip()
+
+                        delta_bytes = max(0, last_log_size - last_reported_size)
+                        if delta_bytes > 0:
+                            log_note = f"+{format_bytes(delta_bytes)} output"
+                        else:
+                            quiet_for = int(current_monotonic - last_log_update_monotonic)
+                            log_note = f"no new output for {format_duration(quiet_for)}"
+
+                        if display.enabled:
+                            display.update(
+                                current_task=synced_current_task,
+                                elapsed_seconds=elapsed_seconds,
+                                log_path=log_path_text,
+                                log_note=log_note,
+                            )
+                        else:
+                            print(
+                                "[agent] heartbeat: "
+                                f"{format_duration(elapsed_seconds)} running | "
+                                f"current={synced_current_task} | "
+                                f"log={log_path_text} | "
+                                f"{log_note}"
+                            )
+
+                        if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                            state["current"]["elapsed_seconds"] = elapsed_seconds
+                            state["current"]["heartbeat_at"] = now()
+                            state["current"]["log_bytes"] = last_log_size
+                            state["current"]["log_updated_at"] = last_log_update_at
+                            save_state(state_file, state)
+
+                        last_reported_size = last_log_size
+                        next_heartbeat = current_monotonic + HEARTBEAT_SECONDS
+
+                    if returncode is not None and not pipe_open:
+                        elapsed_seconds = int(current_monotonic - start_monotonic)
+                        if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                            state["current"]["elapsed_seconds"] = elapsed_seconds
+                            state["current"]["heartbeat_at"] = now()
+                            state["current"]["log_bytes"] = last_log_size
+                            state["current"]["log_updated_at"] = last_log_update_at
+                            save_state(state_file, state)
+                        break
+
+                write_log_text(f"\n[{now()}] EXIT CODE: {returncode}\n")
+            finally:
+                if selector is not None:
+                    selector.close()
+                if process is not None and process.stdout is not None:
+                    process.stdout.close()
+                display.finish()
+
+            if (
+                returncode != 0
+                and resume_session_id_for_attempt is not None
+                and missing_rollout_session_id == resume_session_id_for_attempt
+            ):
+                info_message = (
+                    f"[{now()}] INFO: stale resume session {resume_session_id_for_attempt}; "
+                    "retrying without resume\n"
+                )
+                print(
+                    "[agent] cached codex session is no longer resumable; "
+                    "retrying with a fresh session"
+                )
+                log_size += write_log_text(info_message)
+                if (
+                    state is not None
+                    and state_file is not None
+                    and forget_session_id(state, resume_session_id_for_attempt)
+                ):
+                    save_state(state_file, state)
+                resume_session_id_for_attempt = None
+                attempted_without_resume = True
+                continue
+
+            break
 
     return returncode == 0, log_file
 
