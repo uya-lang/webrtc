@@ -58,6 +58,20 @@ export struct TurnAllocateRequest {
     fingerprint_present: bool = false,
 }
 
+export struct TurnRefreshRequest {
+    lifetime_seconds: u32 = 0u32,
+    lifetime_present: bool = false,
+    username: &[byte] = [],
+    username_present: bool = false,
+    realm: &[byte] = [],
+    realm_present: bool = false,
+    nonce: &[byte] = [],
+    nonce_present: bool = false,
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
+}
+
 export struct TurnAllocateSuccessResponse {
     relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [],
     relayed_address_count: usize = 0usize,
@@ -67,6 +81,11 @@ export struct TurnAllocateSuccessResponse {
     lifetime_present: bool = false,
     reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [],
     reservation_token_present: bool = false,
+}
+
+export struct TurnRefreshSuccessResponse {
+    lifetime_seconds: u32 = 0u32,
+    lifetime_present: bool = false,
 }
 
 export struct TurnAuthenticationChallenge {
@@ -130,6 +149,30 @@ export fn turn_allocate_success_response_make() TurnAllocateSuccessResponse {
         lifetime_present: false,
         reservation_token: reservation_token,
         reservation_token_present: false,
+    };
+}
+
+export fn turn_refresh_request_make() TurnRefreshRequest {
+    var empty_bytes: [byte: 1] = [];
+    return TurnRefreshRequest{
+        lifetime_seconds: 0u32,
+        lifetime_present: false,
+        username: empty_bytes[0:0],
+        username_present: false,
+        realm: empty_bytes[0:0],
+        realm_present: false,
+        nonce: empty_bytes[0:0],
+        nonce_present: false,
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
+    };
+}
+
+export fn turn_refresh_success_response_make() TurnRefreshSuccessResponse {
+    return TurnRefreshSuccessResponse{
+        lifetime_seconds: 0u32,
+        lifetime_present: false,
     };
 }
 

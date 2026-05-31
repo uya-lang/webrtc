@@ -174,7 +174,7 @@
 
 - [x] 实现 TURN Allocate。
 - [x] 实现 long-term credential。
-- [ ] 实现 Refresh。
+- [x] 实现 Refresh。
 - [ ] 实现 CreatePermission。
 - [ ] 实现 Send/Data indication。
 - [ ] 实现 ChannelBind。

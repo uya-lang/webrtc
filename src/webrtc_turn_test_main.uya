@@ -502,6 +502,239 @@ fn turn_test_check_long_term_challenge_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_make_sample_credentials(credentials: &TurnLongTermCredentials, nonce: &[byte]) bool {
+    if credentials == null {
+        return false;
+    }
+
+    var challenge: TurnAuthenticationChallenge = turn_authentication_challenge_make();
+    challenge.error_code = TURN_ERROR_UNAUTHORIZED;
+    challenge.realm = "example.org" as &[byte];
+    challenge.realm_present = true;
+    challenge.nonce = nonce;
+    challenge.nonce_present = true;
+    return turn_long_term_credentials_init_from_challenge(
+        credentials,
+        "evtj:h6vY" as &[byte],
+        "TheMatrIX" as &[byte],
+        &challenge,
+    ).error_id == 0;
+}
+
+fn turn_test_check_refresh_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "refresh-nonce" as &[byte]) {
+        return 122;
+    }
+
+    var request_packet: [byte: 256] = [];
+    var request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_request(&request_builder, request_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 123;
+    }
+    if turn_builder_append_lifetime(&request_builder, 600u32).error_id != 0 {
+        return 124;
+    }
+    if turn_builder_append_long_term_credentials(&request_builder, &credentials).error_id != 0 {
+        return 125;
+    }
+    const request_finish_result: !usize = turn_builder_finish(&request_builder);
+    if request_finish_result.error_id != 0 {
+        return 126;
+    }
+
+    const request_result: !TurnRefreshRequest = turn_refresh_request_parse(request_packet[0:request_finish_result.value]);
+    if request_result.error_id != 0 {
+        return 127;
+    }
+    const request: TurnRefreshRequest = request_result.value;
+    if !request.lifetime_present || request.lifetime_seconds != 600u32 {
+        return 128;
+    }
+    if !request.username_present || !turn_test_bytes_equal(request.username, "evtj:h6vY" as &[byte]) {
+        return 129;
+    }
+    if !request.realm_present || !turn_test_bytes_equal(request.realm, "example.org" as &[byte]) {
+        return 130;
+    }
+    if !request.nonce_present || !turn_test_bytes_equal(request.nonce, "refresh-nonce" as &[byte]) {
+        return 131;
+    }
+    if !request.message_integrity_present {
+        return 132;
+    }
+    if stun_verify_message_integrity(
+        request_packet[0:request_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 133;
+    }
+
+    var delete_packet: [byte: 256] = [];
+    var delete_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_request(&delete_builder, delete_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 134;
+    }
+    if turn_builder_append_lifetime(&delete_builder, 0u32).error_id != 0 {
+        return 135;
+    }
+    if turn_builder_append_long_term_credentials(&delete_builder, &credentials).error_id != 0 {
+        return 136;
+    }
+    const delete_finish_result: !usize = turn_builder_finish(&delete_builder);
+    if delete_finish_result.error_id != 0 {
+        return 137;
+    }
+    const delete_result: !TurnRefreshRequest = turn_refresh_request_parse(delete_packet[0:delete_finish_result.value]);
+    if delete_result.error_id != 0 {
+        return 138;
+    }
+    if !delete_result.value.lifetime_present || delete_result.value.lifetime_seconds != 0u32 {
+        return 139;
+    }
+
+    var response_packet: [byte: 256] = [];
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_success_response(&response_builder, response_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 140;
+    }
+    if turn_builder_append_lifetime(&response_builder, 900u32).error_id != 0 {
+        return 141;
+    }
+    if stun_builder_append_message_integrity(&response_builder, credentials.key[0:credentials.key_len]).error_id != 0 {
+        return 142;
+    }
+    const response_finish_result: !usize = turn_builder_finish(&response_builder);
+    if response_finish_result.error_id != 0 {
+        return 143;
+    }
+
+    const response_result: !TurnRefreshSuccessResponse =
+        turn_refresh_success_response_parse(response_packet[0:response_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if response_result.error_id != 0 {
+        return 144;
+    }
+    const response: TurnRefreshSuccessResponse = response_result.value;
+    if !response.lifetime_present || response.lifetime_seconds != 900u32 {
+        return 145;
+    }
+    if stun_verify_message_integrity(
+        response_packet[0:response_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 146;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_refresh_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "refresh-nonce" as &[byte]) {
+        return 147;
+    }
+
+    var stale_packet: [byte: 256] = [];
+    var stale_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_error_response(&stale_builder, stale_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 148;
+    }
+    if stun_builder_append_error_code(&stale_builder, TURN_ERROR_STALE_NONCE, "Stale Nonce" as &[byte]).error_id != 0 {
+        return 149;
+    }
+    if turn_builder_append_realm(&stale_builder, "example.org" as &[byte]).error_id != 0 {
+        return 150;
+    }
+    if turn_builder_append_nonce(&stale_builder, "refresh-next-nonce" as &[byte]).error_id != 0 {
+        return 151;
+    }
+    const stale_finish_result: !usize = turn_builder_finish(&stale_builder);
+    if stale_finish_result.error_id != 0 {
+        return 152;
+    }
+    const stale_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(stale_packet[0:stale_finish_result.value], TURN_METHOD_REFRESH, txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if stale_result.error_id != 0 {
+        return 153;
+    }
+    const stale_challenge: TurnAuthenticationChallenge = stale_result.value;
+    if turn_long_term_credentials_apply_stale_nonce(&credentials, &stale_challenge).error_id != 0 {
+        return 154;
+    }
+
+    var refreshed_packet: [byte: 256] = [];
+    var refreshed_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_request(&refreshed_builder, refreshed_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 155;
+    }
+    if turn_builder_append_lifetime(&refreshed_builder, 300u32).error_id != 0 {
+        return 156;
+    }
+    if turn_builder_append_long_term_credentials(&refreshed_builder, &credentials).error_id != 0 {
+        return 157;
+    }
+    const refreshed_finish_result: !usize = turn_builder_finish(&refreshed_builder);
+    if refreshed_finish_result.error_id != 0 {
+        return 158;
+    }
+    const refreshed_result: !TurnRefreshRequest = turn_refresh_request_parse(refreshed_packet[0:refreshed_finish_result.value]);
+    if refreshed_result.error_id != 0 {
+        return 159;
+    }
+    if !refreshed_result.value.nonce_present || !turn_test_bytes_equal(refreshed_result.value.nonce, "refresh-next-nonce" as &[byte]) {
+        return 160;
+    }
+
+    var bad_request_packet: [byte: 256] = [];
+    var bad_request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_request(&bad_request_builder, bad_request_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 161;
+    }
+    if turn_builder_append_lifetime(&bad_request_builder, 1u32).error_id != 0 {
+        return 162;
+    }
+    if turn_builder_append_lifetime(&bad_request_builder, 2u32).error_id != 0 {
+        return 163;
+    }
+    if turn_builder_append_long_term_credentials(&bad_request_builder, &credentials).error_id != 0 {
+        return 164;
+    }
+    const bad_request_finish_result: !usize = turn_builder_finish(&bad_request_builder);
+    if bad_request_finish_result.error_id != 0 {
+        return 165;
+    }
+    const bad_request_result: !TurnRefreshRequest = turn_refresh_request_parse(bad_request_packet[0:bad_request_finish_result.value]);
+    if !turn_test_expect_error(bad_request_result.error_id) {
+        return 166;
+    }
+
+    var bad_response_packet: [byte: 256] = [];
+    var bad_response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_success_response(&bad_response_builder, bad_response_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 167;
+    }
+    if stun_builder_append_message_integrity(&bad_response_builder, credentials.key[0:credentials.key_len]).error_id != 0 {
+        return 168;
+    }
+    const bad_response_finish_result: !usize = turn_builder_finish(&bad_response_builder);
+    if bad_response_finish_result.error_id != 0 {
+        return 169;
+    }
+    const bad_response_result: !TurnRefreshSuccessResponse =
+        turn_refresh_success_response_parse(bad_response_packet[0:bad_response_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if !turn_test_expect_error(bad_response_result.error_id) {
+        return 170;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     var result: i32 = turn_test_check_allocate_request_roundtrip();
     if result != 0 {
@@ -528,6 +761,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_long_term_challenge_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_refresh_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_refresh_invalid_paths();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;
