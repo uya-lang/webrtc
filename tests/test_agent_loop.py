@@ -179,6 +179,8 @@ class AgentLoopPromptTests(unittest.TestCase):
             self.assertIn("尽量多完成上面列出的可推进任务", prompt)
             self.assertIn("不要只做第一个任务就停", prompt)
             self.assertIn("不要因为一个阻塞任务就放弃本轮其余可独立完成的任务", prompt)
+            self.assertIn("同一个 codex 会话里连续推进", prompt)
+            self.assertIn("先立即把它在 todo 中改成 `[~]`", prompt)
 
     def test_dirty_recovery_prompt_requires_full_fix_not_surface_cleanup(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
@@ -487,6 +489,129 @@ class AgentLoopKillTests(unittest.TestCase):
             )
 
         self.assertEqual(resolved, session_id)
+
+    def test_resolve_resume_session_id_can_reuse_last_session_for_fresh_task(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [ ] brand new task\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            state = module.empty_state(root, todo_file)
+            state["last_session"] = {
+                "session_id": session_id,
+                "current_task": "finished previous task",
+                "tasks": ["finished previous task"],
+                "log_file": ".agent/logs/previous.log",
+                "updated_at": "2026-05-31 17:16:16",
+            }
+
+            resolved = module.resolve_resume_session_id(
+                root,
+                state,
+                paths["log_dir"],
+                task_texts=["brand new task"],
+                allow_any_known_session=True,
+            )
+
+        self.assertEqual(resolved, session_id)
+
+    def test_sync_current_in_progress_tasks_from_todo_updates_current_batch(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text(
+                "- [x] done task\n- [~] active task\n- [~] next active task\n- [ ] later task\n",
+                encoding="utf-8",
+            )
+
+            state = module.empty_state(root, todo_file)
+            state["current"] = {
+                "current_task": "stale task",
+                "tasks": ["stale task"],
+                "task_ids": ["stale-id"],
+            }
+
+            changed = module.sync_current_in_progress_tasks_from_todo(state, todo_file)
+            tasks = module.parse_todo(todo_file)
+            in_progress_tasks = [task for task in tasks if task["in_progress_in_file"]]
+
+        self.assertTrue(changed)
+        self.assertEqual(state["current"]["current_task"], "active task")
+        self.assertEqual(state["current"]["tasks"], ["active task", "next active task"])
+        self.assertEqual(
+            state["current"]["task_ids"],
+            [task["id"] for task in in_progress_tasks],
+        )
+
+    def test_sync_current_in_progress_tasks_from_todo_backfills_missing_resume_marker(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text(
+                "- [ ] active task\n- [ ] later task\n",
+                encoding="utf-8",
+            )
+
+            tasks = module.parse_todo(todo_file)
+            state = module.empty_state(root, todo_file)
+            state["current"] = {
+                "current_task": "active task",
+                "tasks": ["active task", "later task"],
+                "task_ids": [tasks[0]["id"], tasks[1]["id"]],
+            }
+
+            changed = module.sync_current_in_progress_tasks_from_todo(state, todo_file)
+            todo_text = todo_file.read_text(encoding="utf-8")
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            todo_text,
+            "- [~] active task\n- [ ] later task\n",
+        )
+        self.assertEqual(state["current"]["current_task"], "active task")
+        self.assertEqual(state["current"]["tasks"], ["active task"])
+
+    def test_sync_current_in_progress_tasks_from_todo_skips_future_batch_tasks(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text(
+                "- [x] done task\n- [ ] active task\n- [ ] later task\n",
+                encoding="utf-8",
+            )
+
+            tasks = module.parse_todo(todo_file)
+            state = module.empty_state(root, todo_file)
+            state["current"] = {
+                "current_task": "done task",
+                "tasks": ["done task", "active task", "later task"],
+                "task_ids": [task["id"] for task in tasks],
+            }
+
+            changed = module.sync_current_in_progress_tasks_from_todo(state, todo_file)
+            todo_text = todo_file.read_text(encoding="utf-8")
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            todo_text,
+            "- [x] done task\n- [~] active task\n- [ ] later task\n",
+        )
+        self.assertEqual(state["current"]["current_task"], "active task")
+        self.assertEqual(state["current"]["tasks"], ["active task"])
 
     def test_queue_pending_commit_keeps_all_completed_tasks(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
