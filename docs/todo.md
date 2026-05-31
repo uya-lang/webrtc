@@ -221,7 +221,7 @@
 - [x] 实现 DTLS record parser/writer。
 - [x] 实现 handshake message fragmentation/reassembly。
 - [x] 实现 ClientHello / ServerHello。
-- [ ] 实现 certificate 解析和生成。
+- [x] 实现 certificate 解析和生成。
 - [ ] 实现 ECDHE key exchange。
 - [ ] 实现 Finished 校验。
 - [ ] 实现 SRTP protection profile negotiation。

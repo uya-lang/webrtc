@@ -9,6 +9,7 @@ export const DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES: usize = DTLS_RECORD_MAX_PAYLOA
 export const DTLS_HELLO_RANDOM_BYTES: usize = 32usize;
 export const DTLS_HELLO_SESSION_ID_MAX_BYTES: usize = 32usize;
 export const DTLS_HELLO_COOKIE_MAX_BYTES: usize = 255usize;
+export const DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES: usize = 8usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -27,6 +28,23 @@ export struct DtlsServerHello {
     cipher_suite: u16 = 0u16,
     compression_method: u8 = 0u8,
     extensions: &[byte] = [],
+}
+
+export struct DtlsCertificateEntry {
+    der: &[byte] = [],
+}
+
+export struct DtlsCertificateMessage {
+    certificate_count: usize = 0usize,
+    certificates: [DtlsCertificateEntry: DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES] = [],
+}
+
+export fn dtls_certificate_message_make() DtlsCertificateMessage {
+    var certificates: [DtlsCertificateEntry: DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES] = [];
+    return DtlsCertificateMessage{
+        certificate_count: 0usize,
+        certificates: certificates,
+    };
 }
 
 export struct DtlsHandshakeFragment {
@@ -86,6 +104,27 @@ fn dtls_hello_extensions_validate(extensions: &[byte]) !void {
     }
 }
 
+fn dtls_read_u24(src: &[byte]) !usize {
+    if src.len < 3usize {
+        return error.PacketTooShort;
+    }
+    return ((src[0] as usize) << 16i32)
+        | ((src[1] as usize) << 8i32)
+        | (src[2] as usize);
+}
+
+fn dtls_write_u24(dst: &[byte], value: usize) !void {
+    if dst.len < 3usize {
+        return error.ByteWriterOutOfBounds;
+    }
+    if value > 0xffffffusize {
+        return error.InvalidPacket;
+    }
+    dst[0] = ((value >> 16i32) & 0xffusize) as byte;
+    dst[1] = ((value >> 8i32) & 0xffusize) as byte;
+    dst[2] = (value & 0xffusize) as byte;
+}
+
 fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
     if hello == null {
         return error.InvalidPacket;
@@ -134,6 +173,30 @@ fn dtls_server_hello_validate(hello: &DtlsServerHello) !void {
         return error.InvalidPacket;
     }
     try dtls_hello_extensions_validate(hello.extensions);
+}
+
+fn dtls_certificate_validate(message: &DtlsCertificateMessage) !usize {
+    if message == null {
+        return error.InvalidPacket;
+    }
+    if message.certificate_count > DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES {
+        return error.UnsupportedCapability;
+    }
+
+    var total_length: usize = 3usize;
+    var index: usize = 0usize;
+    while index < message.certificate_count {
+        const der: &[byte] = message.certificates[index].der;
+        if der.len == 0usize || der.len > 0xffffffusize {
+            return error.InvalidPacket;
+        }
+        total_length = try checked_add_usize(total_length, 3usize + der.len);
+        if total_length > DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+            return error.UnsupportedCapability;
+        }
+        index = index + 1usize;
+    }
+    return total_length;
 }
 
 export fn dtls_client_hello_parse(body: &[byte]) !DtlsClientHello {
@@ -377,6 +440,66 @@ export fn dtls_server_hello_write(hello: &DtlsServerHello, out: &[byte]) !usize 
             index = index + 1usize;
         }
         cursor = cursor + hello.extensions.len;
+    }
+
+    return cursor;
+}
+
+export fn dtls_certificate_parse(body: &[byte]) !DtlsCertificateMessage {
+    if body.len < 3usize {
+        return error.PacketTooShort;
+    }
+
+    const certificate_list_length: usize = try dtls_read_u24(body[0:3]);
+    if certificate_list_length != body.len - 3usize {
+        return error.InvalidPacket;
+    }
+
+    var message: DtlsCertificateMessage = dtls_certificate_message_make();
+    var cursor: usize = 3usize;
+    while cursor < body.len {
+        if message.certificate_count >= DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES {
+            return error.UnsupportedCapability;
+        }
+        if cursor + 3usize > body.len {
+            return error.InvalidPacket;
+        }
+        const certificate_length: usize = try dtls_read_u24(body[cursor:3]);
+        cursor = cursor + 3usize;
+        if certificate_length == 0usize || cursor + certificate_length > body.len {
+            return error.InvalidPacket;
+        }
+        message.certificates[message.certificate_count] = DtlsCertificateEntry{
+            der: body[cursor:certificate_length],
+        };
+        message.certificate_count = message.certificate_count + 1usize;
+        cursor = cursor + certificate_length;
+    }
+    return message;
+}
+
+export fn dtls_certificate_write(message: &DtlsCertificateMessage, out: &[byte]) !usize {
+    const total_length: usize = try dtls_certificate_validate(message);
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    try dtls_write_u24(out[0:3], total_length - 3usize);
+
+    var cursor: usize = 3usize;
+    var certificate_index: usize = 0usize;
+    while certificate_index < message.certificate_count {
+        const der: &[byte] = message.certificates[certificate_index].der;
+        try dtls_write_u24(out[cursor:3], der.len);
+        cursor = cursor + 3usize;
+
+        var byte_index: usize = 0usize;
+        while byte_index < der.len {
+            out[cursor + byte_index] = der[byte_index];
+            byte_index = byte_index + 1usize;
+        }
+        cursor = cursor + der.len;
+        certificate_index = certificate_index + 1usize;
     }
 
     return cursor;

@@ -366,6 +366,63 @@ fn dtls_test_check_server_hello_invalid_cases() i32 {
     return 0;
 }
 
+fn dtls_test_check_certificate_roundtrip() i32 {
+    var body: [byte: 16] = [
+        0x00 as byte, 0x00 as byte, 0x0d as byte,
+        0x00 as byte, 0x00 as byte, 0x04 as byte, 0x30 as byte, 0x82 as byte, 0x01 as byte, 0x93 as byte,
+        0x00 as byte, 0x00 as byte, 0x03 as byte, 0x30 as byte, 0x03 as byte, 0x02 as byte,
+    ];
+    const parsed: !DtlsCertificateMessage = dtls_certificate_parse(body[0:16]);
+    if parsed.error_id != 0 {
+        return 93;
+    }
+    if parsed.value.certificate_count != 2usize {
+        return 94;
+    }
+    const first: &[byte] = parsed.value.certificates[0].der;
+    const second: &[byte] = parsed.value.certificates[1].der;
+    if first.len != 4usize || first[3] != 0x93 as byte {
+        return 95;
+    }
+    if second.len != 3usize || second[1] != 0x03 as byte {
+        return 96;
+    }
+    var out: [byte: 32] = [];
+    const written: !usize = dtls_certificate_write(&parsed.value, out[0:32]);
+    if written.error_id != 0 || written.value != 16usize {
+        return 97;
+    }
+    var index: usize = 0usize;
+    while index < 16usize {
+        if out[index] != body[index] {
+            return 98;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_certificate_invalid_cases() i32 {
+    var truncated_entry: [byte: 7] = [
+        0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x00 as byte, 0x03 as byte, 0x30 as byte,
+    ];
+    if dtls_certificate_parse(truncated_entry[0:7]).error_id == 0 {
+        return 99;
+    }
+
+    var body: [byte: 4] = [0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte];
+    var message: DtlsCertificateMessage = dtls_certificate_message_make();
+    message.certificate_count = 1usize;
+    message.certificates[0] = DtlsCertificateEntry{
+        der: body[3:0],
+    };
+    if dtls_certificate_write(&message, body[0:4]).error_id == 0 {
+        return 100;
+    }
+    return 0;
+}
+
 fn dtls_test_check_exporter_reference_cases() i32 {
     return 0;
 }
@@ -429,6 +486,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_server_hello_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_certificate_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_certificate_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;
