@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from datetime import datetime
@@ -42,6 +43,8 @@ VALID_CODEX_SANDBOXES = {
 SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
 HEARTBEAT_SECONDS = max(1, int(os.environ.get("AGENT_HEARTBEAT", "15")))
 MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
+RESULT_EXIT_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_EXIT_GRACE", "5")))
+RESULT_KILL_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_KILL_GRACE", "3")))
 
 if CODEX_SANDBOX and CODEX_SANDBOX not in VALID_CODEX_SANDBOXES:
     raise SystemExit(
@@ -419,6 +422,7 @@ def parse_todo(todo_file):
     支持 markdown checklist 格式：
 
     - [ ] 实现功能
+    - [~] 正在执行
     - [x] 已完成功能
     """
 
@@ -429,11 +433,11 @@ def parse_todo(todo_file):
     occurrences = {}
 
     for line_no, line in enumerate(todo_file.read_text(encoding="utf-8").splitlines(), start=1):
-        match = re.match(r"^\s*-\s+\[( |x|X)\]\s+(.+)$", line)
+        match = re.match(r"^\s*-\s+\[( |~|x|X)\]\s+(.+)$", line)
         if not match:
             continue
 
-        checked, text = match.groups()
+        marker, text = match.groups()
         text = text.strip()
         occurrence = occurrences.get(text, 0) + 1
         occurrences[text] = occurrence
@@ -442,7 +446,9 @@ def parse_todo(todo_file):
             {
                 "id": make_task_id(todo_file, text, occurrence),
                 "text": text,
-                "done_in_file": checked.lower() == "x",
+                "done_in_file": marker.lower() == "x",
+                "in_progress_in_file": marker == "~",
+                "marker": marker,
                 "line_no": line_no,
             }
         )
@@ -528,6 +534,107 @@ def reconcile_state_with_todo(state, tasks):
     return changed
 
 
+def set_tasks_marker(todo_file, tasks, marker):
+    if not tasks:
+        return {}
+
+    original_text = todo_file.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+    previous_markers = {}
+    changed = False
+
+    for task in tasks:
+        line_index = task["line_no"] - 1
+        if line_index < 0 or line_index >= len(lines):
+            continue
+
+        current_line = lines[line_index]
+        match = re.match(r"^(\s*-\s+\[)( |~|x|X)(\]\s+.*)$", current_line)
+        if match is None:
+            continue
+
+        current_marker = match.group(2)
+        previous_markers[task["id"]] = current_marker
+        if current_marker == marker:
+            continue
+
+        lines[line_index] = f"{match.group(1)}{marker}{match.group(3)}"
+        changed = True
+
+    if changed:
+        trailing_newline = "\n" if original_text.endswith("\n") else ""
+        todo_file.write_text("\n".join(lines) + trailing_newline, encoding="utf-8")
+
+    return previous_markers
+
+
+def restore_tasks_marker(todo_file, tasks, previous_markers):
+    if not tasks or not previous_markers:
+        return False
+
+    original_text = todo_file.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+    changed = False
+
+    for task in tasks:
+        previous_marker = previous_markers.get(task["id"])
+        if previous_marker is None:
+            continue
+
+        line_index = task["line_no"] - 1
+        if line_index < 0 or line_index >= len(lines):
+            continue
+
+        current_line = lines[line_index]
+        match = re.match(r"^(\s*-\s+\[)( |~|x|X)(\]\s+.*)$", current_line)
+        if match is None:
+            continue
+
+        current_marker = match.group(2)
+        if current_marker != "~":
+            continue
+
+        lines[line_index] = f"{match.group(1)}{previous_marker}{match.group(3)}"
+        changed = True
+
+    if not changed:
+        return False
+
+    trailing_newline = "\n" if original_text.endswith("\n") else ""
+    todo_file.write_text("\n".join(lines) + trailing_newline, encoding="utf-8")
+    return True
+
+
+def process_is_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    return True
+
+
+def clear_stale_in_progress_tasks(todo_file, state):
+    current = state.get("current")
+    if isinstance(current, dict) and process_is_alive(current.get("pid")):
+        return False
+
+    tasks = parse_todo(todo_file)
+    in_progress_tasks = [task for task in tasks if task.get("in_progress_in_file")]
+    if not in_progress_tasks:
+        return False
+
+    set_tasks_marker(todo_file, in_progress_tasks, " ")
+    return True
+
+
 def is_git_repo(root):
     probe = subprocess.run(
         ["git", "rev-parse", "--is-inside-work-tree"],
@@ -537,6 +644,27 @@ def is_git_repo(root):
         text=True,
     )
     return probe.returncode == 0
+
+
+def git_status_lines(root):
+    if not is_git_repo(root):
+        return []
+
+    probe = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return []
+
+    return [line for line in probe.stdout.splitlines() if line.strip()]
+
+
+def has_uncommitted_changes(root):
+    return bool(git_status_lines(root))
 
 
 def summarize_tasks(tasks, limit):
@@ -643,8 +771,10 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
    - 不要 amend 既有提交。
 12. 如果项目不是 git 仓库，也继续完成任务，并把 `commits` 留空数组。
 13. 不要回退用户已有改动，不要执行 destructive git 操作，也不要扩大到和这个 todo 无关的工作。
-14. 结束前必须输出一行严格单行 JSON，格式如下：
-{RESULT_PREFIX} {{"completed":["任务1"],"blocked":["任务2"],"deferred":["任务3"],"toolchain_bugs":[".agent/toolchain-bugs/bug-report.md"],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
+14. 结束前必须输出一行严格单行结果，要求：
+    - 这一行必须以 `{RESULT_PREFIX}` 开头
+    - 前缀后面紧跟一个单行 JSON
+    - JSON 示例：{{"completed":["任务1"],"blocked":["任务2"],"deferred":["任务3"],"toolchain_bugs":[".agent/toolchain-bugs/bug-report.md"],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
 - completed：只填写本次真正完成、并且已经在 todo 文件中勾选的当前任务文本
@@ -689,8 +819,10 @@ todo 文件：
 2. 先重新运行与列表中第一个待补提交任务直接相关的验证命令，确认它们通过后，再只 stage 相关文件并立即创建一个清晰、自然的普通提交。
 3. 不要继续实现新的 todo 任务，不要扩大工作范围，不要把多个 todo 任务合并进同一个补提交，也不要把无关脏改动一起提交。
 4. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[ ]` 或修正相关文件，再把这次修正提交掉。
-5. 结束前必须输出一行严格单行 JSON，格式如下：
-{RESULT_PREFIX} {{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
+5. 结束前必须输出一行严格单行结果，要求：
+   - 这一行必须以 `{RESULT_PREFIX}` 开头
+   - 前缀后面紧跟一个单行 JSON
+   - JSON 示例：{{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
 - `completed`：默认使用空数组，除非这次顺手修正了 todo 状态并重新确认完成
@@ -699,6 +831,64 @@ todo 文件：
 - `toolchain_bugs`：默认使用空数组；只有这次新增或更新了 bug 报告时才填写
 - `commits`：这次新创建的 git commit 哈希，短哈希或长哈希都可以
 - `verification`：补提交前重新运行且通过的验证命令；如果 `commits` 非空且 `tasks` 非空，这里必须至少有一条
+"""
+
+
+def build_dirty_worktree_recovery_prompt(
+    root,
+    todo_file,
+    runnable_tasks,
+    exhausted_tasks,
+    dirty_lines,
+):
+    todo_path = todo_label(root, todo_file)
+    project_root = path_label(root, root)
+    current_task = summarize_tasks(runnable_tasks, limit=1)
+    blocked_preview = summarize_tasks(exhausted_tasks, limit=1)
+    dirty_preview = summarize_strings(dirty_lines, limit=50)
+
+    return f"""
+你是一个代码执行 Agent。
+
+当前任务的迭代被中断后，仓库里留下了未提交改动。
+这次不是新的工作流，也不是额外的预处理；你是在继续“当前 todo 任务”的同一轮迭代，目标是保证当前任务验证通过并提交，然后才允许进入后续任务。
+
+项目根目录：
+{project_root}
+
+todo 文件：
+{todo_path}
+
+当前任务：
+{current_task}
+
+当前阻塞并停止后续推进的任务：
+{blocked_preview}
+
+当前 git 脏改动：
+{dirty_preview}
+
+要求：
+1. 先检查当前 git 状态、todo 勾选和未提交文件，确认这些现有改动与“当前任务”的关系。
+2. 绝对不要开始新的 todo 任务；只允许围绕上面的当前任务继续收尾、补验证、补实现或补提交。
+3. 先重新运行当前任务直接相关的验证命令；如果验证失败，继续修改当前任务相关内容直到通过，或明确判定当前任务阻塞。
+4. 只有在当前任务验证通过后，才允许创建提交；提交后外层循环才会继续处理下一个任务。
+5. 如果当前任务还没真正完成，就不要为了“清理工作区”而做部分提交；保持它是当前任务的一部分继续迭代。
+6. 如果验证通过，只 stage 当前任务直接相关的现有文件，创建一个清晰、自然的普通提交。
+7. 不要把当前任务和后续任务合并到同一个提交，也不要引入新的无关修改。
+8. 不要回退用户已有改动，不要执行 destructive git 操作。
+9. 结束前必须输出一行严格单行结果，要求：
+   - 这一行必须以 `{RESULT_PREFIX}` 开头
+   - 前缀后面紧跟一个单行 JSON
+   - JSON 示例：{{"completed":[],"blocked":["任务文本"],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
+
+字段说明：
+- `completed`：如果你让当前任务真正完成并在 todo 中勾选，填写当前任务文本；否则用空数组
+- `blocked`：如果当前任务仍然无法通过验证或暂时不能完成，填写当前任务文本或阻塞说明
+- `deferred`：默认使用空数组
+- `toolchain_bugs`：只有这次新增或更新了 bug 报告时才填写
+- `commits`：这次为当前任务创建的新提交哈希
+- `verification`：当前任务提交前实际运行且通过的验证命令；如果 `completed` 或 `commits` 非空，这里必须至少有一条
 """
 
 
@@ -755,6 +945,7 @@ def run_codex(
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 text=True,
+                start_new_session=True,
             )
         except FileNotFoundError:
             handle.write(f"[{now()}] ERROR: command not found: {CODEX_CMD}\n")
@@ -766,6 +957,8 @@ def run_codex(
         last_log_size = last_reported_size
         last_log_update_monotonic = start_monotonic
         last_log_update_at = now()
+        result_seen_monotonic = None
+        terminate_sent_monotonic = None
 
         if state is not None and state_file is not None and isinstance(state.get("current"), dict):
             state["current"]["pid"] = process.pid
@@ -784,6 +977,12 @@ def run_codex(
                 last_log_size = current_log_size
                 last_log_update_monotonic = current_monotonic
                 last_log_update_at = now()
+                if result_seen_monotonic is None and parse_agent_result(log_file):
+                    result_seen_monotonic = current_monotonic
+                    print(
+                        "[agent] result detected: waiting briefly for codex to exit "
+                        f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
+                    )
 
             if returncode is not None:
                 elapsed_seconds = int(current_monotonic - start_monotonic)
@@ -794,6 +993,23 @@ def run_codex(
                     state["current"]["log_updated_at"] = last_log_update_at
                     save_state(state_file, state)
                 break
+
+            if result_seen_monotonic is not None:
+                if (
+                    terminate_sent_monotonic is None
+                    and current_monotonic - result_seen_monotonic >= RESULT_EXIT_GRACE_SECONDS
+                ):
+                    print("[agent] codex still running after final result; sending SIGTERM")
+                    send_signal_to_process_group(process, signal.SIGTERM)
+                    terminate_sent_monotonic = current_monotonic
+
+                if (
+                    terminate_sent_monotonic is not None
+                    and current_monotonic - terminate_sent_monotonic >= RESULT_KILL_GRACE_SECONDS
+                ):
+                    print("[agent] codex ignored SIGTERM after final result; sending SIGKILL")
+                    send_signal_to_process_group(process, signal.SIGKILL)
+                    terminate_sent_monotonic = current_monotonic + 10_000
 
             if current_monotonic >= next_heartbeat:
                 elapsed_seconds = int(current_monotonic - start_monotonic)
@@ -870,6 +1086,16 @@ def parse_agent_result(log_file):
         return normalized
 
     return {}
+
+
+def send_signal_to_process_group(process, sig):
+    try:
+        os.killpg(process.pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
 
 
 def restore_tasks_to_unchecked(todo_file, tasks):
@@ -1195,6 +1421,119 @@ def run_pending_commit_recovery(paths, state):
     return False
 
 
+def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
+    dirty_lines = git_status_lines(paths["root"])
+    if not dirty_lines:
+        return True
+
+    recovery_tasks = runnable_tasks[:1]
+    recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
+    batch_head_before = git_head_commit(paths["root"])
+    state["current"] = {
+        "project_root": path_label(paths["root"], paths["root"]),
+        "todo_file": todo_label(paths["root"], paths["todo_file"]),
+        "started_at": now(),
+        "task_count": 1,
+        "current_task": recovery_tasks[0]["text"],
+        "tasks": [recovery_tasks[0]["text"]],
+        "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
+        "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
+        "git_repo": True,
+        "log_file": path_label(paths["root"], recovery_log_file),
+        "pid": None,
+        "heartbeat_at": None,
+        "elapsed_seconds": 0,
+        "log_bytes": 0,
+        "log_updated_at": None,
+    }
+    save_state(paths["state_file"], state)
+
+    print("[agent] continue current task iteration from existing uncommitted changes")
+    print(f"[agent] current task: {recovery_tasks[0]['text']}")
+    print(f"[agent] dirty entries: {len(dirty_lines)}")
+    for index, line in enumerate(dirty_lines[:10], start=1):
+        print(f"[agent]   {index}. {line}")
+
+    previous_markers = set_tasks_marker(paths["todo_file"], recovery_tasks, "~")
+    ok, log_file = run_codex(
+        paths["root"],
+        paths["todo_file"],
+        paths["log_dir"],
+        recovery_tasks,
+        [],
+        paths["toolchain_bug_dir"],
+        paths["toolchain_bug_repro_dir"],
+        state_file=paths["state_file"],
+        state=state,
+        log_file=recovery_log_file,
+        prompt_override=build_dirty_worktree_recovery_prompt(
+            paths["root"],
+            paths["todo_file"],
+            runnable_tasks,
+            exhausted_tasks,
+            dirty_lines,
+        ),
+    )
+    restore_tasks_marker(paths["todo_file"], recovery_tasks, previous_markers)
+
+    result = parse_agent_result(log_file)
+    verification_commands = result.get("verification", [])
+    verification_failed_command = None
+    verification_invalid = False
+
+    if verification_commands:
+        _passed_verification, verification_failed_command = run_verification_commands(
+            paths["root"],
+            verification_commands,
+        )
+        if verification_failed_command is not None:
+            verification_invalid = True
+
+    reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
+    detected_commits = collect_new_commits(paths["root"], batch_head_before)
+    commits = list(reported_commits)
+    merge_unique_strings(commits, detected_commits)
+    invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+
+    if commits and not verification_commands:
+        print("[agent] current-task recovery produced commit without verification commands; will not continue iterating")
+        verification_invalid = True
+
+    if commits and verification_invalid:
+        print("[agent] current-task recovery commit was not verification-backed; stop before advancing")
+        state["current"] = None
+        save_state(paths["state_file"], state)
+        return False
+
+    if invalid_commits > 0:
+        print(f"[agent] current-task recovery ignored invalid commits: {invalid_commits}")
+
+    if commits:
+        print(f"[agent] current-task recovery committed: {len(commits)}")
+        merge_unique_strings(state.setdefault("commits", []), commits)
+
+    remaining_dirty = git_status_lines(paths["root"])
+    if remaining_dirty:
+        if verification_invalid and verification_failed_command is not None:
+            print(
+                "[agent] current-task recovery verification replay failed and worktree is still dirty; "
+                "will retry current task"
+            )
+        elif not ok:
+            print("[agent] current-task recovery failed and worktree is still dirty; will retry current task")
+        else:
+            print("[agent] current-task recovery ended but worktree is still dirty; will retry current task")
+
+        state["current"] = None
+        save_state(paths["state_file"], state)
+        return False
+
+    print("[agent] current-task recovery finished with clean worktree")
+    state["current"] = None
+    save_state(paths["state_file"], state)
+    return True
+
+
 def completed_tasks(before_tasks, after_tasks):
     after_by_id = {task["id"]: task for task in after_tasks}
     completed = []
@@ -1205,6 +1544,17 @@ def completed_tasks(before_tasks, after_tasks):
             completed.append(after)
 
     return completed
+
+
+def task_for_text(task_text, tasks):
+    if not isinstance(task_text, str) or not task_text.strip():
+        return None
+
+    for task in tasks:
+        if task["text"] == task_text:
+            return task
+
+    return None
 
 
 def match_tasks_by_text(task_texts, tasks):
@@ -1271,6 +1621,8 @@ def main():
 
     if args.status:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        if clear_stale_in_progress_tasks(paths["todo_file"], state):
+            state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
         tasks = parse_todo(paths["todo_file"])
         if reconcile_state_with_todo(state, tasks):
             save_state(paths["state_file"], state)
@@ -1282,6 +1634,8 @@ def main():
 
     while True:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        if clear_stale_in_progress_tasks(paths["todo_file"], state):
+            state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
         tasks_before = parse_todo(paths["todo_file"])
         if reconcile_state_with_todo(state, tasks_before):
             save_state(paths["state_file"], state)
@@ -1296,6 +1650,19 @@ def main():
 
         runnable_tasks = choose_runnable_tasks(tasks_before, state)
         exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
+
+        recovery_tasks = list(runnable_tasks[:1])
+        current_state_task = task_for_text((state.get("current") or {}).get("current_task"), tasks_before)
+        if current_state_task is not None:
+            recovery_tasks = [current_state_task]
+
+        if git_repo and has_uncommitted_changes(paths["root"]) and recovery_tasks:
+            recovered = run_dirty_worktree_recovery(paths, state, recovery_tasks, exhausted_tasks)
+            if recovered:
+                continue
+
+            time.sleep(SLEEP_SECONDS)
+            continue
 
         if not runnable_tasks:
             if exhausted_tasks:
@@ -1328,6 +1695,7 @@ def main():
         print(f"[agent] run batch: {len(runnable_tasks)} runnable tasks")
         print(f"[agent] current task: {runnable_tasks[0]['text']}")
         print_batch_preview(runnable_tasks)
+        previous_markers = set_tasks_marker(paths["todo_file"], runnable_tasks[:1], "~")
         ok, log_file = run_codex(
             paths["root"],
             paths["todo_file"],
@@ -1340,6 +1708,7 @@ def main():
             state=state,
             log_file=batch_log_file,
         )
+        restore_tasks_marker(paths["todo_file"], runnable_tasks[:1], previous_markers)
 
         tasks_after = parse_todo(paths["todo_file"])
         reconcile_state_with_todo(state, tasks_after)
