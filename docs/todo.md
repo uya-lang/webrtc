@@ -173,7 +173,7 @@
 ## Phase 6：TURN client
 
 - [x] 实现 TURN Allocate。
-- [ ] 实现 long-term credential。
+- [x] 实现 long-term credential。
 - [ ] 实现 Refresh。
 - [ ] 实现 CreatePermission。
 - [ ] 实现 Send/Data indication。

@@ -1,4 +1,4 @@
-// webrtc.turn.parse - TURN Allocate parser
+// webrtc.turn.parse - TURN client parser helpers
 // 模块路径：src/webrtc/turn/parse.uya → use webrtc.turn.parse;
 
 use webrtc.binary;
@@ -13,10 +13,23 @@ const TURN_ALLOCATE_REQUEST_SEEN_REQUESTED_ADDRESS_FAMILY: u32 = 4u32;
 const TURN_ALLOCATE_REQUEST_SEEN_EVEN_PORT: u32 = 8u32;
 const TURN_ALLOCATE_REQUEST_SEEN_DONT_FRAGMENT: u32 = 16u32;
 const TURN_ALLOCATE_REQUEST_SEEN_RESERVATION_TOKEN: u32 = 32u32;
+const TURN_ALLOCATE_REQUEST_SEEN_USERNAME: u32 = 64u32;
+const TURN_ALLOCATE_REQUEST_SEEN_REALM: u32 = 128u32;
+const TURN_ALLOCATE_REQUEST_SEEN_NONCE: u32 = 256u32;
+const TURN_ALLOCATE_REQUEST_SEEN_MESSAGE_INTEGRITY: u32 = 512u32;
+const TURN_ALLOCATE_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 1024u32;
+const TURN_ALLOCATE_REQUEST_SEEN_FINGERPRINT: u32 = 2048u32;
 
 const TURN_ALLOCATE_SUCCESS_SEEN_LIFETIME: u32 = 1u32;
 const TURN_ALLOCATE_SUCCESS_SEEN_XOR_MAPPED_ADDRESS: u32 = 2u32;
 const TURN_ALLOCATE_SUCCESS_SEEN_RESERVATION_TOKEN: u32 = 4u32;
+
+const TURN_AUTH_CHALLENGE_SEEN_ERROR_CODE: u32 = 1u32;
+const TURN_AUTH_CHALLENGE_SEEN_REALM: u32 = 2u32;
+const TURN_AUTH_CHALLENGE_SEEN_NONCE: u32 = 4u32;
+const TURN_AUTH_CHALLENGE_SEEN_MESSAGE_INTEGRITY: u32 = 8u32;
+const TURN_AUTH_CHALLENGE_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 16u32;
+const TURN_AUTH_CHALLENGE_SEEN_FINGERPRINT: u32 = 32u32;
 
 fn turn_parse_known_allocate_request_attribute(attr_type: u16) bool {
     if attr_type == TURN_ATTRIBUTE_REQUESTED_TRANSPORT {
@@ -83,6 +96,28 @@ fn turn_parse_known_allocate_success_attribute(attr_type: u16) bool {
     return attr_type == STUN_ATTRIBUTE_SOFTWARE;
 }
 
+fn turn_parse_known_auth_challenge_attribute(attr_type: u16) bool {
+    if attr_type == STUN_ATTRIBUTE_ERROR_CODE {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
 fn turn_parse_transaction_id_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
         return false;
@@ -125,6 +160,24 @@ fn turn_allocate_request_seen_mask(attr_type: u16) u32 {
     if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
         return TURN_ALLOCATE_REQUEST_SEEN_RESERVATION_TOKEN;
     }
+    if attr_type == STUN_ATTRIBUTE_USERNAME {
+        return TURN_ALLOCATE_REQUEST_SEEN_USERNAME;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return TURN_ALLOCATE_REQUEST_SEEN_REALM;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return TURN_ALLOCATE_REQUEST_SEEN_NONCE;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return TURN_ALLOCATE_REQUEST_SEEN_MESSAGE_INTEGRITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return TURN_ALLOCATE_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_ALLOCATE_REQUEST_SEEN_FINGERPRINT;
+    }
     return 0u32;
 }
 
@@ -137,6 +190,28 @@ fn turn_allocate_success_seen_mask(attr_type: u16) u32 {
     }
     if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
         return TURN_ALLOCATE_SUCCESS_SEEN_RESERVATION_TOKEN;
+    }
+    return 0u32;
+}
+
+fn turn_auth_challenge_seen_mask(attr_type: u16) u32 {
+    if attr_type == STUN_ATTRIBUTE_ERROR_CODE {
+        return TURN_AUTH_CHALLENGE_SEEN_ERROR_CODE;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return TURN_AUTH_CHALLENGE_SEEN_REALM;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return TURN_AUTH_CHALLENGE_SEEN_NONCE;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return TURN_AUTH_CHALLENGE_SEEN_MESSAGE_INTEGRITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return TURN_AUTH_CHALLENGE_SEEN_MESSAGE_INTEGRITY_SHA256;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_AUTH_CHALLENGE_SEEN_FINGERPRINT;
     }
     return 0u32;
 }
@@ -165,6 +240,21 @@ fn turn_allocate_validate_success_attribute(attr: &StunAttribute, seen_mask: u32
     }
 
     const mask: u32 = turn_allocate_success_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+fn turn_auth_challenge_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_auth_challenge_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_auth_challenge_seen_mask(attr.attr_type);
     if mask != 0u32 && (seen_mask & mask) != 0u32 {
         return error.InvalidPacket;
     }
@@ -226,6 +316,20 @@ export fn turn_parse_reservation_token(value: &[byte], dst: &[byte]) !void {
     turn_parse_copy_reservation_token(dst, value);
 }
 
+export fn turn_parse_realm(value: &[byte]) !&[byte] {
+    if value.len == 0usize || value.len > TURN_MAX_REALM_BYTES {
+        return error.InvalidPacket;
+    }
+    return value;
+}
+
+export fn turn_parse_nonce(value: &[byte]) !&[byte] {
+    if value.len == 0usize || value.len > TURN_MAX_NONCE_BYTES {
+        return error.InvalidPacket;
+    }
+    return value;
+}
+
 export fn turn_allocate_request_parse(packet: &[byte]) !TurnAllocateRequest {
     const header: StunMessageHeader = try stun_header_parse(packet);
     if header.method != TURN_METHOD_ALLOCATE || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
@@ -259,6 +363,24 @@ export fn turn_allocate_request_parse(packet: &[byte]) !TurnAllocateRequest {
         } else if attr.attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
             try turn_parse_reservation_token(attr.value, request.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]);
             request.reservation_token_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_USERNAME {
+            request.username = try stun_parse_username(attr.value);
+            request.username_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_REALM {
+            request.realm = try turn_parse_realm(attr.value);
+            request.realm_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_NONCE {
+            request.nonce = try turn_parse_nonce(attr.value);
+            request.nonce_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+            _ = try stun_parse_message_integrity(attr.value);
+            request.message_integrity_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+            _ = try stun_parse_message_integrity_sha256(attr.value);
+            request.message_integrity_sha256_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+            request.fingerprint_present = true;
         }
     }
 
@@ -270,6 +392,19 @@ export fn turn_allocate_request_parse(packet: &[byte]) !TurnAllocateRequest {
     }
     if request.even_port_present && request.reservation_token_present {
         return error.InvalidPacket;
+    }
+    if request.message_integrity_present && request.message_integrity_sha256_present {
+        return error.InvalidPacket;
+    }
+
+    const has_long_term_attributes: bool = request.username_present || request.realm_present || request.nonce_present;
+    if has_long_term_attributes {
+        if !request.username_present || !request.realm_present || !request.nonce_present {
+            return error.InvalidPacket;
+        }
+        if !request.message_integrity_present && !request.message_integrity_sha256_present {
+            return error.InvalidPacket;
+        }
     }
     return request;
 }
@@ -323,4 +458,54 @@ export fn turn_allocate_success_response_parse(packet: &[byte], expected_transac
         return error.InvalidPacket;
     }
     return response;
+}
+
+export fn turn_authentication_challenge_parse(packet: &[byte], expected_method: u16, expected_transaction_id: &[byte]) !TurnAuthenticationChallenge {
+    if expected_transaction_id.len != STUN_TRANSACTION_ID_BYTES {
+        return error.InvalidPacket;
+    }
+
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != expected_method || header.message_class != STUN_MESSAGE_CLASS_ERROR_RESPONSE {
+        return error.InvalidPacket;
+    }
+    if !turn_parse_transaction_id_equal(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], expected_transaction_id) {
+        return error.InvalidPacket;
+    }
+
+    var challenge: TurnAuthenticationChallenge = turn_authentication_challenge_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_auth_challenge_validate_attribute(&attr, seen_mask);
+
+        if attr.attr_type == STUN_ATTRIBUTE_ERROR_CODE {
+            const error_attr: StunErrorCodeAttribute = try stun_parse_error_code(attr.value);
+            challenge.error_code = error_attr.code;
+            challenge.reason = error_attr.reason;
+        } else if attr.attr_type == TURN_ATTRIBUTE_REALM {
+            challenge.realm = try turn_parse_realm(attr.value);
+            challenge.realm_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_NONCE {
+            challenge.nonce = try turn_parse_nonce(attr.value);
+            challenge.nonce_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+            _ = try stun_parse_message_integrity(attr.value);
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+            _ = try stun_parse_message_integrity_sha256(attr.value);
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+        }
+    }
+
+    if challenge.error_code != TURN_ERROR_UNAUTHORIZED && challenge.error_code != TURN_ERROR_STALE_NONCE {
+        return error.InvalidPacket;
+    }
+    if !challenge.realm_present || !challenge.nonce_present {
+        return error.InvalidPacket;
+    }
+    return challenge;
 }

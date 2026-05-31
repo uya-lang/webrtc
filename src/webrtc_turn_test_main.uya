@@ -2,6 +2,7 @@ use libc.printf;
 use webrtc.stun.model;
 use webrtc.stun.parse;
 use webrtc.stun.write;
+use webrtc.turn.auth;
 use webrtc.turn.model;
 use webrtc.turn.parse;
 use webrtc.turn.write;
@@ -257,6 +258,250 @@ fn turn_test_check_allocate_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_check_long_term_credentials_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var challenge_packet: [byte: 256] = [];
+    var challenge_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_error_response(&challenge_builder, challenge_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 70;
+    }
+    if stun_builder_append_error_code(&challenge_builder, TURN_ERROR_UNAUTHORIZED, "Unauthorized" as &[byte]).error_id != 0 {
+        return 71;
+    }
+    if turn_builder_append_realm(&challenge_builder, "example.org" as &[byte]).error_id != 0 {
+        return 72;
+    }
+    if turn_builder_append_nonce(&challenge_builder, "f//499k954d6OL34oL9FSTvy64sA" as &[byte]).error_id != 0 {
+        return 73;
+    }
+    const challenge_finish_result: !usize = turn_builder_finish(&challenge_builder);
+    if challenge_finish_result.error_id != 0 {
+        return 74;
+    }
+
+    const challenge_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(challenge_packet[0:challenge_finish_result.value], TURN_METHOD_ALLOCATE, txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if challenge_result.error_id != 0 {
+        return 75;
+    }
+    const challenge: TurnAuthenticationChallenge = challenge_result.value;
+    if challenge.error_code != TURN_ERROR_UNAUTHORIZED {
+        return 76;
+    }
+    if !challenge.realm_present || !turn_test_bytes_equal(challenge.realm, "example.org" as &[byte]) {
+        return 77;
+    }
+    if !challenge.nonce_present || !turn_test_bytes_equal(challenge.nonce, "f//499k954d6OL34oL9FSTvy64sA" as &[byte]) {
+        return 78;
+    }
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if turn_long_term_credentials_init_from_challenge(
+        &credentials,
+        "evtj:h6vY" as &[byte],
+        "TheMatrIX" as &[byte],
+        &challenge,
+    ).error_id != 0 {
+        return 79;
+    }
+    var expected_key: [byte: 16] = [
+        0xd9 as byte, 0x2f as byte, 0x67 as byte, 0x3b as byte,
+        0x49 as byte, 0xfb as byte, 0x77 as byte, 0x1e as byte,
+        0x4d as byte, 0xb1 as byte, 0x5b as byte, 0x15 as byte,
+        0x66 as byte, 0x00 as byte, 0x23 as byte, 0xc8 as byte,
+    ];
+    if !turn_long_term_credentials_is_ready(&credentials) {
+        return 80;
+    }
+    if credentials.key_len != 16usize {
+        return 81;
+    }
+    if !turn_test_bytes_equal(credentials.key[0:credentials.key_len], expected_key[0:16]) {
+        return 82;
+    }
+
+    var request_packet: [byte: 256] = [];
+    var request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_request(&request_builder, request_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 83;
+    }
+    if turn_builder_append_requested_transport_udp(&request_builder).error_id != 0 {
+        return 84;
+    }
+    if turn_builder_append_requested_address_family(&request_builder, TURN_REQUESTED_ADDRESS_FAMILY_IPV4).error_id != 0 {
+        return 85;
+    }
+    if turn_builder_append_long_term_credentials(&request_builder, &credentials).error_id != 0 {
+        return 86;
+    }
+    const request_finish_result: !usize = turn_builder_finish(&request_builder);
+    if request_finish_result.error_id != 0 {
+        return 87;
+    }
+
+    const authenticated_request_result: !TurnAllocateRequest = turn_allocate_request_parse(request_packet[0:request_finish_result.value]);
+    if authenticated_request_result.error_id != 0 {
+        return 88;
+    }
+    const authenticated_request: TurnAllocateRequest = authenticated_request_result.value;
+    if !authenticated_request.username_present || !turn_test_bytes_equal(authenticated_request.username, "evtj:h6vY" as &[byte]) {
+        return 89;
+    }
+    if !authenticated_request.realm_present || !turn_test_bytes_equal(authenticated_request.realm, "example.org" as &[byte]) {
+        return 90;
+    }
+    if !authenticated_request.nonce_present || !turn_test_bytes_equal(authenticated_request.nonce, "f//499k954d6OL34oL9FSTvy64sA" as &[byte]) {
+        return 91;
+    }
+    if !authenticated_request.message_integrity_present {
+        return 92;
+    }
+    if stun_verify_message_integrity(
+        request_packet[0:request_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 93;
+    }
+
+    var response_packet: [byte: 256] = [];
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
+    var relay_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 10 as byte];
+    if turn_builder_init_allocate_success_response(&response_builder, response_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 94;
+    }
+    if turn_builder_append_xor_relayed_address_ipv4(&response_builder, 50000u16, relay_ipv4[0:4]).error_id != 0 {
+        return 95;
+    }
+    if turn_builder_append_lifetime(&response_builder, 900u32).error_id != 0 {
+        return 96;
+    }
+    if stun_builder_append_message_integrity(&response_builder, credentials.key[0:credentials.key_len]).error_id != 0 {
+        return 97;
+    }
+    const response_finish_result: !usize = turn_builder_finish(&response_builder);
+    if response_finish_result.error_id != 0 {
+        return 98;
+    }
+    if turn_allocate_success_response_parse(
+        response_packet[0:response_finish_result.value],
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+    ).error_id != 0 {
+        return 99;
+    }
+    if stun_verify_message_integrity(
+        response_packet[0:response_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 100;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_long_term_challenge_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var bad_packet: [byte: 192] = [];
+    var bad_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_error_response(&bad_builder, bad_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 101;
+    }
+    if stun_builder_append_error_code(&bad_builder, TURN_ERROR_UNAUTHORIZED, "Unauthorized" as &[byte]).error_id != 0 {
+        return 102;
+    }
+    if turn_builder_append_realm(&bad_builder, "example.org" as &[byte]).error_id != 0 {
+        return 103;
+    }
+    const bad_finish_result: !usize = turn_builder_finish(&bad_builder);
+    if bad_finish_result.error_id != 0 {
+        return 104;
+    }
+    const bad_challenge_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(bad_packet[0:bad_finish_result.value], TURN_METHOD_ALLOCATE, txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if !turn_test_expect_error(bad_challenge_result.error_id) {
+        return 105;
+    }
+
+    var challenge_packet: [byte: 256] = [];
+    var challenge_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_error_response(&challenge_builder, challenge_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 106;
+    }
+    if stun_builder_append_error_code(&challenge_builder, TURN_ERROR_UNAUTHORIZED, "Unauthorized" as &[byte]).error_id != 0 {
+        return 107;
+    }
+    if turn_builder_append_realm(&challenge_builder, "example.org" as &[byte]).error_id != 0 {
+        return 108;
+    }
+    if turn_builder_append_nonce(&challenge_builder, "first-nonce" as &[byte]).error_id != 0 {
+        return 109;
+    }
+    const challenge_finish_result: !usize = turn_builder_finish(&challenge_builder);
+    if challenge_finish_result.error_id != 0 {
+        return 110;
+    }
+    const challenge_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(challenge_packet[0:challenge_finish_result.value], TURN_METHOD_ALLOCATE, txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if challenge_result.error_id != 0 {
+        return 111;
+    }
+    const challenge: TurnAuthenticationChallenge = challenge_result.value;
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if turn_long_term_credentials_init_from_challenge(
+        &credentials,
+        "evtj:h6vY" as &[byte],
+        "TheMatrIX" as &[byte],
+        &challenge,
+    ).error_id != 0 {
+        return 112;
+    }
+    var old_key: [byte: 16] = [];
+    var key_index: usize = 0;
+    while key_index < 16usize {
+        old_key[key_index] = credentials.key[key_index];
+        key_index = key_index + 1;
+    }
+
+    var stale_packet: [byte: 256] = [];
+    var stale_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_error_response(&stale_builder, stale_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 113;
+    }
+    if stun_builder_append_error_code(&stale_builder, TURN_ERROR_STALE_NONCE, "Stale Nonce" as &[byte]).error_id != 0 {
+        return 114;
+    }
+    if turn_builder_append_realm(&stale_builder, "example.org" as &[byte]).error_id != 0 {
+        return 115;
+    }
+    if turn_builder_append_nonce(&stale_builder, "second-nonce" as &[byte]).error_id != 0 {
+        return 116;
+    }
+    const stale_finish_result: !usize = turn_builder_finish(&stale_builder);
+    if stale_finish_result.error_id != 0 {
+        return 117;
+    }
+    const stale_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(stale_packet[0:stale_finish_result.value], TURN_METHOD_ALLOCATE, txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if stale_result.error_id != 0 {
+        return 118;
+    }
+    if turn_long_term_credentials_apply_stale_nonce(&credentials, &stale_result.value).error_id != 0 {
+        return 119;
+    }
+    if !turn_test_bytes_equal(credentials.nonce[0:credentials.nonce_len], "second-nonce" as &[byte]) {
+        return 120;
+    }
+    if !turn_test_bytes_equal(credentials.key[0:credentials.key_len], old_key[0:16]) {
+        return 121;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     var result: i32 = turn_test_check_allocate_request_roundtrip();
     if result != 0 {
@@ -271,6 +516,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_allocate_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_long_term_credentials_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_long_term_challenge_invalid_paths();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;

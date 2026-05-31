@@ -1,4 +1,4 @@
-// webrtc.turn.model - TURN methods、attributes 与 Allocate 运行期模型
+// webrtc.turn.model - TURN methods、attributes 与客户端运行期模型
 // 模块路径：src/webrtc/turn/model.uya → use webrtc.turn.model;
 
 use webrtc.stun.model;
@@ -29,6 +29,11 @@ export const TURN_REQUESTED_ADDRESS_FAMILY_IPV4: u8 = STUN_ADDRESS_FAMILY_IPV4;
 export const TURN_REQUESTED_ADDRESS_FAMILY_IPV6: u8 = STUN_ADDRESS_FAMILY_IPV6;
 export const TURN_RESERVATION_TOKEN_BYTES: usize = 8usize;
 export const TURN_MAX_RELAYED_ADDRESSES: usize = 2usize;
+export const TURN_MAX_REALM_BYTES: usize = 509usize;
+export const TURN_MAX_NONCE_BYTES: usize = 509usize;
+export const TURN_MAX_AUTH_KEY_BYTES: usize = 32usize;
+export const TURN_ERROR_UNAUTHORIZED: u16 = 401u16;
+export const TURN_ERROR_STALE_NONCE: u16 = 438u16;
 
 export struct TurnAllocateRequest {
     requested_transport_protocol: u8 = 0u8,
@@ -42,6 +47,15 @@ export struct TurnAllocateRequest {
     dont_fragment: bool = false,
     reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [],
     reservation_token_present: bool = false,
+    username: &[byte] = [],
+    username_present: bool = false,
+    realm: &[byte] = [],
+    realm_present: bool = false,
+    nonce: &[byte] = [],
+    nonce_present: bool = false,
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
 }
 
 export struct TurnAllocateSuccessResponse {
@@ -55,8 +69,30 @@ export struct TurnAllocateSuccessResponse {
     reservation_token_present: bool = false,
 }
 
+export struct TurnAuthenticationChallenge {
+    error_code: u16 = 0u16,
+    reason: &[byte] = [],
+    realm: &[byte] = [],
+    realm_present: bool = false,
+    nonce: &[byte] = [],
+    nonce_present: bool = false,
+}
+
+export struct TurnLongTermCredentials {
+    username: [byte: STUN_MAX_USERNAME_BYTES] = [],
+    username_len: usize = 0usize,
+    realm: [byte: TURN_MAX_REALM_BYTES] = [],
+    realm_len: usize = 0usize,
+    nonce: [byte: TURN_MAX_NONCE_BYTES] = [],
+    nonce_len: usize = 0usize,
+    key: [byte: TURN_MAX_AUTH_KEY_BYTES] = [],
+    key_len: usize = 0usize,
+    ready: bool = false,
+}
+
 export fn turn_allocate_request_make() TurnAllocateRequest {
     var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    var empty_bytes: [byte: 1] = [];
     return TurnAllocateRequest{
         requested_transport_protocol: 0u8,
         requested_transport_present: false,
@@ -69,6 +105,15 @@ export fn turn_allocate_request_make() TurnAllocateRequest {
         dont_fragment: false,
         reservation_token: reservation_token,
         reservation_token_present: false,
+        username: empty_bytes[0:0],
+        username_present: false,
+        realm: empty_bytes[0:0],
+        realm_present: false,
+        nonce: empty_bytes[0:0],
+        nonce_present: false,
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
     };
 }
 
@@ -85,5 +130,35 @@ export fn turn_allocate_success_response_make() TurnAllocateSuccessResponse {
         lifetime_present: false,
         reservation_token: reservation_token,
         reservation_token_present: false,
+    };
+}
+
+export fn turn_authentication_challenge_make() TurnAuthenticationChallenge {
+    var empty_bytes: [byte: 1] = [];
+    return TurnAuthenticationChallenge{
+        error_code: 0u16,
+        reason: empty_bytes[0:0],
+        realm: empty_bytes[0:0],
+        realm_present: false,
+        nonce: empty_bytes[0:0],
+        nonce_present: false,
+    };
+}
+
+export fn turn_long_term_credentials_make() TurnLongTermCredentials {
+    var username: [byte: STUN_MAX_USERNAME_BYTES] = [];
+    var realm: [byte: TURN_MAX_REALM_BYTES] = [];
+    var nonce: [byte: TURN_MAX_NONCE_BYTES] = [];
+    var key: [byte: TURN_MAX_AUTH_KEY_BYTES] = [];
+    return TurnLongTermCredentials{
+        username: username,
+        username_len: 0usize,
+        realm: realm,
+        realm_len: 0usize,
+        nonce: nonce,
+        nonce_len: 0usize,
+        key: key,
+        key_len: 0usize,
+        ready: false,
     };
 }

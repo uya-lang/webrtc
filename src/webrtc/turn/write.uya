@@ -1,4 +1,4 @@
-// webrtc.turn.write - TURN Allocate builder
+// webrtc.turn.write - TURN client builder helpers
 // 模块路径：src/webrtc/turn/write.uya → use webrtc.turn.write;
 
 use webrtc.binary;
@@ -47,6 +47,13 @@ fn turn_builder_write_attribute(builder: &StunMessageBuilder, attr_type: u16, va
 
 fn turn_builder_write_cookie_bytes(dst: &[byte]) !void {
     try write_be_u32(dst, STUN_MAGIC_COOKIE);
+}
+
+fn turn_builder_append_auth_text(builder: &StunMessageBuilder, attr_type: u16, value: &[byte], max_len: usize) !void {
+    if value.len == 0usize || value.len > max_len {
+        return error.InvalidPacket;
+    }
+    return turn_builder_write_attribute(builder, attr_type, value);
 }
 
 fn turn_builder_append_xor_address_ipv4(builder: &StunMessageBuilder, attr_type: u16, port: u16, address: &[byte]) !void {
@@ -162,6 +169,31 @@ export fn turn_builder_append_reservation_token(builder: &StunMessageBuilder, re
         return error.InvalidPacket;
     }
     return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_RESERVATION_TOKEN, reservation_token);
+}
+
+export fn turn_builder_append_realm(builder: &StunMessageBuilder, realm: &[byte]) !void {
+    return turn_builder_append_auth_text(builder, TURN_ATTRIBUTE_REALM, realm, TURN_MAX_REALM_BYTES);
+}
+
+export fn turn_builder_append_nonce(builder: &StunMessageBuilder, nonce: &[byte]) !void {
+    return turn_builder_append_auth_text(builder, TURN_ATTRIBUTE_NONCE, nonce, TURN_MAX_NONCE_BYTES);
+}
+
+export fn turn_builder_append_long_term_credentials(builder: &StunMessageBuilder, credentials: &TurnLongTermCredentials) !void {
+    if credentials == null || !credentials.ready {
+        return error.InvalidPacket;
+    }
+    if credentials.username_len == 0usize
+        || credentials.realm_len == 0usize
+        || credentials.nonce_len == 0usize
+        || credentials.key_len == 0usize {
+        return error.InvalidPacket;
+    }
+
+    try stun_builder_append_username(builder, credentials.username[0:credentials.username_len]);
+    try turn_builder_append_realm(builder, credentials.realm[0:credentials.realm_len]);
+    try turn_builder_append_nonce(builder, credentials.nonce[0:credentials.nonce_len]);
+    return stun_builder_append_message_integrity(builder, credentials.key[0:credentials.key_len]);
 }
 
 export fn turn_builder_append_xor_relayed_address_ipv4(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {

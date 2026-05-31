@@ -1,0 +1,305 @@
+// webrtc.turn.auth - TURN long-term credential helpers
+// 模块路径：src/webrtc/turn/auth.uya → use webrtc.turn.auth;
+
+use webrtc.binary;
+use webrtc.errors;
+use webrtc.stun.model;
+use webrtc.turn.model;
+
+const TURN_MD5_BLOCK_BYTES: usize = 64usize;
+const TURN_MD5_DIGEST_BYTES: usize = 16usize;
+
+fn turn_u32_add(lhs: u32, rhs: u32) u32 {
+    return ((((lhs as u64) + (rhs as u64)) & 0xFFFFFFFFu64) as u32);
+}
+
+fn turn_u32_add4(a: u32, b: u32, c: u32, d: u32) u32 {
+    var sum: u64 = (a as u64) + (b as u64);
+    sum = sum + (c as u64);
+    sum = sum + (d as u64);
+    return ((sum & 0xFFFFFFFFu64) as u32);
+}
+
+fn turn_md5_rotate_left(value: u32, count: u32) u32 {
+    return (value << (count as i32)) | (value >> ((32u32 - count) as i32));
+}
+
+fn turn_md5_round_f(x: u32, y: u32, z: u32) u32 {
+    return (x & y) | ((~x) & z);
+}
+
+fn turn_md5_round_g(x: u32, y: u32, z: u32) u32 {
+    return (x & z) | (y & (~z));
+}
+
+fn turn_md5_round_h(x: u32, y: u32, z: u32) u32 {
+    return x ^ y ^ z;
+}
+
+fn turn_md5_round_i(x: u32, y: u32, z: u32) u32 {
+    return y ^ (x | (~z));
+}
+
+fn turn_md5_process_block(block: &[byte], a: &u32, b: &u32, c: &u32, d: &u32) !void {
+    if block.len != TURN_MD5_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var words: [u32: 16] = [];
+    var word_index: usize = 0;
+    while word_index < 16usize {
+        words[word_index] = try read_le_u32(block[word_index * 4usize:4]);
+        word_index = word_index + 1usize;
+    }
+
+    var aa: u32 = *a;
+    var bb: u32 = *b;
+    var cc: u32 = *c;
+    var dd: u32 = *d;
+    const round_k: [u32: 64] = [
+        0xD76AA478u32, 0xE8C7B756u32, 0x242070DBu32, 0xC1BDCEEEu32,
+        0xF57C0FAFu32, 0x4787C62Au32, 0xA8304613u32, 0xFD469501u32,
+        0x698098D8u32, 0x8B44F7AFu32, 0xFFFF5BB1u32, 0x895CD7BEu32,
+        0x6B901122u32, 0xFD987193u32, 0xA679438Eu32, 0x49B40821u32,
+        0xF61E2562u32, 0xC040B340u32, 0x265E5A51u32, 0xE9B6C7AAu32,
+        0xD62F105Du32, 0x02441453u32, 0xD8A1E681u32, 0xE7D3FBC8u32,
+        0x21E1CDE6u32, 0xC33707D6u32, 0xF4D50D87u32, 0x455A14EDu32,
+        0xA9E3E905u32, 0xFCEFA3F8u32, 0x676F02D9u32, 0x8D2A4C8Au32,
+        0xFFFA3942u32, 0x8771F681u32, 0x6D9D6122u32, 0xFDE5380Cu32,
+        0xA4BEEA44u32, 0x4BDECFA9u32, 0xF6BB4B60u32, 0xBEBFBC70u32,
+        0x289B7EC6u32, 0xEAA127FAu32, 0xD4EF3085u32, 0x04881D05u32,
+        0xD9D4D039u32, 0xE6DB99E5u32, 0x1FA27CF8u32, 0xC4AC5665u32,
+        0xF4292244u32, 0x432AFF97u32, 0xAB9423A7u32, 0xFC93A039u32,
+        0x655B59C3u32, 0x8F0CCC92u32, 0xFFEFF47Du32, 0x85845DD1u32,
+        0x6FA87E4Fu32, 0xFE2CE6E0u32, 0xA3014314u32, 0x4E0811A1u32,
+        0xF7537E82u32, 0xBD3AF235u32, 0x2AD7D2BBu32, 0xEB86D391u32,
+    ];
+    const round_s: [u32: 64] = [
+        7u32, 12u32, 17u32, 22u32, 7u32, 12u32, 17u32, 22u32,
+        7u32, 12u32, 17u32, 22u32, 7u32, 12u32, 17u32, 22u32,
+        5u32, 9u32, 14u32, 20u32, 5u32, 9u32, 14u32, 20u32,
+        5u32, 9u32, 14u32, 20u32, 5u32, 9u32, 14u32, 20u32,
+        4u32, 11u32, 16u32, 23u32, 4u32, 11u32, 16u32, 23u32,
+        4u32, 11u32, 16u32, 23u32, 4u32, 11u32, 16u32, 23u32,
+        6u32, 10u32, 15u32, 21u32, 6u32, 10u32, 15u32, 21u32,
+        6u32, 10u32, 15u32, 21u32, 6u32, 10u32, 15u32, 21u32,
+    ];
+
+    var round: usize = 0;
+    while round < 64usize {
+        var f: u32 = 0u32;
+        var g: usize = 0usize;
+        if round < 16usize {
+            f = turn_md5_round_f(bb, cc, dd);
+            g = round;
+        } else if round < 32usize {
+            f = turn_md5_round_g(bb, cc, dd);
+            g = ((5usize * round) + 1usize) & 15usize;
+        } else if round < 48usize {
+            f = turn_md5_round_h(bb, cc, dd);
+            g = ((3usize * round) + 5usize) & 15usize;
+        } else {
+            f = turn_md5_round_i(bb, cc, dd);
+            g = (7usize * round) & 15usize;
+        }
+
+        const old_dd: u32 = dd;
+        dd = cc;
+        cc = bb;
+        bb = turn_u32_add(
+            bb,
+            turn_md5_rotate_left(turn_u32_add4(aa, f, round_k[round], words[g]), round_s[round]),
+        );
+        aa = old_dd;
+        round = round + 1usize;
+    }
+
+    *a = turn_u32_add(*a, aa);
+    *b = turn_u32_add(*b, bb);
+    *c = turn_u32_add(*c, cc);
+    *d = turn_u32_add(*d, dd);
+}
+
+fn turn_md5_update_chunk(block: &[byte], block_len: &usize, part: &[byte], a: &u32, b: &u32, c: &u32, d: &u32) !void {
+    var index: usize = 0;
+    while index < part.len {
+        block[*block_len] = part[index];
+        *block_len = *block_len + 1usize;
+        if *block_len == TURN_MD5_BLOCK_BYTES {
+            try turn_md5_process_block(block[0:TURN_MD5_BLOCK_BYTES], a, b, c, d);
+            *block_len = 0usize;
+        }
+        index = index + 1usize;
+    }
+}
+
+fn turn_md5_digest5(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[byte], part4: &[byte], out: &[byte]) !void {
+    if out.len < TURN_MD5_DIGEST_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var a: u32 = 0x67452301u32;
+    var b: u32 = 0xEFCDAB89u32;
+    var c: u32 = 0x98BADCFEu32;
+    var d: u32 = 0x10325476u32;
+
+    var block: [byte: TURN_MD5_BLOCK_BYTES] = [];
+    var block_len: usize = 0usize;
+    const total_len: u64 =
+        (part0.len as u64) + (part1.len as u64) + (part2.len as u64) + (part3.len as u64) + (part4.len as u64);
+
+    try turn_md5_update_chunk(block[0:TURN_MD5_BLOCK_BYTES], &block_len, part0, &a, &b, &c, &d);
+    try turn_md5_update_chunk(block[0:TURN_MD5_BLOCK_BYTES], &block_len, part1, &a, &b, &c, &d);
+    try turn_md5_update_chunk(block[0:TURN_MD5_BLOCK_BYTES], &block_len, part2, &a, &b, &c, &d);
+    try turn_md5_update_chunk(block[0:TURN_MD5_BLOCK_BYTES], &block_len, part3, &a, &b, &c, &d);
+    try turn_md5_update_chunk(block[0:TURN_MD5_BLOCK_BYTES], &block_len, part4, &a, &b, &c, &d);
+
+    block[block_len] = 0x80 as byte;
+    block_len = block_len + 1usize;
+    if block_len > 56usize {
+        while block_len < TURN_MD5_BLOCK_BYTES {
+            block[block_len] = 0 as byte;
+            block_len = block_len + 1usize;
+        }
+        try turn_md5_process_block(block[0:TURN_MD5_BLOCK_BYTES], &a, &b, &c, &d);
+        block_len = 0usize;
+    }
+
+    while block_len < 56usize {
+        block[block_len] = 0 as byte;
+        block_len = block_len + 1usize;
+    }
+
+    try write_le_u64(block[56:8], total_len * 8u64);
+    try turn_md5_process_block(block[0:TURN_MD5_BLOCK_BYTES], &a, &b, &c, &d);
+
+    try write_le_u32(out[0:4], a);
+    try write_le_u32(out[4:4], b);
+    try write_le_u32(out[8:4], c);
+    try write_le_u32(out[12:4], d);
+}
+
+fn turn_zero_bytes(bytes: &[byte]) void {
+    var index: usize = 0;
+    while index < bytes.len {
+        bytes[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn turn_copy_with_zero_fill(dst: &[byte], src: &[byte]) !void {
+    if src.len > dst.len {
+        return error.InvalidPacket;
+    }
+    turn_zero_bytes(dst);
+
+    var index: usize = 0;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn turn_store_text(dst: &[byte], dst_len: &usize, src: &[byte], max_len: usize) !void {
+    if src.len == 0usize || src.len > max_len || src.len > dst.len {
+        return error.InvalidPacket;
+    }
+    try turn_copy_with_zero_fill(dst, src);
+    *dst_len = src.len;
+}
+
+fn turn_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+export fn turn_long_term_credentials_is_ready(credentials: &TurnLongTermCredentials) bool {
+    if credentials == null {
+        return false;
+    }
+    return credentials.ready
+        && credentials.username_len != 0usize
+        && credentials.realm_len != 0usize
+        && credentials.nonce_len != 0usize
+        && credentials.key_len == TURN_MD5_DIGEST_BYTES;
+}
+
+export fn turn_long_term_credentials_init_from_challenge(
+    credentials: &TurnLongTermCredentials,
+    username: &[byte],
+    password: &[byte],
+    challenge: &TurnAuthenticationChallenge,
+) !void {
+    if credentials == null || challenge == null {
+        return error.InvalidPacket;
+    }
+    if challenge.error_code != TURN_ERROR_UNAUTHORIZED && challenge.error_code != TURN_ERROR_STALE_NONCE {
+        return error.InvalidPacket;
+    }
+    if !challenge.realm_present || !challenge.nonce_present {
+        return error.InvalidPacket;
+    }
+    if username.len == 0usize || username.len > STUN_MAX_USERNAME_BYTES {
+        return error.InvalidPacket;
+    }
+    if challenge.realm.len == 0usize || challenge.realm.len > TURN_MAX_REALM_BYTES {
+        return error.InvalidPacket;
+    }
+    if challenge.nonce.len == 0usize || challenge.nonce.len > TURN_MAX_NONCE_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var separator: [byte: 1] = [':' as byte];
+    var digest: [byte: TURN_MD5_DIGEST_BYTES] = [];
+    try turn_md5_digest5(
+        username,
+        separator[0:1],
+        challenge.realm,
+        separator[0:1],
+        password,
+        digest[0:TURN_MD5_DIGEST_BYTES],
+    );
+
+    try turn_store_text(credentials.username[0:STUN_MAX_USERNAME_BYTES], &credentials.username_len, username, STUN_MAX_USERNAME_BYTES);
+    try turn_store_text(credentials.realm[0:TURN_MAX_REALM_BYTES], &credentials.realm_len, challenge.realm, TURN_MAX_REALM_BYTES);
+    try turn_store_text(credentials.nonce[0:TURN_MAX_NONCE_BYTES], &credentials.nonce_len, challenge.nonce, TURN_MAX_NONCE_BYTES);
+    turn_zero_bytes(credentials.key[0:TURN_MAX_AUTH_KEY_BYTES]);
+
+    var key_index: usize = 0;
+    while key_index < TURN_MD5_DIGEST_BYTES {
+        credentials.key[key_index] = digest[key_index];
+        key_index = key_index + 1usize;
+    }
+    credentials.key_len = TURN_MD5_DIGEST_BYTES;
+    credentials.ready = true;
+}
+
+export fn turn_long_term_credentials_apply_stale_nonce(
+    credentials: &TurnLongTermCredentials,
+    challenge: &TurnAuthenticationChallenge,
+) !void {
+    if !turn_long_term_credentials_is_ready(credentials) || challenge == null {
+        return error.InvalidPacket;
+    }
+    if challenge.error_code != TURN_ERROR_STALE_NONCE {
+        return error.InvalidPacket;
+    }
+    if !challenge.realm_present || !challenge.nonce_present {
+        return error.InvalidPacket;
+    }
+    if !turn_bytes_equal(credentials.realm[0:credentials.realm_len], challenge.realm) {
+        return error.InvalidPacket;
+    }
+
+    try turn_store_text(credentials.nonce[0:TURN_MAX_NONCE_BYTES], &credentials.nonce_len, challenge.nonce, TURN_MAX_NONCE_BYTES);
+}
