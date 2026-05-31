@@ -109,6 +109,16 @@ export fn turn_builder_init_allocate_request(builder: &StunMessageBuilder, dst: 
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_REQUEST));
 }
 
+export fn turn_builder_init_send_indication(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_request(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_SEND, STUN_MESSAGE_CLASS_INDICATION));
+}
+
+export fn turn_builder_init_data_indication(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_request(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_DATA, STUN_MESSAGE_CLASS_INDICATION));
+}
+
 export fn turn_builder_init_refresh_request(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_request(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_REFRESH, STUN_MESSAGE_CLASS_REQUEST));
@@ -207,6 +217,10 @@ export fn turn_builder_append_realm(builder: &StunMessageBuilder, realm: &[byte]
 
 export fn turn_builder_append_nonce(builder: &StunMessageBuilder, nonce: &[byte]) !void {
     return turn_builder_append_auth_text(builder, TURN_ATTRIBUTE_NONCE, nonce, TURN_MAX_NONCE_BYTES);
+}
+
+export fn turn_builder_append_data(builder: &StunMessageBuilder, data: &[byte]) !void {
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_DATA, data);
 }
 
 export fn turn_builder_append_long_term_credentials(builder: &StunMessageBuilder, credentials: &TurnLongTermCredentials) !void {

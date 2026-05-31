@@ -863,6 +863,153 @@ fn turn_test_check_create_permission_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_check_send_data_indication_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var peer_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 25 as byte];
+    var send_payload: [byte: 5] = [1 as byte, 3 as byte, 5 as byte, 7 as byte, 9 as byte];
+
+    var send_packet: [byte: 192] = [];
+    var send_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_send_indication(&send_builder, send_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 196;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&send_builder, 41000u16, peer_ipv4[0:4]).error_id != 0 {
+        return 197;
+    }
+    if turn_builder_append_data(&send_builder, send_payload[0:5]).error_id != 0 {
+        return 198;
+    }
+    if turn_builder_append_dont_fragment(&send_builder).error_id != 0 {
+        return 199;
+    }
+    const send_finish_result: !usize = turn_builder_finish(&send_builder);
+    if send_finish_result.error_id != 0 {
+        return 200;
+    }
+
+    const send_header_result: !StunMessageHeader = stun_header_parse(send_packet[0:send_finish_result.value]);
+    if send_header_result.error_id != 0 {
+        return 201;
+    }
+    const send_header: StunMessageHeader = send_header_result.value;
+    if send_header.method != TURN_METHOD_SEND || send_header.message_class != STUN_MESSAGE_CLASS_INDICATION {
+        return 202;
+    }
+
+    const send_result: !TurnSendIndication = turn_send_indication_parse(send_packet[0:send_finish_result.value]);
+    if send_result.error_id != 0 {
+        return 203;
+    }
+    const send_indication: TurnSendIndication = send_result.value;
+    if !send_indication.peer_address_present || send_indication.peer_address.port != 41000u16 {
+        return 204;
+    }
+    if !turn_test_bytes_equal(send_indication.peer_address.address_bytes[0:4], peer_ipv4[0:4]) {
+        return 205;
+    }
+    if !send_indication.data_present || !turn_test_bytes_equal(send_indication.data, send_payload[0:5]) {
+        return 206;
+    }
+    if !send_indication.dont_fragment {
+        return 207;
+    }
+
+    var peer_ipv6: [byte: 16] = [
+        0x20 as byte, 0x01 as byte, 0x0d as byte, 0xb8 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0x44 as byte,
+    ];
+    var empty_payload: [byte: 1] = [];
+    var data_packet: [byte: 192] = [];
+    var data_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_data_indication(&data_builder, data_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 208;
+    }
+    if turn_builder_append_xor_peer_address_ipv6(&data_builder, 42000u16, peer_ipv6[0:16]).error_id != 0 {
+        return 209;
+    }
+    if turn_builder_append_data(&data_builder, empty_payload[0:0]).error_id != 0 {
+        return 210;
+    }
+    const data_finish_result: !usize = turn_builder_finish(&data_builder);
+    if data_finish_result.error_id != 0 {
+        return 211;
+    }
+
+    const data_header_result: !StunMessageHeader = stun_header_parse(data_packet[0:data_finish_result.value]);
+    if data_header_result.error_id != 0 {
+        return 212;
+    }
+    const data_header: StunMessageHeader = data_header_result.value;
+    if data_header.method != TURN_METHOD_DATA || data_header.message_class != STUN_MESSAGE_CLASS_INDICATION {
+        return 213;
+    }
+
+    const data_result: !TurnDataIndication = turn_data_indication_parse(data_packet[0:data_finish_result.value]);
+    if data_result.error_id != 0 {
+        return 214;
+    }
+    const data_indication: TurnDataIndication = data_result.value;
+    if !data_indication.peer_address_present || data_indication.peer_address.port != 42000u16 {
+        return 215;
+    }
+    if !turn_test_bytes_equal(data_indication.peer_address.address_bytes[0:16], peer_ipv6[0:16]) {
+        return 216;
+    }
+    if !data_indication.data_present || data_indication.data.len != 0usize {
+        return 217;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_send_data_indication_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var peer_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 25 as byte];
+    var payload: [byte: 3] = [9 as byte, 8 as byte, 7 as byte];
+
+    var missing_data_packet: [byte: 160] = [];
+    var missing_data_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_send_indication(&missing_data_builder, missing_data_packet[0:160], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 218;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&missing_data_builder, 43000u16, peer_ipv4[0:4]).error_id != 0 {
+        return 219;
+    }
+    const missing_data_finish_result: !usize = turn_builder_finish(&missing_data_builder);
+    if missing_data_finish_result.error_id != 0 {
+        return 220;
+    }
+    const missing_data_result: !TurnSendIndication = turn_send_indication_parse(missing_data_packet[0:missing_data_finish_result.value]);
+    if !turn_test_expect_error(missing_data_result.error_id) {
+        return 221;
+    }
+
+    var missing_peer_packet: [byte: 160] = [];
+    var missing_peer_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_data_indication(&missing_peer_builder, missing_peer_packet[0:160], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 222;
+    }
+    if turn_builder_append_data(&missing_peer_builder, payload[0:3]).error_id != 0 {
+        return 223;
+    }
+    const missing_peer_finish_result: !usize = turn_builder_finish(&missing_peer_builder);
+    if missing_peer_finish_result.error_id != 0 {
+        return 224;
+    }
+    const missing_peer_result: !TurnDataIndication = turn_data_indication_parse(missing_peer_packet[0:missing_peer_finish_result.value]);
+    if !turn_test_expect_error(missing_peer_result.error_id) {
+        return 225;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     var result: i32 = turn_test_check_allocate_request_roundtrip();
     if result != 0 {
@@ -913,6 +1060,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_create_permission_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_send_data_indication_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_send_data_indication_invalid_paths();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;

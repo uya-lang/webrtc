@@ -87,6 +87,23 @@ export struct TurnCreatePermissionRequest {
     fingerprint_present: bool = false,
 }
 
+export struct TurnSendIndication {
+    peer_address: StunXorMappedAddress = StunXorMappedAddress{},
+    peer_address_present: bool = false,
+    data: &[byte] = [],
+    data_present: bool = false,
+    dont_fragment: bool = false,
+    fingerprint_present: bool = false,
+}
+
+export struct TurnDataIndication {
+    peer_address: StunXorMappedAddress = StunXorMappedAddress{},
+    peer_address_present: bool = false,
+    data: &[byte] = [],
+    data_present: bool = false,
+    fingerprint_present: bool = false,
+}
+
 export struct TurnAllocateSuccessResponse {
     relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [],
     relayed_address_count: usize = 0usize,
@@ -210,6 +227,29 @@ export fn turn_create_permission_request_make() TurnCreatePermissionRequest {
         nonce_present: false,
         message_integrity_present: false,
         message_integrity_sha256_present: false,
+        fingerprint_present: false,
+    };
+}
+
+export fn turn_send_indication_make() TurnSendIndication {
+    var empty_bytes: [byte: 1] = [];
+    return TurnSendIndication{
+        peer_address: stun_xor_mapped_address_make(),
+        peer_address_present: false,
+        data: empty_bytes[0:0],
+        data_present: false,
+        dont_fragment: false,
+        fingerprint_present: false,
+    };
+}
+
+export fn turn_data_indication_make() TurnDataIndication {
+    var empty_bytes: [byte: 1] = [];
+    return TurnDataIndication{
+        peer_address: stun_xor_mapped_address_make(),
+        peer_address_present: false,
+        data: empty_bytes[0:0],
+        data_present: false,
         fingerprint_present: false,
     };
 }

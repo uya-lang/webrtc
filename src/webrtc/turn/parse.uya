@@ -45,6 +45,15 @@ const TURN_CREATE_PERMISSION_SUCCESS_SEEN_MESSAGE_INTEGRITY: u32 = 1u32;
 const TURN_CREATE_PERMISSION_SUCCESS_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 2u32;
 const TURN_CREATE_PERMISSION_SUCCESS_SEEN_FINGERPRINT: u32 = 4u32;
 
+const TURN_SEND_INDICATION_SEEN_PEER_ADDRESS: u32 = 1u32;
+const TURN_SEND_INDICATION_SEEN_DATA: u32 = 2u32;
+const TURN_SEND_INDICATION_SEEN_DONT_FRAGMENT: u32 = 4u32;
+const TURN_SEND_INDICATION_SEEN_FINGERPRINT: u32 = 8u32;
+
+const TURN_DATA_INDICATION_SEEN_PEER_ADDRESS: u32 = 1u32;
+const TURN_DATA_INDICATION_SEEN_DATA: u32 = 2u32;
+const TURN_DATA_INDICATION_SEEN_FINGERPRINT: u32 = 4u32;
+
 const TURN_AUTH_CHALLENGE_SEEN_ERROR_CODE: u32 = 1u32;
 const TURN_AUTH_CHALLENGE_SEEN_REALM: u32 = 2u32;
 const TURN_AUTH_CHALLENGE_SEEN_NONCE: u32 = 4u32;
@@ -188,6 +197,35 @@ fn turn_parse_known_create_permission_success_attribute(attr_type: u16) bool {
         return true;
     }
     if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_known_send_indication_attribute(attr_type: u16) bool {
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_DATA {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_known_data_indication_attribute(attr_type: u16) bool {
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_DATA {
         return true;
     }
     if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
@@ -361,6 +399,35 @@ fn turn_create_permission_success_seen_mask(attr_type: u16) u32 {
     return 0u32;
 }
 
+fn turn_send_indication_seen_mask(attr_type: u16) u32 {
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return TURN_SEND_INDICATION_SEEN_PEER_ADDRESS;
+    }
+    if attr_type == TURN_ATTRIBUTE_DATA {
+        return TURN_SEND_INDICATION_SEEN_DATA;
+    }
+    if attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+        return TURN_SEND_INDICATION_SEEN_DONT_FRAGMENT;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_SEND_INDICATION_SEEN_FINGERPRINT;
+    }
+    return 0u32;
+}
+
+fn turn_data_indication_seen_mask(attr_type: u16) u32 {
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return TURN_DATA_INDICATION_SEEN_PEER_ADDRESS;
+    }
+    if attr_type == TURN_ATTRIBUTE_DATA {
+        return TURN_DATA_INDICATION_SEEN_DATA;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_DATA_INDICATION_SEEN_FINGERPRINT;
+    }
+    return 0u32;
+}
+
 fn turn_auth_challenge_seen_mask(attr_type: u16) u32 {
     if attr_type == STUN_ATTRIBUTE_ERROR_CODE {
         return TURN_AUTH_CHALLENGE_SEEN_ERROR_CODE;
@@ -473,6 +540,36 @@ fn turn_create_permission_validate_success_attribute(attr: &StunAttribute, seen_
     return seen_mask | mask;
 }
 
+fn turn_send_indication_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_send_indication_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_send_indication_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+fn turn_data_indication_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_data_indication_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_data_indication_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
 fn turn_auth_challenge_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
     if attr == null {
         return error.InvalidPacket;
@@ -555,6 +652,75 @@ export fn turn_parse_nonce(value: &[byte]) !&[byte] {
         return error.InvalidPacket;
     }
     return value;
+}
+
+export fn turn_send_indication_parse(packet: &[byte]) !TurnSendIndication {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_SEND || header.message_class != STUN_MESSAGE_CLASS_INDICATION {
+        return error.InvalidPacket;
+    }
+
+    var indication: TurnSendIndication = turn_send_indication_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_send_indication_validate_attribute(&attr, seen_mask);
+
+        if attr.attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+            indication.peer_address = try stun_parse_xor_mapped_address(attr.value, header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+            indication.peer_address_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_DATA {
+            indication.data = attr.value;
+            indication.data_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+            try turn_parse_dont_fragment(attr.value);
+            indication.dont_fragment = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+            indication.fingerprint_present = true;
+        }
+    }
+
+    if !indication.peer_address_present || !indication.data_present {
+        return error.InvalidPacket;
+    }
+    return indication;
+}
+
+export fn turn_data_indication_parse(packet: &[byte]) !TurnDataIndication {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_DATA || header.message_class != STUN_MESSAGE_CLASS_INDICATION {
+        return error.InvalidPacket;
+    }
+
+    var indication: TurnDataIndication = turn_data_indication_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_data_indication_validate_attribute(&attr, seen_mask);
+
+        if attr.attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+            indication.peer_address = try stun_parse_xor_mapped_address(attr.value, header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+            indication.peer_address_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_DATA {
+            indication.data = attr.value;
+            indication.data_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+            indication.fingerprint_present = true;
+        }
+    }
+
+    if !indication.peer_address_present || !indication.data_present {
+        return error.InvalidPacket;
+    }
+    return indication;
 }
 
 export fn turn_refresh_request_parse(packet: &[byte]) !TurnRefreshRequest {
