@@ -157,6 +157,20 @@ class FakeTTY(io.StringIO):
 
 
 class AgentLoopLiveOutputTests(unittest.TestCase):
+    def test_live_output_sanitizer_handles_split_escape_sequences(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        cleaned, pending = module.sanitize_live_output_chunk("\x1b[1;", "")
+        self.assertEqual(cleaned, "")
+        self.assertEqual(pending, "\x1b[1;")
+
+        cleaned, pending = module.sanitize_live_output_chunk(
+            "1Hcovered\n\x1b]0;title\x07safe\n",
+            pending,
+        )
+        self.assertEqual(cleaned, "covered\nsafe\n")
+        self.assertEqual(pending, "")
+
     def test_live_display_uses_fixed_header_and_scroll_region_for_tty(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
         stream = FakeTTY()
@@ -181,6 +195,21 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
         self.assertIn("\x1b[32m实现实时输出\x1b[0m", rendered)
         self.assertIn("line one\nline two\n", rendered)
         self.assertIn("\x1b[r", rendered)
+
+    def test_live_display_does_not_forward_cursor_movement_from_child_output(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
+        stream = FakeTTY()
+        display = module.LiveOutputDisplay(stream, enabled=True)
+
+        with patch.object(module.shutil, "get_terminal_size", return_value=os.terminal_size((60, 12))):
+            display.start("实现实时输出")
+            display.write("\x1b[1;")
+            display.write("1H日志仍应留在滚动区\n")
+            display.finish()
+
+        rendered = stream.getvalue()
+        self.assertEqual(rendered.count("\x1b[1;1H"), 1)
+        self.assertIn("日志仍应留在滚动区\n", rendered)
 
     def test_live_display_falls_back_to_plain_text_when_not_using_tty_mode(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})

@@ -163,6 +163,78 @@ def clip_display_text(text, width):
     return clean[: width - 3] + "..."
 
 
+def sanitize_live_output_chunk(text, pending_escape=""):
+    data = (pending_escape or "") + text
+    if not data:
+        return "", ""
+
+    cleaned = []
+    index = 0
+
+    while index < len(data):
+        char = data[index]
+
+        if char == "\x1b":
+            next_index = index + 1
+            if next_index >= len(data):
+                return "".join(cleaned), data[index:]
+
+            marker = data[next_index]
+
+            if marker == "[":
+                cursor = next_index + 1
+                while cursor < len(data):
+                    if "@" <= data[cursor] <= "~":
+                        index = cursor + 1
+                        break
+                    cursor += 1
+                else:
+                    return "".join(cleaned), data[index:]
+                continue
+
+            if marker == "]":
+                cursor = next_index + 1
+                while cursor < len(data):
+                    current = data[cursor]
+                    if current == "\x07":
+                        index = cursor + 1
+                        break
+                    if current == "\x1b":
+                        if cursor + 1 >= len(data):
+                            return "".join(cleaned), data[index:]
+                        if data[cursor + 1] == "\\":
+                            index = cursor + 2
+                            break
+                    cursor += 1
+                else:
+                    return "".join(cleaned), data[index:]
+                continue
+
+            if marker in "PX^_":
+                cursor = next_index + 1
+                while cursor < len(data):
+                    if data[cursor] == "\x1b":
+                        if cursor + 1 >= len(data):
+                            return "".join(cleaned), data[index:]
+                        if data[cursor + 1] == "\\":
+                            index = cursor + 2
+                            break
+                    cursor += 1
+                else:
+                    return "".join(cleaned), data[index:]
+                continue
+
+            index = next_index + 1
+            continue
+
+        codepoint = ord(char)
+        if char in "\n\r\t" or (32 <= codepoint < 127) or codepoint >= 160:
+            cleaned.append(char)
+        index += 1
+
+    return "".join(cleaned), ""
+
+
 def build_live_status_parts(current_task, elapsed_seconds=None, log_path=None, log_note=None):
     task_text = current_task or "无"
     prefix = "[agent] 当前任务: "
@@ -231,6 +303,7 @@ class LiveOutputDisplay:
         self.cols = 80
         self.current_task = "无"
         self.last_header = None
+        self.pending_escape = ""
 
     def _write(self, text):
         self.stream.write(text)
@@ -249,6 +322,7 @@ class LiveOutputDisplay:
         self.current_task = current_task or "无"
         self.active = True
         self.last_header = None
+        self.pending_escape = ""
 
         if not self.enabled:
             self._write(build_live_status_line(self.current_task) + "\n")
@@ -311,6 +385,14 @@ class LiveOutputDisplay:
         if not text:
             return
 
+        if self.enabled:
+            text, self.pending_escape = sanitize_live_output_chunk(
+                text,
+                pending_escape=self.pending_escape,
+            )
+            if not text:
+                return
+
         self._write(text)
         self._flush()
 
@@ -319,6 +401,7 @@ class LiveOutputDisplay:
             return
 
         if self.enabled:
+            self.pending_escape = ""
             self._write("\x1b[r")
             self._write(f"\x1b[{self.rows};1H")
             self._write("\n")
