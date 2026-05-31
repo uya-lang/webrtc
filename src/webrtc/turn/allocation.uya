@@ -1,0 +1,246 @@
+// webrtc.turn.allocation - TURN allocation lifecycle and refresh timer helpers
+// 模块路径：src/webrtc/turn/allocation.uya → use webrtc.turn.allocation;
+
+use webrtc.stun.model;
+use webrtc.turn.model;
+
+const TURN_ALLOCATION_REFRESH_MARGIN_DIVISOR: u32 = 5u32;
+const TURN_ALLOCATION_REFRESH_MARGIN_MAX_SECONDS: u32 = 60u32;
+const TURN_ALLOCATION_REFRESH_MARGIN_MIN_SECONDS: u32 = 1u32;
+const TURN_USEC_PER_SEC: u64 = 1_000_000u64;
+const TURN_U64_MAX: u64 = 0xffffffffffffffffu64;
+
+export struct TurnAllocationState {
+    active: bool = false,
+    refresh_inflight: bool = false,
+    lifetime_seconds: u32 = 0u32,
+    refresh_at_us: u64 = 0u64,
+    expires_at_us: u64 = 0u64,
+    relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [],
+    relayed_address_count: usize = 0usize,
+    mapped_address: StunXorMappedAddress = StunXorMappedAddress{},
+    mapped_address_present: bool = false,
+    reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [],
+    reservation_token_present: bool = false,
+}
+
+fn turn_allocation_u64_add_saturating(lhs: u64, rhs: u64) u64 {
+    if rhs > TURN_U64_MAX - lhs {
+        return TURN_U64_MAX;
+    }
+    return lhs + rhs;
+}
+
+fn turn_allocation_copy_reservation_token(dst: &[byte], src: &[byte]) void {
+    var i: usize = 0usize;
+    while i < TURN_RESERVATION_TOKEN_BYTES {
+        dst[i] = src[i];
+        i = i + 1usize;
+    }
+}
+
+fn turn_allocation_copy_xor_address(dst: &StunXorMappedAddress, src: &StunXorMappedAddress) void {
+    if dst == null || src == null {
+        return;
+    }
+
+    dst.family = src.family;
+    dst.port = src.port;
+    dst.address_len = src.address_len;
+
+    var i: usize = 0usize;
+    while i < 16usize {
+        dst.address_bytes[i] = 0 as byte;
+        i = i + 1usize;
+    }
+
+    i = 0usize;
+    while i < src.address_len && i < 16usize {
+        dst.address_bytes[i] = src.address_bytes[i];
+        i = i + 1usize;
+    }
+}
+
+fn turn_allocation_refresh_delay_seconds(lifetime_seconds: u32) u32 {
+    if lifetime_seconds == 0u32 {
+        return 0u32;
+    }
+
+    var margin_seconds: u32 = lifetime_seconds / TURN_ALLOCATION_REFRESH_MARGIN_DIVISOR;
+    if margin_seconds < TURN_ALLOCATION_REFRESH_MARGIN_MIN_SECONDS {
+        margin_seconds = TURN_ALLOCATION_REFRESH_MARGIN_MIN_SECONDS;
+    }
+    if margin_seconds > TURN_ALLOCATION_REFRESH_MARGIN_MAX_SECONDS {
+        margin_seconds = TURN_ALLOCATION_REFRESH_MARGIN_MAX_SECONDS;
+    }
+    if margin_seconds >= lifetime_seconds {
+        return 0u32;
+    }
+    return lifetime_seconds - margin_seconds;
+}
+
+fn turn_allocation_state_apply_schedule(state: &TurnAllocationState, lifetime_seconds: u32, now_us: u64) void {
+    if state == null {
+        return;
+    }
+
+    state.active = lifetime_seconds != 0u32;
+    state.refresh_inflight = false;
+    state.lifetime_seconds = lifetime_seconds;
+    if lifetime_seconds == 0u32 {
+        state.refresh_at_us = 0u64;
+        state.expires_at_us = 0u64;
+        return;
+    }
+
+    const refresh_delay_us: u64 = (turn_allocation_refresh_delay_seconds(lifetime_seconds) as u64) * TURN_USEC_PER_SEC;
+    const lifetime_us: u64 = (lifetime_seconds as u64) * TURN_USEC_PER_SEC;
+    state.refresh_at_us = turn_allocation_u64_add_saturating(now_us, refresh_delay_us);
+    state.expires_at_us = turn_allocation_u64_add_saturating(now_us, lifetime_us);
+}
+
+export fn turn_allocation_state_make() TurnAllocationState {
+    var relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [];
+    var index: usize = 0usize;
+    while index < TURN_MAX_RELAYED_ADDRESSES {
+        relayed_addresses[index] = stun_xor_mapped_address_make();
+        index = index + 1usize;
+    }
+
+    var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    return TurnAllocationState{
+        active: false,
+        refresh_inflight: false,
+        lifetime_seconds: 0u32,
+        refresh_at_us: 0u64,
+        expires_at_us: 0u64,
+        relayed_addresses: relayed_addresses,
+        relayed_address_count: 0usize,
+        mapped_address: stun_xor_mapped_address_make(),
+        mapped_address_present: false,
+        reservation_token: reservation_token,
+        reservation_token_present: false,
+    };
+}
+
+export fn turn_allocation_state_clear(state: &TurnAllocationState) void {
+    if state == null {
+        return;
+    }
+
+    state.active = false;
+    state.refresh_inflight = false;
+    state.lifetime_seconds = 0u32;
+    state.refresh_at_us = 0u64;
+    state.expires_at_us = 0u64;
+    state.relayed_address_count = 0usize;
+    state.mapped_address = stun_xor_mapped_address_make();
+    state.mapped_address_present = false;
+    state.reservation_token_present = false;
+
+    var index: usize = 0usize;
+    while index < TURN_MAX_RELAYED_ADDRESSES {
+        state.relayed_addresses[index] = stun_xor_mapped_address_make();
+        index = index + 1usize;
+    }
+
+    index = 0usize;
+    while index < TURN_RESERVATION_TOKEN_BYTES {
+        state.reservation_token[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+export fn turn_allocation_state_apply_allocate_success(
+    state: &TurnAllocationState,
+    response: &TurnAllocateSuccessResponse,
+    now_us: u64,
+) !void {
+    if state == null || response == null {
+        return error.InvalidPacket;
+    }
+    if response.relayed_address_count == 0usize || !response.lifetime_present || response.lifetime_seconds == 0u32 {
+        return error.InvalidPacket;
+    }
+
+    turn_allocation_state_clear(state);
+
+    var relayed_index: usize = 0usize;
+    while relayed_index < response.relayed_address_count && relayed_index < TURN_MAX_RELAYED_ADDRESSES {
+        turn_allocation_copy_xor_address(&state.relayed_addresses[relayed_index], &response.relayed_addresses[relayed_index]);
+        relayed_index = relayed_index + 1usize;
+    }
+    state.relayed_address_count = relayed_index;
+
+    if response.mapped_address_present {
+        turn_allocation_copy_xor_address(&state.mapped_address, &response.mapped_address);
+        state.mapped_address_present = true;
+    }
+    if response.reservation_token_present {
+        turn_allocation_copy_reservation_token(
+            state.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES],
+            response.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES],
+        );
+        state.reservation_token_present = true;
+    }
+
+    turn_allocation_state_apply_schedule(state, response.lifetime_seconds, now_us);
+}
+
+export fn turn_allocation_state_apply_refresh_success(
+    state: &TurnAllocationState,
+    response: &TurnRefreshSuccessResponse,
+    now_us: u64,
+) !void {
+    if state == null || response == null {
+        return error.InvalidPacket;
+    }
+    if !response.lifetime_present {
+        return error.InvalidPacket;
+    }
+    if !state.active {
+        return error.InvalidPacket;
+    }
+
+    if response.lifetime_seconds == 0u32 {
+        turn_allocation_state_clear(state);
+        return;
+    }
+
+    turn_allocation_state_apply_schedule(state, response.lifetime_seconds, now_us);
+}
+
+export fn turn_allocation_state_mark_refresh_sent(state: &TurnAllocationState) !void {
+    if state == null || !state.active || state.refresh_inflight {
+        return error.InvalidPacket;
+    }
+    state.refresh_inflight = true;
+}
+
+export fn turn_allocation_state_mark_refresh_retry(state: &TurnAllocationState, now_us: u64) !void {
+    if state == null || !state.active {
+        return error.InvalidPacket;
+    }
+
+    if state.expires_at_us != 0u64 && now_us >= state.expires_at_us {
+        turn_allocation_state_clear(state);
+        return;
+    }
+
+    state.refresh_inflight = false;
+    state.refresh_at_us = now_us;
+}
+
+export fn turn_allocation_state_tick(state: &TurnAllocationState, now_us: u64) bool {
+    if state == null || !state.active {
+        return false;
+    }
+    if state.expires_at_us != 0u64 && now_us >= state.expires_at_us {
+        turn_allocation_state_clear(state);
+        return false;
+    }
+    if state.refresh_inflight {
+        return false;
+    }
+    return now_us >= state.refresh_at_us;
+}

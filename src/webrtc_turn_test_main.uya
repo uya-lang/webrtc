@@ -2,6 +2,7 @@ use libc.printf;
 use webrtc.stun.model;
 use webrtc.stun.parse;
 use webrtc.stun.write;
+use webrtc.turn.allocation;
 use webrtc.turn.auth;
 use webrtc.turn.model;
 use webrtc.turn.parse;
@@ -1049,6 +1050,167 @@ fn turn_test_check_channel_bind_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_check_allocation_refresh_timer_schedules_before_expiry() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var allocate_packet: [byte: 192] = [];
+    var allocate_builder: StunMessageBuilder = stun_message_builder_make();
+    var relayed_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 130 as byte];
+    if turn_builder_init_allocate_success_response(&allocate_builder, allocate_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 263;
+    }
+    if turn_builder_append_xor_relayed_address_ipv4(&allocate_builder, 54000u16, relayed_ipv4[0:4]).error_id != 0 {
+        return 264;
+    }
+    if turn_builder_append_lifetime(&allocate_builder, 600u32).error_id != 0 {
+        return 265;
+    }
+    const allocate_finish_result: !usize = turn_builder_finish(&allocate_builder);
+    if allocate_finish_result.error_id != 0 {
+        return 266;
+    }
+    const allocate_response_result: !TurnAllocateSuccessResponse =
+        turn_allocate_success_response_parse(allocate_packet[0:allocate_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if allocate_response_result.error_id != 0 {
+        return 267;
+    }
+
+    var allocation_state: TurnAllocationState = turn_allocation_state_make();
+    if turn_allocation_state_apply_allocate_success(&allocation_state, &allocate_response_result.value, 10_000_000u64).error_id != 0 {
+        return 268;
+    }
+    if !allocation_state.active || allocation_state.refresh_inflight {
+        return 269;
+    }
+    if allocation_state.lifetime_seconds != 600u32 || allocation_state.relayed_address_count != 1usize {
+        return 270;
+    }
+    if allocation_state.expires_at_us != 610_000_000u64 {
+        return 271;
+    }
+    if allocation_state.refresh_at_us != 550_000_000u64 {
+        return 272;
+    }
+    if !turn_test_bytes_equal(allocation_state.relayed_addresses[0].address_bytes[0:4], relayed_ipv4[0:4]) {
+        return 273;
+    }
+    if turn_allocation_state_tick(&allocation_state, 549_999_999u64) {
+        return 274;
+    }
+    if !turn_allocation_state_tick(&allocation_state, 550_000_000u64) {
+        return 275;
+    }
+    if turn_allocation_state_mark_refresh_sent(&allocation_state).error_id != 0 {
+        return 276;
+    }
+    if !allocation_state.refresh_inflight || turn_allocation_state_tick(&allocation_state, 550_000_000u64) {
+        return 277;
+    }
+
+    var refresh_packet: [byte: 96] = [];
+    var refresh_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_success_response(&refresh_builder, refresh_packet[0:96], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 278;
+    }
+    if turn_builder_append_lifetime(&refresh_builder, 300u32).error_id != 0 {
+        return 279;
+    }
+    const refresh_finish_result: !usize = turn_builder_finish(&refresh_builder);
+    if refresh_finish_result.error_id != 0 {
+        return 280;
+    }
+    const refresh_response_result: !TurnRefreshSuccessResponse =
+        turn_refresh_success_response_parse(refresh_packet[0:refresh_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if refresh_response_result.error_id != 0 {
+        return 281;
+    }
+    if turn_allocation_state_apply_refresh_success(&allocation_state, &refresh_response_result.value, 550_000_000u64).error_id != 0 {
+        return 282;
+    }
+    if allocation_state.refresh_inflight {
+        return 283;
+    }
+    if allocation_state.lifetime_seconds != 300u32 {
+        return 284;
+    }
+    if allocation_state.expires_at_us != 850_000_000u64 {
+        return 285;
+    }
+    if allocation_state.refresh_at_us != 790_000_000u64 {
+        return 286;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_allocation_refresh_timer_retry_and_expiry() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var allocate_packet: [byte: 192] = [];
+    var allocate_builder: StunMessageBuilder = stun_message_builder_make();
+    var relayed_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 166 as byte];
+    if turn_builder_init_allocate_success_response(&allocate_builder, allocate_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 287;
+    }
+    if turn_builder_append_xor_relayed_address_ipv4(&allocate_builder, 55000u16, relayed_ipv4[0:4]).error_id != 0 {
+        return 288;
+    }
+    if turn_builder_append_lifetime(&allocate_builder, 30u32).error_id != 0 {
+        return 289;
+    }
+    const allocate_finish_result: !usize = turn_builder_finish(&allocate_builder);
+    if allocate_finish_result.error_id != 0 {
+        return 290;
+    }
+    const allocate_response_result: !TurnAllocateSuccessResponse =
+        turn_allocate_success_response_parse(allocate_packet[0:allocate_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if allocate_response_result.error_id != 0 {
+        return 291;
+    }
+
+    var allocation_state: TurnAllocationState = turn_allocation_state_make();
+    if turn_allocation_state_apply_allocate_success(&allocation_state, &allocate_response_result.value, 0u64).error_id != 0 {
+        return 292;
+    }
+    if allocation_state.refresh_at_us != 24_000_000u64 || allocation_state.expires_at_us != 30_000_000u64 {
+        return 293;
+    }
+    if !turn_allocation_state_tick(&allocation_state, 24_000_000u64) {
+        return 294;
+    }
+    if turn_allocation_state_mark_refresh_sent(&allocation_state).error_id != 0 {
+        return 295;
+    }
+    if !allocation_state.refresh_inflight || turn_allocation_state_tick(&allocation_state, 25_000_000u64) {
+        return 296;
+    }
+    if turn_allocation_state_mark_refresh_retry(&allocation_state, 25_000_000u64).error_id != 0 {
+        return 297;
+    }
+    if allocation_state.refresh_inflight || allocation_state.refresh_at_us != 25_000_000u64 {
+        return 298;
+    }
+    if !turn_allocation_state_tick(&allocation_state, 25_000_000u64) {
+        return 299;
+    }
+    if turn_allocation_state_mark_refresh_sent(&allocation_state).error_id != 0 {
+        return 300;
+    }
+    if turn_allocation_state_tick(&allocation_state, 30_000_000u64) {
+        return 301;
+    }
+    if allocation_state.active || allocation_state.refresh_inflight {
+        return 302;
+    }
+    if allocation_state.refresh_at_us != 0u64 || allocation_state.expires_at_us != 0u64 {
+        return 303;
+    }
+
+    return 0;
+}
+
 fn turn_test_check_send_data_indication_roundtrip() i32 {
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
     turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
@@ -1258,6 +1420,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_channel_bind_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_allocation_refresh_timer_schedules_before_expiry();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_allocation_refresh_timer_retry_and_expiry();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;

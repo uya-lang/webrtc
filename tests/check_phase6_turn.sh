@@ -7,6 +7,7 @@ cd "$repo_root"
 test -f src/webrtc_turn_test_main.uya
 test -d src/webrtc/turn
 test -f src/webrtc/turn/auth.uya
+test -f src/webrtc/turn/allocation.uya
 test -f src/webrtc/turn/model.uya
 test -f src/webrtc/turn/parse.uya
 test -f src/webrtc/turn/write.uya
@@ -30,6 +31,13 @@ rg -Fq "export struct TurnLongTermCredentials" src/webrtc/turn/model.uya
 rg -Fq "export fn turn_long_term_credentials_init_from_challenge" src/webrtc/turn/auth.uya
 rg -Fq "export fn turn_long_term_credentials_apply_stale_nonce" src/webrtc/turn/auth.uya
 rg -Fq "export fn turn_long_term_credentials_is_ready" src/webrtc/turn/auth.uya
+rg -Fq "export struct TurnAllocationState" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_make" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_apply_allocate_success" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_apply_refresh_success" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_mark_refresh_sent" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_mark_refresh_retry" src/webrtc/turn/allocation.uya
+rg -Fq "export fn turn_allocation_state_tick" src/webrtc/turn/allocation.uya
 rg -Fq "export fn turn_parse_realm" src/webrtc/turn/parse.uya
 rg -Fq "export fn turn_parse_nonce" src/webrtc/turn/parse.uya
 rg -Fq "export fn turn_send_indication_parse" src/webrtc/turn/parse.uya
@@ -82,6 +90,8 @@ rg -Fq "turn_test_check_create_permission_roundtrip" src/webrtc_turn_test_main.u
 rg -Fq "turn_test_check_create_permission_invalid_paths" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_channel_bind_roundtrip" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_channel_bind_invalid_paths" src/webrtc_turn_test_main.uya
+rg -Fq "turn_test_check_allocation_refresh_timer_schedules_before_expiry" src/webrtc_turn_test_main.uya
+rg -Fq "turn_test_check_allocation_refresh_timer_retry_and_expiry" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_send_data_indication_roundtrip" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_send_data_indication_invalid_paths" src/webrtc_turn_test_main.uya
 
