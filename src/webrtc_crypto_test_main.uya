@@ -508,6 +508,53 @@ fn crypto_test_check_p256_field_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_ecdh_p256_roundtrip() i32 {
+    var priv_a: [byte: 32] = [
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte,
+    ];
+    var priv_b: [byte: 32] = [
+        0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte,
+        0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte,
+        0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte,
+        0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte, 0x22 as byte,
+    ];
+    var pub_a: [byte: 65] = [];
+    var pub_b: [byte: 65] = [];
+    var shared_ab: [byte: 32] = [];
+    var shared_ba: [byte: 32] = [];
+    var bad_pub: [byte: 64] = [];
+
+    if crypto_p256_public_from_private(priv_a[0:32], pub_a[0:65]).error_id != 0 {
+        return 140;
+    }
+    if crypto_p256_public_from_private(priv_b[0:32], pub_b[0:65]).error_id != 0 {
+        return 141;
+    }
+    if pub_a[0] != 0x04 as byte || pub_b[0] != 0x04 as byte {
+        return 142;
+    }
+
+    if crypto_p256_ecdh_shared_secret(priv_a[0:32], pub_b[0:65], shared_ab[0:32]).error_id != 0 {
+        return 143;
+    }
+    if crypto_p256_ecdh_shared_secret(priv_b[0:32], pub_a[0:65], shared_ba[0:32]).error_id != 0 {
+        return 144;
+    }
+    if !constant_time_bytes_equal(shared_ab[0:32], shared_ba[0:32]) {
+        return 145;
+    }
+
+    const bad_result: !void = crypto_p256_ecdh_shared_secret(priv_a[0:32], bad_pub[0:64], shared_ab[0:32]);
+    if bad_result.error_id == 0 {
+        return 146;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -579,6 +626,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_p256_field_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_ecdh_p256_roundtrip();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

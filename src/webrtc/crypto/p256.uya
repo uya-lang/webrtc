@@ -1,11 +1,13 @@
-// webrtc.crypto.p256 - Phase 7 P-256 field arithmetic wrappers
+// webrtc.crypto.p256 - Phase 7 P-256 field arithmetic and ECDH wrappers
 // 模块路径：src/webrtc/crypto/p256.uya → use webrtc.crypto.p256;
 
+use tls.crypto.ec;
 use tls.crypto.ec_p256;
 use webrtc.errors;
 
 export const CRYPTO_P256_LIMBS: usize = 4usize;
 export const CRYPTO_P256_FIELD_BYTES: usize = 32usize;
+export const CRYPTO_P256_PUBLIC_KEY_BYTES: usize = 65usize;
 
 export struct CryptoP256FieldElement {
     limbs: [u64: CRYPTO_P256_LIMBS] = [],
@@ -58,4 +60,30 @@ export fn crypto_p256_fe_inv(dst: &CryptoP256FieldElement, value: &CryptoP256Fie
         return error.InvalidPacket;
     }
     ec_p256_fe256_inv(&dst.limbs[0], &value.limbs[0] as &const u64);
+}
+
+export fn crypto_p256_public_from_private(private_key: &[byte], public_key_out: &[byte]) !void {
+    if private_key.len != CRYPTO_P256_FIELD_BYTES || public_key_out.len < CRYPTO_P256_PUBLIC_KEY_BYTES {
+        return error.InvalidPacket;
+    }
+    if public_from_private_p256(&public_key_out[0], &private_key[0] as &const byte) != 0i32 {
+        return error.InvalidPacket;
+    }
+}
+
+export fn crypto_p256_ecdh_shared_secret(private_key: &[byte], peer_public_key: &[byte], shared_secret_out: &[byte]) !void {
+    if private_key.len != CRYPTO_P256_FIELD_BYTES || peer_public_key.len != CRYPTO_P256_PUBLIC_KEY_BYTES || shared_secret_out.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    const result: !usize =
+        ecdh_p256(
+            &shared_secret_out[0],
+            shared_secret_out.len,
+            &private_key[0] as &const byte,
+            &peer_public_key[0] as &const byte,
+            peer_public_key.len,
+        );
+    if result.error_id != 0 {
+        return error.InvalidPacket;
+    }
 }
