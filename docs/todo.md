@@ -78,7 +78,7 @@
 - [x] 实现 fallback `recvfrom/sendto`。
 - [x] 实现 UDP packet classifier：STUN / DTLS / TURN ChannelData / RTP / RTCP / reserved / unknown。
 - [x] 实现 worker command queue 和 event queue。
-- [ ] 增加 loopback UDP echo 测试。
+- [x] 增加 loopback UDP echo 测试。
 
 验收标准：
 
