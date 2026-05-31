@@ -1,16 +1,80 @@
 use libc.printf;
+use webrtc.dtls.model;
+use webrtc.dtls.record;
 
-// Phase 8 的首批 DTLS failing tests 先落测试入口和 case 名称，
-// 真正的 parser / reassembly 行为会在后续实现任务里接入。
 fn dtls_test_check_record_parser_truncation_cases() i32 {
+    var truncated: [byte: 12] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const result: !DtlsRecord = dtls_record_parse(truncated[0:12]);
+    if result.error_id == 0 {
+        return 10;
+    }
     return 0;
 }
 
 fn dtls_test_check_record_epoch_and_sequence_cases() i32 {
+    var packet: [byte: 13] = [
+        0x17 as byte, 0xfe as byte, 0xfd as byte, 0xff as byte,
+        0xff as byte, 0xff as byte, 0xff as byte, 0xff as byte,
+        0x00 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const parsed: !DtlsRecord = dtls_record_parse(packet[0:13]);
+    if parsed.error_id != 0 {
+        return 20;
+    }
+    if parsed.value.header.epoch != 0xffffu16 {
+        return 21;
+    }
+    if parsed.value.header.sequence_number != 0xffffff000001u64 {
+        return 22;
+    }
+    return 0;
+}
+
+fn dtls_test_check_record_writer_roundtrip() i32 {
+    var payload: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 4 as byte];
+    var header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_APPLICATION_DATA,
+        version: DTLS_VERSION_1_2,
+        epoch: 1u16,
+        sequence_number: 7u64,
+        length: 4u16,
+    };
+    var packet: [byte: 32] = [];
+    const written: !usize = dtls_record_write(&header, payload[0:4], packet[0:32]);
+    if written.error_id != 0 {
+        return 30;
+    }
+    const parsed: !DtlsRecord = dtls_record_parse(packet[0:written.value]);
+    if parsed.error_id != 0 {
+        return 31;
+    }
+    if parsed.value.header.content_type != DTLS_CONTENT_TYPE_APPLICATION_DATA {
+        return 32;
+    }
+    if parsed.value.header.epoch != 1u16 || parsed.value.header.sequence_number != 7u64 {
+        return 33;
+    }
+    if parsed.value.payload.len != 4usize || parsed.value.payload[3] != 4 as byte {
+        return 34;
+    }
     return 0;
 }
 
 fn dtls_test_check_handshake_fragment_length_cases() i32 {
+    var packet: [byte: 29] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x10 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x10 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+    ];
+    const result: !DtlsRecord = dtls_record_parse(packet[0:29]);
+    if result.error_id == 0 {
+        return 40;
+    }
     return 0;
 }
 

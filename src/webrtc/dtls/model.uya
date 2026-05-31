@@ -1,0 +1,25 @@
+// webrtc.dtls.model - DTLS 1.2 record model
+// 模块路径：src/webrtc/dtls/model.uya → use webrtc.dtls.model;
+
+export const DTLS_VERSION_1_2: u16 = 0xfefdu16;
+export const DTLS_RECORD_HEADER_BYTES: usize = 13usize;
+export const DTLS_RECORD_MAX_PAYLOAD_BYTES: usize = 16384usize;
+export const DTLS_HANDSHAKE_HEADER_BYTES: usize = 12usize;
+
+export const DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC: u8 = 20u8;
+export const DTLS_CONTENT_TYPE_ALERT: u8 = 21u8;
+export const DTLS_CONTENT_TYPE_HANDSHAKE: u8 = 22u8;
+export const DTLS_CONTENT_TYPE_APPLICATION_DATA: u8 = 23u8;
+
+export struct DtlsRecordHeader {
+    content_type: u8 = 0u8,
+    version: u16 = 0u16,
+    epoch: u16 = 0u16,
+    sequence_number: u64 = 0u64,
+    length: u16 = 0u16,
+}
+
+export struct DtlsRecord {
+    header: DtlsRecordHeader = DtlsRecordHeader{},
+    payload: &[byte] = [],
+}
