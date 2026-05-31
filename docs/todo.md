@@ -203,7 +203,7 @@
 - [x] 实现 HKDF / TLS PRF 所需函数。
 - [x] 实现 P-256 field arithmetic。
 - [x] 实现 ECDHE P-256。
-- [ ] 实现 ECDSA P-256 sign/verify。
+- [x] 实现 ECDSA P-256 sign/verify。
 - [ ] 实现 CSPRNG 平台熵源封装。
 
 验收标准：

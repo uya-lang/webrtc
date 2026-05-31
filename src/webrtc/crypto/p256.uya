@@ -87,3 +87,50 @@ export fn crypto_p256_ecdh_shared_secret(private_key: &[byte], peer_public_key: 
         return error.InvalidPacket;
     }
 }
+
+export fn crypto_p256_ecdsa_sign_with_k(
+    private_key: &[byte],
+    hash: &[byte],
+    nonce_k: &[byte],
+    r_out: &[byte],
+    s_out: &[byte],
+) !void {
+    if private_key.len != CRYPTO_P256_FIELD_BYTES
+        || hash.len != CRYPTO_P256_FIELD_BYTES
+        || nonce_k.len != CRYPTO_P256_FIELD_BYTES
+        || r_out.len < CRYPTO_P256_FIELD_BYTES
+        || s_out.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    if ecdsa_sign_p256_with_k(
+        &r_out[0],
+        &s_out[0],
+        &private_key[0] as &const byte,
+        &hash[0] as &const byte,
+        &nonce_k[0] as &const byte,
+    ) != 0i32 {
+        return error.InvalidPacket;
+    }
+}
+
+export fn crypto_p256_ecdsa_verify(
+    public_key: &[byte],
+    hash: &[byte],
+    r: &[byte],
+    s: &[byte],
+) !void {
+    if public_key.len != CRYPTO_P256_PUBLIC_KEY_BYTES
+        || hash.len != CRYPTO_P256_FIELD_BYTES
+        || r.len != CRYPTO_P256_FIELD_BYTES
+        || s.len != CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    if ecdsa_verify_p256(
+        &public_key[0] as &const byte,
+        &hash[0] as &const byte,
+        &r[0] as &const byte,
+        &s[0] as &const byte,
+    ) != 0i32 {
+        return error.InvalidPacket;
+    }
+}
