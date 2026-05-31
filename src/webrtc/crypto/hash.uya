@@ -344,7 +344,7 @@ fn crypto_sha256_update_chunk(
     }
 }
 
-export fn crypto_sha256_digest(input: &[byte], out: &[byte]) !void {
+export fn crypto_sha256_digest4(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[byte], out: &[byte]) !void {
     if out.len < CRYPTO_SHA256_DIGEST_BYTES {
         return error.InvalidPacket;
     }
@@ -360,9 +360,12 @@ export fn crypto_sha256_digest(input: &[byte], out: &[byte]) !void {
 
     var block: [byte: CRYPTO_SHA256_BLOCK_BYTES] = [];
     var block_len: usize = 0usize;
-    const total_len: u64 = input.len as u64;
+    const total_len: u64 = (part0.len as u64) + (part1.len as u64) + (part2.len as u64) + (part3.len as u64);
 
-    try crypto_sha256_update_chunk(block[0:CRYPTO_SHA256_BLOCK_BYTES], &block_len, input, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+    try crypto_sha256_update_chunk(block[0:CRYPTO_SHA256_BLOCK_BYTES], &block_len, part0, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+    try crypto_sha256_update_chunk(block[0:CRYPTO_SHA256_BLOCK_BYTES], &block_len, part1, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+    try crypto_sha256_update_chunk(block[0:CRYPTO_SHA256_BLOCK_BYTES], &block_len, part2, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
+    try crypto_sha256_update_chunk(block[0:CRYPTO_SHA256_BLOCK_BYTES], &block_len, part3, &h0, &h1, &h2, &h3, &h4, &h5, &h6, &h7);
 
     block[block_len] = 0x80 as byte;
     block_len = block_len + 1usize;
@@ -391,4 +394,9 @@ export fn crypto_sha256_digest(input: &[byte], out: &[byte]) !void {
     try write_be_u32(out[20:4], h5);
     try write_be_u32(out[24:4], h6);
     try write_be_u32(out[28:4], h7);
+}
+
+export fn crypto_sha256_digest(input: &[byte], out: &[byte]) !void {
+    var empty_bytes: [byte: 1] = [];
+    return crypto_sha256_digest4(input, empty_bytes[0:0], empty_bytes[0:0], empty_bytes[0:0], out);
 }

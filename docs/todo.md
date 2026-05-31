@@ -196,7 +196,7 @@
 - [x] 实现 SHA-1。
 - [x] 实现 SHA-256。
 - [x] 实现 HMAC-SHA1。
-- [ ] 实现 HMAC-SHA256。
+- [x] 实现 HMAC-SHA256。
 - [ ] 实现 AES-CTR。
 - [ ] 实现 AES-GCM。
 - [ ] 实现 GHASH。

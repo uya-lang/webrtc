@@ -59,3 +59,59 @@ export fn crypto_hmac_sha1_digest(key: &[byte], message: &[byte], out: &[byte]) 
         out,
     );
 }
+
+export fn crypto_hmac_sha256_digest(key: &[byte], message: &[byte], out: &[byte]) !void {
+    if out.len < CRYPTO_SHA256_DIGEST_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var empty_bytes: [byte: 1] = [];
+    var key_block: [byte: CRYPTO_SHA256_BLOCK_BYTES] = [];
+    if key.len > CRYPTO_SHA256_BLOCK_BYTES {
+        var key_digest: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+        try crypto_sha256_digest4(
+            key,
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            empty_bytes[0:0],
+            key_digest[0:CRYPTO_SHA256_DIGEST_BYTES],
+        );
+
+        var digest_index: usize = 0usize;
+        while digest_index < CRYPTO_SHA256_DIGEST_BYTES {
+            key_block[digest_index] = key_digest[digest_index];
+            digest_index = digest_index + 1usize;
+        }
+    } else {
+        var key_index: usize = 0usize;
+        while key_index < key.len {
+            key_block[key_index] = key[key_index];
+            key_index = key_index + 1usize;
+        }
+    }
+
+    var inner_pad: [byte: CRYPTO_SHA256_BLOCK_BYTES] = [];
+    var outer_pad: [byte: CRYPTO_SHA256_BLOCK_BYTES] = [];
+    var pad_index: usize = 0usize;
+    while pad_index < CRYPTO_SHA256_BLOCK_BYTES {
+        inner_pad[pad_index] = key_block[pad_index] ^ 0x36 as byte;
+        outer_pad[pad_index] = key_block[pad_index] ^ 0x5c as byte;
+        pad_index = pad_index + 1usize;
+    }
+
+    var inner_digest: [byte: CRYPTO_SHA256_DIGEST_BYTES] = [];
+    try crypto_sha256_digest4(
+        inner_pad[0:CRYPTO_SHA256_BLOCK_BYTES],
+        message,
+        empty_bytes[0:0],
+        empty_bytes[0:0],
+        inner_digest[0:CRYPTO_SHA256_DIGEST_BYTES],
+    );
+    try crypto_sha256_digest4(
+        outer_pad[0:CRYPTO_SHA256_BLOCK_BYTES],
+        inner_digest[0:CRYPTO_SHA256_DIGEST_BYTES],
+        empty_bytes[0:0],
+        empty_bytes[0:0],
+        out,
+    );
+}
