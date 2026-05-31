@@ -254,6 +254,11 @@ def empty_state(root, todo_file):
         "commits": [],
         "pending_commit": None,
         "current": None,
+        "todo_summary": {
+            "total": 0,
+            "checked": 0,
+            "unchecked": 0,
+        },
         "updated_at": now(),
     }
 
@@ -277,6 +282,14 @@ def load_state(state_file, root, todo_file):
     state.setdefault("commits", [])
     state.setdefault("pending_commit", None)
     state.setdefault("current", None)
+    state.setdefault(
+        "todo_summary",
+        {
+            "total": 0,
+            "checked": 0,
+            "unchecked": 0,
+        },
+    )
     state["project_root"] = str(root)
     state["todo_file"] = str(todo_file)
 
@@ -315,6 +328,12 @@ def print_status(paths, state, status_lines):
     print(f"[agent] project root: {path_label(root, root)}")
     print(f"[agent] todo: {todo_label(root, resolve_path(root, state['todo_file']))}")
     print(f"[agent] updated at: {state.get('updated_at', '')}")
+    todo_summary = state.get("todo_summary", {})
+    if isinstance(todo_summary, dict):
+        total = todo_summary.get("total", 0)
+        checked = todo_summary.get("checked", 0)
+        unchecked = todo_summary.get("unchecked", 0)
+        print(f"[agent] todo summary: total={total} checked={checked} unchecked={unchecked}")
 
     current = state.get("current")
     if not current:
@@ -465,6 +484,50 @@ def choose_exhausted_tasks(tasks, state):
             exhausted.append(task)
 
     return exhausted
+
+
+def reconcile_state_with_todo(state, tasks):
+    checked_ids = []
+    unchecked_ids = set()
+
+    for task in tasks:
+        if task["done_in_file"]:
+            checked_ids.append(task["id"])
+        else:
+            unchecked_ids.add(task["id"])
+
+    changed = False
+
+    if state.get("done", []) != checked_ids:
+        state["done"] = checked_ids
+        changed = True
+
+    failed = state.get("failed", {})
+    if not isinstance(failed, dict):
+        failed = {}
+
+    normalized_failed = {}
+    for task_id, count in failed.items():
+        if task_id not in unchecked_ids:
+            continue
+        if not isinstance(count, int) or count <= 0:
+            continue
+        normalized_failed[task_id] = count
+
+    if normalized_failed != failed:
+        state["failed"] = normalized_failed
+        changed = True
+
+    todo_summary = {
+        "total": len(tasks),
+        "checked": len(checked_ids),
+        "unchecked": len(tasks) - len(checked_ids),
+    }
+    if state.get("todo_summary") != todo_summary:
+        state["todo_summary"] = todo_summary
+        changed = True
+
+    return changed
 
 
 def is_git_repo(root):
@@ -1156,6 +1219,9 @@ def main():
 
     if args.status:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        tasks = parse_todo(paths["todo_file"])
+        if reconcile_state_with_todo(state, tasks):
+            save_state(paths["state_file"], state)
         print_status(paths, state, args.status_lines)
         return 0
 
@@ -1164,6 +1230,9 @@ def main():
 
     while True:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        tasks_before = parse_todo(paths["todo_file"])
+        if reconcile_state_with_todo(state, tasks_before):
+            save_state(paths["state_file"], state)
 
         if git_repo and isinstance(state.get("pending_commit"), dict):
             recovered = run_pending_commit_recovery(paths, state)
@@ -1173,7 +1242,6 @@ def main():
             time.sleep(SLEEP_SECONDS)
             continue
 
-        tasks_before = parse_todo(paths["todo_file"])
         runnable_tasks = choose_runnable_tasks(tasks_before, state)
         exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
 
@@ -1222,6 +1290,7 @@ def main():
         )
 
         tasks_after = parse_todo(paths["todo_file"])
+        reconcile_state_with_todo(state, tasks_after)
         result = parse_agent_result(log_file)
         newly_completed = completed_tasks(tasks_before, tasks_after)
         blocked_tasks = match_tasks_by_text(result.get("blocked", []), runnable_tasks)
