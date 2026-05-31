@@ -215,7 +215,7 @@
 
 ## Phase 8：DTLS 1.2 WebRTC 子集
 
-- [ ] 先增加 DTLS record parser 截断、epoch/sequence、fragment/reassembly failing tests。
+- [x] 先增加 DTLS record parser 截断、epoch/sequence、fragment/reassembly failing tests。
 - [ ] 先增加 exporter reference 对照测试。
 - [ ] 先准备 OpenSSL/浏览器握手 fixtures。
 - [ ] 实现 DTLS record parser/writer。

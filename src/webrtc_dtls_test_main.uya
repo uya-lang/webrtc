@@ -1,0 +1,50 @@
+use libc.printf;
+
+// Phase 8 的首批 DTLS failing tests 先落测试入口和 case 名称，
+// 真正的 parser / reassembly 行为会在后续实现任务里接入。
+fn dtls_test_check_record_parser_truncation_cases() i32 {
+    return 0;
+}
+
+fn dtls_test_check_record_epoch_and_sequence_cases() i32 {
+    return 0;
+}
+
+fn dtls_test_check_handshake_fragment_length_cases() i32 {
+    return 0;
+}
+
+fn dtls_test_check_reassembly_overlap_and_gap_cases() i32 {
+    return 0;
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var result: i32 = dtls_test_check_record_parser_truncation_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_record_epoch_and_sequence_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_handshake_fragment_length_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_reassembly_overlap_and_gap_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    return 0;
+}

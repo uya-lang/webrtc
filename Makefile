@@ -52,8 +52,10 @@ test: build
 	test -f src/webrtc_arena_test.uya
 	test -f src/webrtc_bench_test.uya
 	test -f src/webrtc_ice_test.uya
+	test -f src/webrtc_dtls_test_main.uya
 	test -f src/webrtc_turn_test_main.uya
 	test -x tests/check_phase7_crypto.sh
+	test -x tests/check_phase8_dtls.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya
@@ -91,6 +93,7 @@ test: build
 	bash tests/check_phase5_ice.sh
 	bash tests/check_phase6_turn.sh
 	bash tests/check_phase7_crypto.sh
+	bash tests/check_phase8_dtls.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null
