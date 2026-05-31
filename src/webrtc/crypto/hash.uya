@@ -1,0 +1,169 @@
+// webrtc.crypto.hash - Phase 7 hash primitives
+// 模块路径：src/webrtc/crypto/hash.uya → use webrtc.crypto.hash;
+
+use webrtc.binary;
+use webrtc.errors;
+
+export const CRYPTO_SHA1_BLOCK_BYTES: usize = 64usize;
+export const CRYPTO_SHA1_DIGEST_BYTES: usize = 20usize;
+
+fn crypto_u32_rotate_left(value: u32, count: u32) u32 {
+    const shift: i32 = count as i32;
+    return (value << shift) | (value >> (32 - shift));
+}
+
+fn crypto_u32_add(lhs: u32, rhs: u32) u32 {
+    return ((((lhs as u64) + (rhs as u64)) & 0xFFFFFFFFu64) as u32);
+}
+
+fn crypto_u32_add5(a: u32, b: u32, c: u32, d: u32, e: u32) u32 {
+    var sum: u64 = (a as u64) + (b as u64);
+    sum = sum + (c as u64);
+    sum = sum + (d as u64);
+    sum = sum + (e as u64);
+    return ((sum & 0xFFFFFFFFu64) as u32);
+}
+
+fn crypto_sha1_schedule_get(schedule: &[byte], index: usize) !u32 {
+    return read_be_u32(schedule[index * 4usize:4]);
+}
+
+fn crypto_sha1_schedule_set(schedule: &[byte], index: usize, value: u32) !void {
+    try write_be_u32(schedule[index * 4usize:4], value);
+}
+
+fn crypto_sha1_process_block(block: &[byte], h0: &u32, h1: &u32, h2: &u32, h3: &u32, h4: &u32) !void {
+    if block.len != CRYPTO_SHA1_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var schedule: [byte: CRYPTO_SHA1_BLOCK_BYTES] = [];
+    var index: usize = 0usize;
+    while index < 16usize {
+        try crypto_sha1_schedule_set(
+            schedule[0:CRYPTO_SHA1_BLOCK_BYTES],
+            index,
+            try read_be_u32(block[index * 4usize:4]),
+        );
+        index = index + 1usize;
+    }
+
+    var a: u32 = *h0;
+    var b: u32 = *h1;
+    var c: u32 = *h2;
+    var d: u32 = *h3;
+    var e: u32 = *h4;
+
+    var round: usize = 0usize;
+    while round < 80usize {
+        var word: u32 = 0u32;
+        if round < 16usize {
+            word = try crypto_sha1_schedule_get(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], round);
+        } else {
+            const slot: usize = round & 15usize;
+            word = crypto_u32_rotate_left(
+                (try crypto_sha1_schedule_get(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], (round + 13usize) & 15usize))
+                    ^ (try crypto_sha1_schedule_get(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], (round + 8usize) & 15usize))
+                    ^ (try crypto_sha1_schedule_get(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], (round + 2usize) & 15usize))
+                    ^ (try crypto_sha1_schedule_get(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], slot)),
+                1u32,
+            );
+            try crypto_sha1_schedule_set(schedule[0:CRYPTO_SHA1_BLOCK_BYTES], slot, word);
+        }
+
+        var f: u32 = 0u32;
+        var k: u32 = 0u32;
+        if round < 20usize {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999u32;
+        } else if round < 40usize {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1u32;
+        } else if round < 60usize {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDCu32;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6u32;
+        }
+
+        const next: u32 = crypto_u32_add5(crypto_u32_rotate_left(a, 5u32), f, e, k, word);
+        e = d;
+        d = c;
+        c = crypto_u32_rotate_left(b, 30u32);
+        b = a;
+        a = next;
+        round = round + 1usize;
+    }
+
+    *h0 = crypto_u32_add(*h0, a);
+    *h1 = crypto_u32_add(*h1, b);
+    *h2 = crypto_u32_add(*h2, c);
+    *h3 = crypto_u32_add(*h3, d);
+    *h4 = crypto_u32_add(*h4, e);
+}
+
+fn crypto_sha1_update_chunk(
+    block: &[byte],
+    block_len: &usize,
+    part: &[byte],
+    h0: &u32,
+    h1: &u32,
+    h2: &u32,
+    h3: &u32,
+    h4: &u32,
+) !void {
+    var index: usize = 0usize;
+    while index < part.len {
+        block[*block_len] = part[index];
+        *block_len = *block_len + 1usize;
+        if *block_len == CRYPTO_SHA1_BLOCK_BYTES {
+            try crypto_sha1_process_block(block[0:CRYPTO_SHA1_BLOCK_BYTES], h0, h1, h2, h3, h4);
+            *block_len = 0usize;
+        }
+        index = index + 1usize;
+    }
+}
+
+export fn crypto_sha1_digest(input: &[byte], out: &[byte]) !void {
+    if out.len < CRYPTO_SHA1_DIGEST_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var h0: u32 = 0x67452301u32;
+    var h1: u32 = 0xEFCDAB89u32;
+    var h2: u32 = 0x98BADCFEu32;
+    var h3: u32 = 0x10325476u32;
+    var h4: u32 = 0xC3D2E1F0u32;
+
+    var block: [byte: CRYPTO_SHA1_BLOCK_BYTES] = [];
+    var block_len: usize = 0usize;
+    const total_len: u64 = input.len as u64;
+
+    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, input, &h0, &h1, &h2, &h3, &h4);
+
+    block[block_len] = 0x80 as byte;
+    block_len = block_len + 1usize;
+    if block_len > 56usize {
+        while block_len < CRYPTO_SHA1_BLOCK_BYTES {
+            block[block_len] = 0 as byte;
+            block_len = block_len + 1usize;
+        }
+        try crypto_sha1_process_block(block[0:CRYPTO_SHA1_BLOCK_BYTES], &h0, &h1, &h2, &h3, &h4);
+        block_len = 0usize;
+    }
+
+    while block_len < 56usize {
+        block[block_len] = 0 as byte;
+        block_len = block_len + 1usize;
+    }
+
+    try write_be_u64(block[56:8], total_len * 8u64);
+    try crypto_sha1_process_block(block[0:CRYPTO_SHA1_BLOCK_BYTES], &h0, &h1, &h2, &h3, &h4);
+
+    try write_be_u32(out[0:4], h0);
+    try write_be_u32(out[4:4], h1);
+    try write_be_u32(out[8:4], h2);
+    try write_be_u32(out[12:4], h3);
+    try write_be_u32(out[16:4], h4);
+}

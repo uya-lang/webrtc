@@ -6,6 +6,7 @@ cd "$repo_root"
 
 test -f src/webrtc_crypto_test_main.uya
 test -d src/webrtc/crypto
+test -f src/webrtc/crypto/hash.uya
 test -f src/webrtc/crypto/random.uya
 test -d tests/fixtures/crypto
 test -f tests/fixtures/crypto/README.md
@@ -19,6 +20,8 @@ test -x tests/crypto_vectors.py
 
 rg -Fq "crypto_test_check_constant_time_compare_edges" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_random_source_failure_paths" src/webrtc_crypto_test_main.uya
+rg -Fq "crypto_test_check_sha1_vectors" src/webrtc_crypto_test_main.uya
+rg -Fq "export fn crypto_sha1_digest" src/webrtc/crypto/hash.uya
 rg -Fq "export fn crypto_random_fill" src/webrtc/crypto/random.uya
 rg -Fq "export fn crypto_random_test_set_fail_open" src/webrtc/crypto/random.uya
 rg -Fq "export fn crypto_random_test_set_fail_read" src/webrtc/crypto/random.uya
