@@ -86,6 +86,271 @@ test "ice helpers expose stable default state for future gathering and checklist
     try expect(!ice_agent_has_selected_pair(&agent));
 }
 
+test "candidate pair helpers follow RFC 8445 priority order and compatibility gates" {
+    var local_candidate: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &local_candidate,
+        "lf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        300u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.10" as &[byte],
+        5000u16,
+    );
+    var remote_candidate: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &remote_candidate,
+        "rf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        200u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.20" as &[byte],
+        6000u16,
+    );
+
+    try expect(candidate_pair_can_form(&local_candidate, &remote_candidate));
+    try expect(candidate_pair_priority(300u32, 200u32) == ((200u64 << 32u32) + (300u64 << 1u32) + 1u64));
+    try expect((try candidate_pair_compute_priority(&local_candidate, &remote_candidate, true)) == candidate_pair_priority(300u32, 200u32));
+    try expect((try candidate_pair_compute_priority(&local_candidate, &remote_candidate, false)) == candidate_pair_priority(200u32, 300u32));
+
+    remote_candidate.transport = ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE;
+    try expect(!candidate_pair_can_form(&local_candidate, &remote_candidate));
+    remote_candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    remote_candidate.component_id = ICE_COMPONENT_RTCP;
+    try expect(!candidate_pair_can_form(&local_candidate, &remote_candidate));
+    remote_candidate.component_id = ICE_COMPONENT_RTP;
+    try ice_transport_address_set(&remote_candidate.address, ICE_ADDRESS_FAMILY_IPV6, "::1" as &[byte], 6000u16);
+    try expect(!candidate_pair_can_form(&local_candidate, &remote_candidate));
+}
+
+test "checklist rebuild sorts compatible pairs and seeds one waiting pair per foundation" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 55u64);
+
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[0],
+        "lf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        300u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.10" as &[byte],
+        5000u16,
+    );
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[1],
+        "lf1" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_SRFLX,
+        50u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.10" as &[byte],
+        40000u16,
+    );
+    agent.local_candidate_count = 2usize;
+
+    try ice_test_init_remote_candidate(
+        &agent.remote_candidates[0],
+        "rf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        250u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.20" as &[byte],
+        6000u16,
+    );
+    try ice_test_init_remote_candidate(
+        &agent.remote_candidates[1],
+        "rf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        150u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.21" as &[byte],
+        6001u16,
+    );
+    agent.remote_candidate_count = 2usize;
+
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 4usize);
+    try expect(agent.checklist_count == 4usize);
+    try expect(agent.checklist[0].local_candidate_index == 0u16);
+    try expect(agent.checklist[0].remote_candidate_index == 0u16);
+    try expect(agent.checklist[1].local_candidate_index == 0u16);
+    try expect(agent.checklist[1].remote_candidate_index == 1u16);
+    try expect(agent.checklist[2].local_candidate_index == 1u16);
+    try expect(agent.checklist[2].remote_candidate_index == 0u16);
+    try expect(agent.checklist[0].priority > agent.checklist[1].priority);
+    try expect(agent.checklist[1].priority > agent.checklist[2].priority);
+    try expect(agent.checklist[0].state == ICE_CANDIDATE_PAIR_STATE_WAITING);
+    try expect(agent.checklist[1].state == ICE_CANDIDATE_PAIR_STATE_FROZEN);
+    try expect(agent.checklist[2].state == ICE_CANDIDATE_PAIR_STATE_WAITING);
+    try expect(agent.checklist[3].state == ICE_CANDIDATE_PAIR_STATE_FROZEN);
+    try expect(candidate_pair_foundation_equal(
+        &agent.checklist[0],
+        &agent.checklist[1],
+        &agent.local_candidates[0],
+        agent.local_candidate_count,
+        &agent.remote_candidates[0],
+        agent.remote_candidate_count,
+    ));
+    try expect(!candidate_pair_foundation_equal(
+        &agent.checklist[0],
+        &agent.checklist[2],
+        &agent.local_candidates[0],
+        agent.local_candidate_count,
+        &agent.remote_candidates[0],
+        agent.remote_candidate_count,
+    ));
+}
+
+test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 89u64);
+
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[0],
+        "lf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        100u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.30" as &[byte],
+        5500u16,
+    );
+    try ice_test_init_remote_candidate(
+        &agent.local_candidates[1],
+        "lf1" as &[byte],
+        ICE_COMPONENT_RTCP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        90u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.31" as &[byte],
+        5501u16,
+    );
+    agent.local_candidate_count = 2usize;
+
+    try ice_test_init_remote_candidate(
+        &agent.remote_candidates[0],
+        "rf0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        200u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.30" as &[byte],
+        6500u16,
+    );
+    try ice_test_init_remote_candidate(
+        &agent.remote_candidates[1],
+        "rf1" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE,
+        ICE_CANDIDATE_TYPE_HOST,
+        199u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.31" as &[byte],
+        6501u16,
+    );
+    try ice_test_init_remote_candidate(
+        &agent.remote_candidates[2],
+        "rf2" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        198u32,
+        ICE_ADDRESS_FAMILY_IPV6,
+        "2001:db8::31" as &[byte],
+        6502u16,
+    );
+    agent.remote_candidate_count = 3usize;
+
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 1usize);
+    try expect(agent.checklist[0].priority == candidate_pair_priority(200u32, 100u32));
+    agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    try ice_agent_select_checklist_pair(&agent, 0u16, true);
+    try expect(agent.checklist[0].nominated);
+    try expect(ice_agent_has_selected_pair(&agent));
+
+    var extra_remote: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &extra_remote,
+        "rf3" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_SRFLX,
+        210u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.88" as &[byte],
+        6503u16,
+    );
+    _ = try ice_agent_add_remote_candidate(&agent, &extra_remote);
+    try expect(agent.checklist_count == 0usize);
+    try expect(!ice_agent_has_selected_pair(&agent));
+
+    try expect((try ice_agent_rebuild_checklist(&agent)) == 2usize);
+    ice_agent_clear_remote_candidates(&agent);
+    try expect(agent.remote_candidate_count == 0usize);
+    try expect(agent.checklist_count == 0usize);
+}
+
+test "checklist rebuild rejects fixed pair capacity without leaving partial state" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 144u64);
+
+    var local_index: usize = 0;
+    while local_index < 11usize {
+        var local_candidate: IceCandidate = IceCandidate{};
+        try ice_test_init_remote_candidate(
+            &local_candidate,
+            "lfx" as &[byte],
+            ICE_COMPONENT_RTP,
+            ICE_CANDIDATE_TRANSPORT_UDP,
+            ICE_CANDIDATE_TYPE_HOST,
+            1000u32 - (local_index as u32),
+            ICE_ADDRESS_FAMILY_IPV4,
+            "192.0.2.90" as &[byte],
+            7000u16 + (local_index as u16),
+        );
+        agent.local_candidates[local_index] = local_candidate;
+        local_index = local_index + 1;
+    }
+    agent.local_candidate_count = 11usize;
+
+    var remote_index: usize = 0;
+    while remote_index < 12usize {
+        var remote_candidate: IceCandidate = IceCandidate{};
+        try ice_test_init_remote_candidate(
+            &remote_candidate,
+            "rfx" as &[byte],
+            ICE_COMPONENT_RTP,
+            ICE_CANDIDATE_TRANSPORT_UDP,
+            ICE_CANDIDATE_TYPE_HOST,
+            2000u32 - (remote_index as u32),
+            ICE_ADDRESS_FAMILY_IPV4,
+            "198.51.100.90" as &[byte],
+            8000u16 + (remote_index as u16),
+        );
+        agent.remote_candidates[remote_index] = remote_candidate;
+        remote_index = remote_index + 1;
+    }
+    agent.remote_candidate_count = 12usize;
+
+    const rebuild_result: !usize = ice_agent_rebuild_checklist(&agent);
+    try expect(rebuild_result.error_id == @error_id(error.UnsupportedCapability));
+    try expect(agent.checklist_count == 0usize);
+    try expect(agent.selected_pair_index == ICE_CANDIDATE_INDEX_NONE);
+}
+
 test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs" {
     try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_HOST)) == 126u8);
     try expect((try ice_candidate_type_preference(ICE_CANDIDATE_TYPE_PRFLX)) == 110u8);

@@ -159,6 +159,10 @@ export fn ice_credentials_init(credentials: &IceCredentials) void {
     credentials.pwd_len = 0;
 }
 
+fn ice_agent_role_supports_checklist(role: u8) bool {
+    return role == ICE_AGENT_ROLE_CONTROLLING || role == ICE_AGENT_ROLE_CONTROLLED;
+}
+
 export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
     if agent == null {
         return;
@@ -179,6 +183,20 @@ export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
     agent.disconnected_timeout_ms = 5000u32;
 }
 
+export fn ice_agent_clear_checklist(agent: &IceAgent) void {
+    if agent == null {
+        return;
+    }
+
+    if agent.selected_pair_index != ICE_CANDIDATE_INDEX_NONE
+        && (agent.selected_pair_index as usize) < agent.checklist_count {
+        agent.checklist[agent.selected_pair_index as usize].selected = false;
+    }
+
+    agent.checklist_count = 0;
+    agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
+}
+
 export fn ice_agent_clear_remote_candidates(agent: &IceAgent) void {
     if agent == null {
         return;
@@ -190,6 +208,7 @@ export fn ice_agent_clear_remote_candidates(agent: &IceAgent) void {
         index = index + 1;
     }
     agent.remote_candidate_count = 0;
+    ice_agent_clear_checklist(agent);
 }
 
 export fn ice_agent_add_remote_candidate(agent: &IceAgent, candidate: &IceCandidate) !u16 {
@@ -203,6 +222,7 @@ export fn ice_agent_add_remote_candidate(agent: &IceAgent, candidate: &IceCandid
     while existing_index < agent.remote_candidate_count {
         if ice_remote_candidate_matches_transport(&agent.remote_candidates[existing_index], candidate) {
             try ice_remote_candidate_copy(&agent.remote_candidates[existing_index], candidate);
+            ice_agent_clear_checklist(agent);
             return existing_index as u16;
         }
         existing_index = existing_index + 1;
@@ -214,7 +234,91 @@ export fn ice_agent_add_remote_candidate(agent: &IceAgent, candidate: &IceCandid
 
     try ice_remote_candidate_copy(&agent.remote_candidates[agent.remote_candidate_count], candidate);
     agent.remote_candidate_count = agent.remote_candidate_count + 1;
+    ice_agent_clear_checklist(agent);
     return (agent.remote_candidate_count - 1) as u16;
+}
+
+export fn ice_agent_rebuild_checklist(agent: &IceAgent) !usize {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if !ice_agent_role_supports_checklist(agent.role) {
+        return error.InvalidPacket;
+    }
+
+    ice_agent_clear_checklist(agent);
+    if agent.local_candidate_count == 0usize || agent.remote_candidate_count == 0usize {
+        return 0usize;
+    }
+
+    const local_is_controlling: bool = agent.role == ICE_AGENT_ROLE_CONTROLLING;
+
+    var local_index: usize = 0;
+    while local_index < agent.local_candidate_count {
+        const local_candidate: &IceCandidate = &agent.local_candidates[local_index];
+
+        var remote_index: usize = 0;
+        while remote_index < agent.remote_candidate_count {
+            const remote_candidate: &IceCandidate = &agent.remote_candidates[remote_index];
+            if candidate_pair_can_form(local_candidate, remote_candidate) {
+                if agent.checklist_count >= ICE_MAX_CANDIDATE_PAIRS {
+                    ice_agent_clear_checklist(agent);
+                    return error.UnsupportedCapability;
+                }
+
+                var pair: &CandidatePair = &agent.checklist[agent.checklist_count];
+                candidate_pair_init(pair, local_index as u16, remote_index as u16);
+                pair.priority = try candidate_pair_compute_priority(
+                    local_candidate,
+                    remote_candidate,
+                    local_is_controlling,
+                );
+                agent.checklist_count = agent.checklist_count + 1;
+            }
+            remote_index = remote_index + 1;
+        }
+
+        local_index = local_index + 1;
+    }
+
+    if agent.checklist_count == 0usize {
+        return 0usize;
+    }
+
+    candidate_pair_sort_by_priority_desc(&agent.checklist[0], agent.checklist_count);
+    candidate_pair_seed_initial_states(
+        &agent.checklist[0],
+        agent.checklist_count,
+        &agent.local_candidates[0],
+        agent.local_candidate_count,
+        &agent.remote_candidates[0],
+        agent.remote_candidate_count,
+    );
+    return agent.checklist_count;
+}
+
+export fn ice_agent_select_checklist_pair(agent: &IceAgent, pair_index: u16, nominated: bool) !void {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if (pair_index as usize) >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+    if agent.checklist[pair_index as usize].state != ICE_CANDIDATE_PAIR_STATE_SUCCEEDED {
+        return error.InvalidPacket;
+    }
+
+    if agent.selected_pair_index != ICE_CANDIDATE_INDEX_NONE
+        && (agent.selected_pair_index as usize) < agent.checklist_count {
+        agent.checklist[agent.selected_pair_index as usize].selected = false;
+    }
+
+    agent.checklist[pair_index as usize].valid = true;
+    agent.checklist[pair_index as usize].selected = true;
+    if nominated {
+        agent.checklist[pair_index as usize].nominated = true;
+    }
+    agent.selected_pair_index = pair_index;
 }
 
 export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {

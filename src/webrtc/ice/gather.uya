@@ -637,6 +637,9 @@ export fn ice_agent_prune_srflx_candidates(agent: &IceAgent) usize {
 
     agent.local_candidate_count = agent.local_candidate_count - pruned;
     ice_agent_refresh_local_candidate_priorities(agent);
+    if pruned != 0usize {
+        ice_agent_clear_checklist(agent);
+    }
     return pruned;
 }
 
@@ -665,6 +668,9 @@ export fn ice_agent_prune_host_candidates(agent: &IceAgent) usize {
 
     agent.local_candidate_count = agent.local_candidate_count - pruned;
     ice_agent_refresh_local_candidate_priorities(agent);
+    if pruned != 0usize {
+        ice_agent_clear_checklist(agent);
+    }
     return pruned;
 }
 
@@ -702,6 +708,7 @@ export fn ice_agent_add_host_candidate(agent: &IceAgent, desc: &IceHostInterface
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
     ice_agent_refresh_local_candidate_priorities(agent);
+    ice_agent_clear_checklist(agent);
     return (agent.local_candidate_count - 1) as u16;
 }
 
@@ -818,6 +825,7 @@ export fn ice_agent_add_srflx_candidate(
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
     ice_agent_refresh_local_candidate_priorities(agent);
+    ice_agent_clear_checklist(agent);
     return (agent.local_candidate_count - 1) as u16;
 }
 
