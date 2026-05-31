@@ -1,6 +1,7 @@
 use libc.printf;
 use webrtc.binary;
 use webrtc.crypto.hash;
+use webrtc.crypto.hmac;
 use webrtc.crypto.random;
 
 fn crypto_test_check_constant_time_compare_edges() i32 {
@@ -133,6 +134,32 @@ fn crypto_test_check_sha256_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_hmac_sha1_vectors() i32 {
+    var key: [byte: 20] = [
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+    ];
+    var message: [byte: 8] = ['H' as byte, 'i' as byte, ' ' as byte, 'T' as byte, 'h' as byte, 'e' as byte, 'r' as byte, 'e' as byte];
+    var expected: [byte: 20] = [
+        0xb6 as byte, 0x17 as byte, 0x31 as byte, 0x86 as byte, 0x55 as byte,
+        0x05 as byte, 0x72 as byte, 0x64 as byte, 0xe2 as byte, 0x8b as byte,
+        0xc0 as byte, 0xb6 as byte, 0xfb as byte, 0x37 as byte, 0x8c as byte,
+        0x8e as byte, 0xf1 as byte, 0x46 as byte, 0xbe as byte, 0x00 as byte,
+    ];
+    var digest: [byte: 20] = [];
+
+    if crypto_hmac_sha1_digest(key[0:20], message[0:8], digest[0:20]).error_id != 0 {
+        return 50;
+    }
+    if !constant_time_bytes_equal(digest[0:20], expected[0:20]) {
+        return 51;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -156,6 +183,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_sha256_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_hmac_sha1_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

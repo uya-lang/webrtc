@@ -139,7 +139,7 @@ fn crypto_sha1_update_chunk(
     }
 }
 
-export fn crypto_sha1_digest(input: &[byte], out: &[byte]) !void {
+export fn crypto_sha1_digest4(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[byte], out: &[byte]) !void {
     if out.len < CRYPTO_SHA1_DIGEST_BYTES {
         return error.InvalidPacket;
     }
@@ -152,9 +152,12 @@ export fn crypto_sha1_digest(input: &[byte], out: &[byte]) !void {
 
     var block: [byte: CRYPTO_SHA1_BLOCK_BYTES] = [];
     var block_len: usize = 0usize;
-    const total_len: u64 = input.len as u64;
+    const total_len: u64 = (part0.len as u64) + (part1.len as u64) + (part2.len as u64) + (part3.len as u64);
 
-    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, input, &h0, &h1, &h2, &h3, &h4);
+    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, part0, &h0, &h1, &h2, &h3, &h4);
+    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, part1, &h0, &h1, &h2, &h3, &h4);
+    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, part2, &h0, &h1, &h2, &h3, &h4);
+    try crypto_sha1_update_chunk(block[0:CRYPTO_SHA1_BLOCK_BYTES], &block_len, part3, &h0, &h1, &h2, &h3, &h4);
 
     block[block_len] = 0x80 as byte;
     block_len = block_len + 1usize;
@@ -180,6 +183,11 @@ export fn crypto_sha1_digest(input: &[byte], out: &[byte]) !void {
     try write_be_u32(out[8:4], h2);
     try write_be_u32(out[12:4], h3);
     try write_be_u32(out[16:4], h4);
+}
+
+export fn crypto_sha1_digest(input: &[byte], out: &[byte]) !void {
+    var empty_bytes: [byte: 1] = [];
+    return crypto_sha1_digest4(input, empty_bytes[0:0], empty_bytes[0:0], empty_bytes[0:0], out);
 }
 
 fn crypto_sha256_choice(x: u32, y: u32, z: u32) u32 {

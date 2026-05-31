@@ -195,7 +195,7 @@
 - [ ] 先建立 AES/GHASH/HMAC microbench 基线。
 - [x] 实现 SHA-1。
 - [x] 实现 SHA-256。
-- [ ] 实现 HMAC-SHA1。
+- [x] 实现 HMAC-SHA1。
 - [ ] 实现 HMAC-SHA256。
 - [ ] 实现 AES-CTR。
 - [ ] 实现 AES-GCM。
