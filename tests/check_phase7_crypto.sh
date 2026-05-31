@@ -12,6 +12,7 @@ test -f src/webrtc/crypto/ghash.uya
 test -f src/webrtc/crypto/hash.uya
 test -f src/webrtc/crypto/hmac.uya
 test -f src/webrtc/crypto/kdf.uya
+test -f src/webrtc/crypto/p256.uya
 test -f src/webrtc/crypto/random.uya
 test -d tests/fixtures/crypto
 test -f tests/fixtures/crypto/README.md
@@ -34,6 +35,7 @@ rg -Fq "crypto_test_check_aes_gcm_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_ghash_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_hkdf_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_tls12_prf_vectors" src/webrtc_crypto_test_main.uya
+rg -Fq "crypto_test_check_p256_field_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "export fn crypto_aes_key_schedule_init" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_aes_ctr_xor" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_aes_gcm_encrypt" src/webrtc/crypto/gcm.uya
@@ -47,6 +49,11 @@ rg -Fq "export fn crypto_hmac_sha256_digest" src/webrtc/crypto/hmac.uya
 rg -Fq "export fn crypto_hkdf_extract_sha256" src/webrtc/crypto/kdf.uya
 rg -Fq "export fn crypto_hkdf_expand_sha256" src/webrtc/crypto/kdf.uya
 rg -Fq "export fn crypto_tls12_prf_sha256" src/webrtc/crypto/kdf.uya
+rg -Fq "export fn crypto_p256_fe_from_bytes_be" src/webrtc/crypto/p256.uya
+rg -Fq "export fn crypto_p256_fe_add" src/webrtc/crypto/p256.uya
+rg -Fq "export fn crypto_p256_fe_sub" src/webrtc/crypto/p256.uya
+rg -Fq "export fn crypto_p256_fe_mul" src/webrtc/crypto/p256.uya
+rg -Fq "export fn crypto_p256_fe_inv" src/webrtc/crypto/p256.uya
 rg -Fq "export fn crypto_random_fill" src/webrtc/crypto/random.uya
 rg -Fq "export fn crypto_random_test_set_fail_open" src/webrtc/crypto/random.uya
 rg -Fq "export fn crypto_random_test_set_fail_read" src/webrtc/crypto/random.uya

@@ -1,0 +1,61 @@
+// webrtc.crypto.p256 - Phase 7 P-256 field arithmetic wrappers
+// 模块路径：src/webrtc/crypto/p256.uya → use webrtc.crypto.p256;
+
+use tls.crypto.ec_p256;
+use webrtc.errors;
+
+export const CRYPTO_P256_LIMBS: usize = 4usize;
+export const CRYPTO_P256_FIELD_BYTES: usize = 32usize;
+
+export struct CryptoP256FieldElement {
+    limbs: [u64: CRYPTO_P256_LIMBS] = [],
+}
+
+export fn crypto_p256_fe_make() CryptoP256FieldElement {
+    var limbs: [u64: CRYPTO_P256_LIMBS] = [];
+    return CryptoP256FieldElement{
+        limbs: limbs,
+    };
+}
+
+export fn crypto_p256_fe_from_bytes_be(dst: &CryptoP256FieldElement, src: &[byte]) !void {
+    if dst == null || src.len != CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_from_bytes_be(&dst.limbs[0], &src[0] as &const byte);
+}
+
+export fn crypto_p256_fe_to_bytes_be(src: &CryptoP256FieldElement, dst: &[byte]) !void {
+    if src == null || dst.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_to_bytes_be(&src.limbs[0] as &const u64, &dst[0]);
+}
+
+export fn crypto_p256_fe_add(dst: &CryptoP256FieldElement, lhs: &CryptoP256FieldElement, rhs: &CryptoP256FieldElement) !void {
+    if dst == null || lhs == null || rhs == null {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_add(&dst.limbs[0], &lhs.limbs[0] as &const u64, &rhs.limbs[0] as &const u64);
+}
+
+export fn crypto_p256_fe_sub(dst: &CryptoP256FieldElement, lhs: &CryptoP256FieldElement, rhs: &CryptoP256FieldElement) !void {
+    if dst == null || lhs == null || rhs == null {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_sub(&dst.limbs[0], &lhs.limbs[0] as &const u64, &rhs.limbs[0] as &const u64);
+}
+
+export fn crypto_p256_fe_mul(dst: &CryptoP256FieldElement, lhs: &CryptoP256FieldElement, rhs: &CryptoP256FieldElement) !void {
+    if dst == null || lhs == null || rhs == null {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_mul(&dst.limbs[0], &lhs.limbs[0] as &const u64, &rhs.limbs[0] as &const u64);
+}
+
+export fn crypto_p256_fe_inv(dst: &CryptoP256FieldElement, value: &CryptoP256FieldElement) !void {
+    if dst == null || value == null {
+        return error.InvalidPacket;
+    }
+    ec_p256_fe256_inv(&dst.limbs[0], &value.limbs[0] as &const u64);
+}

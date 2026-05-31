@@ -6,6 +6,7 @@ use webrtc.binary;
 use webrtc.crypto.hash;
 use webrtc.crypto.hmac;
 use webrtc.crypto.kdf;
+use webrtc.crypto.p256;
 use webrtc.crypto.random;
 
 fn crypto_test_check_constant_time_compare_edges() i32 {
@@ -419,6 +420,94 @@ fn crypto_test_check_tls12_prf_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_p256_field_vectors() i32 {
+    var a_bytes: [byte: 32] = [
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x99 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte, 0xee as byte, 0xff as byte, 0x00 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x99 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte, 0xee as byte, 0xff as byte, 0x00 as byte,
+    ];
+    var b_bytes: [byte: 32] = [
+        0xff as byte, 0xee as byte, 0xdd as byte, 0xcc as byte, 0xbb as byte, 0xaa as byte, 0x99 as byte, 0x88 as byte,
+        0x77 as byte, 0x66 as byte, 0x55 as byte, 0x44 as byte, 0x33 as byte, 0x22 as byte, 0x11 as byte, 0x00 as byte,
+        0xff as byte, 0xee as byte, 0xdd as byte, 0xcc as byte, 0xbb as byte, 0xaa as byte, 0x99 as byte, 0x88 as byte,
+        0x77 as byte, 0x66 as byte, 0x55 as byte, 0x44 as byte, 0x33 as byte, 0x22 as byte, 0x11 as byte, 0x00 as byte,
+    ];
+    var expected_add: [byte: 32] = [
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x12 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x10 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x10 as byte, 0x01 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x10 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte,
+        0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x11 as byte, 0x10 as byte, 0x01 as byte,
+    ];
+    var expected_sub: [byte: 32] = [
+        0x11 as byte, 0x33 as byte, 0x55 as byte, 0x76 as byte, 0x99 as byte, 0xbb as byte, 0xde as byte, 0x01 as byte,
+        0x22 as byte, 0x44 as byte, 0x66 as byte, 0x88 as byte, 0xaa as byte, 0xcc as byte, 0xed as byte, 0xff as byte,
+        0x11 as byte, 0x33 as byte, 0x55 as byte, 0x78 as byte, 0x99 as byte, 0xbb as byte, 0xde as byte, 0x00 as byte,
+        0x22 as byte, 0x44 as byte, 0x66 as byte, 0x88 as byte, 0xaa as byte, 0xcc as byte, 0xed as byte, 0xff as byte,
+    ];
+    var expected_mul: [byte: 32] = [
+        0x60 as byte, 0xc6 as byte, 0x09 as byte, 0x2c as byte, 0x45 as byte, 0x9c as byte, 0x13 as byte, 0x73 as byte,
+        0x50 as byte, 0xda as byte, 0x84 as byte, 0x09 as byte, 0x25 as byte, 0x95 as byte, 0x10 as byte, 0x04 as byte,
+        0xa2 as byte, 0xc8 as byte, 0x53 as byte, 0x33 as byte, 0xa7 as byte, 0x65 as byte, 0x69 as byte, 0xf9 as byte,
+        0x46 as byte, 0xa8 as byte, 0x86 as byte, 0x54 as byte, 0x35 as byte, 0x80 as byte, 0x9a as byte, 0xb8 as byte,
+    ];
+    var expected_inv: [byte: 32] = [
+        0xa5 as byte, 0x6e as byte, 0x9b as byte, 0xfa as byte, 0xa6 as byte, 0x7f as byte, 0x07 as byte, 0x8c as byte,
+        0xa7 as byte, 0xf7 as byte, 0xd0 as byte, 0x9e as byte, 0x85 as byte, 0x75 as byte, 0x0c as byte, 0x2f as byte,
+        0x6b as byte, 0xbd as byte, 0x28 as byte, 0x5c as byte, 0x2d as byte, 0x74 as byte, 0x2b as byte, 0xc3 as byte,
+        0x3f as byte, 0x72 as byte, 0x52 as byte, 0x9a as byte, 0xf4 as byte, 0x5e as byte, 0x18 as byte, 0x1a as byte,
+    ];
+
+    var a: CryptoP256FieldElement = crypto_p256_fe_make();
+    var b: CryptoP256FieldElement = crypto_p256_fe_make();
+    var r: CryptoP256FieldElement = crypto_p256_fe_make();
+    var out: [byte: 32] = [];
+    if crypto_p256_fe_from_bytes_be(&a, a_bytes[0:32]).error_id != 0 {
+        return 120;
+    }
+    if crypto_p256_fe_from_bytes_be(&b, b_bytes[0:32]).error_id != 0 {
+        return 121;
+    }
+    if crypto_p256_fe_add(&r, &a, &b).error_id != 0 {
+        return 122;
+    }
+    if crypto_p256_fe_to_bytes_be(&r, out[0:32]).error_id != 0 {
+        return 123;
+    }
+    if !constant_time_bytes_equal(out[0:32], expected_add[0:32]) {
+        return 124;
+    }
+    if crypto_p256_fe_sub(&r, &a, &b).error_id != 0 {
+        return 125;
+    }
+    if crypto_p256_fe_to_bytes_be(&r, out[0:32]).error_id != 0 {
+        return 126;
+    }
+    if !constant_time_bytes_equal(out[0:32], expected_sub[0:32]) {
+        return 127;
+    }
+    if crypto_p256_fe_mul(&r, &a, &b).error_id != 0 {
+        return 128;
+    }
+    if crypto_p256_fe_to_bytes_be(&r, out[0:32]).error_id != 0 {
+        return 129;
+    }
+    if !constant_time_bytes_equal(out[0:32], expected_mul[0:32]) {
+        return 130;
+    }
+    if crypto_p256_fe_inv(&r, &a).error_id != 0 {
+        return 131;
+    }
+    if crypto_p256_fe_to_bytes_be(&r, out[0:32]).error_id != 0 {
+        return 132;
+    }
+    if !constant_time_bytes_equal(out[0:32], expected_inv[0:32]) {
+        return 133;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -484,6 +573,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_tls12_prf_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_p256_field_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;
