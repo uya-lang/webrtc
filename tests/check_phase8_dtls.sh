@@ -50,6 +50,8 @@ rg -Fq "dtls_test_check_retransmission_timer_backoff" src/webrtc_dtls_test_main.
 rg -Fq "dtls_test_check_retransmission_timer_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_alert_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_alert_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_certificate_fingerprint_verify" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_certificate_fingerprint_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsHandshakeReassemblyState" src/webrtc/dtls/handshake.uya
@@ -94,6 +96,8 @@ rg -Fq "export fn dtls_handshake_retransmission_timer_should_fire" src/webrtc/dt
 rg -Fq "export fn dtls_handshake_retransmission_timer_fire" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_alert_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_alert_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_certificate_fingerprint_sha256" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_certificate_fingerprint_verify" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 

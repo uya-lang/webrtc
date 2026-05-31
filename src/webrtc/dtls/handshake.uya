@@ -3,6 +3,7 @@
 
 use webrtc.binary;
 use webrtc.crypto.csprng;
+use webrtc.crypto.hash;
 use webrtc.crypto.hmac;
 use webrtc.crypto.p256;
 use webrtc.dtls.model;
@@ -46,6 +47,7 @@ export const DTLS_ALERT_DESCRIPTION_DECRYPT_ERROR: u8 = 51u8;
 export const DTLS_ALERT_DESCRIPTION_PROTOCOL_VERSION: u8 = 70u8;
 export const DTLS_ALERT_DESCRIPTION_INTERNAL_ERROR: u8 = 80u8;
 export const DTLS_ALERT_BYTES: usize = 2usize;
+export const DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES: usize = 32usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -240,6 +242,75 @@ fn dtls_u64_mul2_saturating(value: u64) u64 {
         return 0xffffffffffffffffu64;
     }
     return value * 2u64;
+}
+
+fn dtls_ascii_lower(byte_value: byte) byte {
+    if byte_value >= ('A' as byte) && byte_value <= ('Z' as byte) {
+        return byte_value + (32 as byte);
+    }
+    return byte_value;
+}
+
+fn dtls_ascii_bytes_equal_case_insensitive(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if dtls_ascii_lower(lhs[index]) != dtls_ascii_lower(rhs[index]) {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn dtls_hex_nibble_value(char_value: byte) !byte {
+    if char_value >= ('0' as byte) && char_value <= ('9' as byte) {
+        return char_value - ('0' as byte);
+    }
+    const lowered: byte = dtls_ascii_lower(char_value);
+    if lowered >= ('a' as byte) && lowered <= ('f' as byte) {
+        return lowered - ('a' as byte) + (10 as byte);
+    }
+    return error.InvalidPacket;
+}
+
+fn dtls_certificate_fingerprint_parse_sha256_text(value: &[byte], out: &[byte]) !void {
+    if out.len < DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    var digit_count: usize = 0usize;
+    var nibble_high: byte = 0 as byte;
+    var have_high: bool = false;
+    var out_index: usize = 0usize;
+    var index: usize = 0usize;
+    while index < value.len {
+        const char_value: byte = value[index];
+        if char_value == (':' as byte) {
+            index = index + 1usize;
+            continue;
+        }
+        const nibble: byte = try dtls_hex_nibble_value(char_value);
+        if !have_high {
+            nibble_high = nibble;
+            have_high = true;
+        } else {
+            if out_index >= DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES {
+                return error.InvalidPacket;
+            }
+            out[out_index] = ((nibble_high << 4i32) | nibble) as byte;
+            out_index = out_index + 1usize;
+            have_high = false;
+        }
+        digit_count = digit_count + 1usize;
+        index = index + 1usize;
+    }
+
+    if have_high || digit_count != DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES * 2usize || out_index != DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES {
+        return error.InvalidPacket;
+    }
 }
 
 fn dtls_alert_level_supported(level: u8) bool {
@@ -1217,6 +1288,36 @@ export fn dtls_alert_write(alert: &DtlsAlert, out: &[byte]) !usize {
     out[0] = alert.level as byte;
     out[1] = alert.description as byte;
     return DTLS_ALERT_BYTES;
+}
+
+export fn dtls_certificate_fingerprint_sha256(cert_der: &[byte], out: &[byte]) !void {
+    if cert_der.len == 0usize || out.len < DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES {
+        return error.InvalidPacket;
+    }
+    return crypto_sha256_digest(cert_der, out[0:DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES]);
+}
+
+export fn dtls_certificate_fingerprint_verify(cert_der: &[byte], hash_name: &[byte], fingerprint_value: &[byte]) !void {
+    var expected_hash_name: [byte: 7] = [
+        's' as byte, 'h' as byte, 'a' as byte, '-' as byte, '2' as byte, '5' as byte, '6' as byte,
+    ];
+    if !dtls_ascii_bytes_equal_case_insensitive(hash_name, expected_hash_name[0:7]) {
+        return error.UnsupportedCapability;
+    }
+
+    var actual: [byte: DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES] = [];
+    var expected: [byte: DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES] = [];
+    try dtls_certificate_fingerprint_sha256(cert_der, actual[0:DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES]);
+    try dtls_certificate_fingerprint_parse_sha256_text(
+        fingerprint_value,
+        expected[0:DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES],
+    );
+    if !constant_time_bytes_equal(
+        actual[0:DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES],
+        expected[0:DTLS_CERTIFICATE_FINGERPRINT_SHA256_BYTES],
+    ) {
+        return error.FingerprintMismatch;
+    }
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {

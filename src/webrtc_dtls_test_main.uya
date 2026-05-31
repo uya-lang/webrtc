@@ -955,6 +955,57 @@ fn dtls_test_check_alert_invalid_cases() i32 {
     return 0;
 }
 
+fn dtls_test_check_certificate_fingerprint_verify() i32 {
+    var cert_der: [byte: 32] = [
+        0x30 as byte, 0x82 as byte, 0x01 as byte, 0x93 as byte, 0x30 as byte, 0x82 as byte, 0x01 as byte, 0x39 as byte,
+        0xa0 as byte, 0x03 as byte, 0x02 as byte, 0x01 as byte, 0x02 as byte, 0x02 as byte, 0x14 as byte, 0x06 as byte,
+        0x8a as byte, 0x40 as byte, 0x02 as byte, 0xfa as byte, 0x92 as byte, 0x37 as byte, 0x2d as byte, 0x04 as byte,
+        0x43 as byte, 0xbf as byte, 0xb2 as byte, 0x4e as byte, 0xf3 as byte, 0xc1 as byte, 0xf3 as byte, 0x88 as byte,
+    ];
+    var hash_name: [byte: 7] = ['s' as byte, 'h' as byte, 'a' as byte, '-' as byte, '2' as byte, '5' as byte, '6' as byte];
+    var fingerprint_value: [byte: 95] = [
+        'F' as byte, '4' as byte, ':' as byte, 'E' as byte, '0' as byte, ':' as byte, '3' as byte, 'B' as byte, ':' as byte, 'A' as byte, '8' as byte, ':' as byte, 'B' as byte, 'E' as byte, ':' as byte, 'D' as byte,
+        '9' as byte, ':' as byte, '5' as byte, '0' as byte, ':' as byte, '4' as byte, 'D' as byte, ':' as byte, '3' as byte, 'C' as byte, ':' as byte, '4' as byte, '5' as byte, ':' as byte, '1' as byte, '0' as byte,
+        ':' as byte, 'A' as byte, 'D' as byte, ':' as byte, '9' as byte, 'B' as byte, ':' as byte, 'A' as byte, 'B' as byte, ':' as byte, 'F' as byte, 'A' as byte, ':' as byte, '1' as byte, '6' as byte, ':' as byte,
+        'A' as byte, 'C' as byte, ':' as byte, 'E' as byte, 'F' as byte, ':' as byte, 'F' as byte, '2' as byte, ':' as byte, '1' as byte, '0' as byte, ':' as byte, 'F' as byte, '3' as byte, ':' as byte, '8' as byte,
+        '9' as byte, ':' as byte, 'D' as byte, '7' as byte, ':' as byte, '0' as byte, '0' as byte, ':' as byte, 'F' as byte, '1' as byte, ':' as byte, 'C' as byte, '0' as byte, ':' as byte, '3' as byte, '9' as byte,
+        ':' as byte, '5' as byte, 'F' as byte, ':' as byte, '5' as byte, '8' as byte, ':' as byte, '7' as byte, 'E' as byte, ':' as byte, '3' as byte, '9' as byte, ':' as byte, '8' as byte, '7' as byte,
+    ];
+    var digest: [byte: 32] = [];
+    if dtls_certificate_fingerprint_sha256(cert_der[0:32], digest[0:32]).error_id != 0 {
+        return 180;
+    }
+    if dtls_certificate_fingerprint_verify(cert_der[0:32], hash_name[0:7], fingerprint_value[0:95]).error_id != 0 {
+        return 181;
+    }
+    return 0;
+}
+
+fn dtls_test_check_certificate_fingerprint_invalid_cases() i32 {
+    var cert_der: [byte: 3] = [1 as byte, 2 as byte, 3 as byte];
+    var bad_hash_name: [byte: 4] = ['s' as byte, 'h' as byte, 'a' as byte, '1' as byte];
+    var bad_fingerprint: [byte: 5] = ['A' as byte, 'B' as byte, ':' as byte, 'Z' as byte, 'Z' as byte];
+    var good_hash_name: [byte: 7] = ['s' as byte, 'h' as byte, 'a' as byte, '-' as byte, '2' as byte, '5' as byte, '6' as byte];
+    var wrong_value: [byte: 95] = [
+        '0' as byte, '0' as byte, ':' as byte, '5' as byte, '8' as byte, ':' as byte, '3' as byte, '2' as byte, ':' as byte, '4' as byte, '2' as byte, ':' as byte, '0' as byte, 'D' as byte, ':' as byte, '4' as byte,
+        'F' as byte, ':' as byte, '1' as byte, '0' as byte, ':' as byte, '0' as byte, 'A' as byte, ':' as byte, '4' as byte, 'E' as byte, ':' as byte, '5' as byte, '3' as byte, ':' as byte, 'F' as byte, 'E' as byte,
+        ':' as byte, '6' as byte, 'C' as byte, ':' as byte, '6' as byte, '1' as byte, ':' as byte, '5' as byte, '1' as byte, ':' as byte, '7' as byte, '8' as byte, ':' as byte, '7' as byte, '6' as byte, ':' as byte,
+        'D' as byte, '7' as byte, ':' as byte, '7' as byte, 'F' as byte, ':' as byte, 'C' as byte, '3' as byte, ':' as byte, 'D' as byte, 'A' as byte, ':' as byte, '5' as byte, '1' as byte, ':' as byte, 'F' as byte,
+        '2' as byte, ':' as byte, '2' as byte, '1' as byte, ':' as byte, 'F' as byte, '2' as byte, ':' as byte, '2' as byte, '2' as byte, ':' as byte, '5' as byte, 'E' as byte, ':' as byte, '8' as byte, 'D' as byte,
+        ':' as byte, '9' as byte, '8' as byte, ':' as byte, '3' as byte, 'D' as byte, ':' as byte, '9' as byte, '9' as byte, ':' as byte, 'D' as byte, '4' as byte, ':' as byte, '1' as byte, '6' as byte,
+    ];
+    if dtls_certificate_fingerprint_verify(cert_der[0:3], bad_hash_name[0:4], wrong_value[0:95]).error_id == 0 {
+        return 182;
+    }
+    if dtls_certificate_fingerprint_verify(cert_der[0:3], good_hash_name[0:7], bad_fingerprint[0:5]).error_id == 0 {
+        return 183;
+    }
+    if dtls_certificate_fingerprint_verify(cert_der[0:3], good_hash_name[0:7], wrong_value[0:95]).error_id == 0 {
+        return 184;
+    }
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -1116,6 +1167,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_alert_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_certificate_fingerprint_verify();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_certificate_fingerprint_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;
