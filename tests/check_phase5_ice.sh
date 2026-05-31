@@ -17,13 +17,14 @@ rg -Fq 'test "ice agent model keeps owned credentials candidate pools and select
 rg -Fq 'test "ice helpers expose stable default state for future gathering and checklist work"' src/webrtc_ice_test.uya
 rg -Fq 'test "candidate pair helpers follow RFC 8445 priority order and compatibility gates"' src/webrtc_ice_test.uya
 rg -Fq 'test "checklist rebuild sorts compatible pairs and seeds one waiting pair per foundation"' src/webrtc_ice_test.uya
-rg -Fq 'test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes"' src/webrtc_ice_test.uya
+rg -Fq 'test "checklist rebuild filters incompatible pairs and selected pair survives trickle remote updates"' src/webrtc_ice_test.uya
 rg -Fq 'test "checklist rebuild rejects fixed pair capacity without leaving partial state"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check transaction builds authenticated binding requests and marks pair in progress"' src/webrtc_ice_test.uya
 rg -Fq 'test "role conflict request resolution follows RFC 8445 tie breaker rules"' src/webrtc_ice_test.uya
 rg -Fq 'test "regular nomination waits for a valid pair and marks a successful nomination"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check success response updates pair timing consent and validity"' src/webrtc_ice_test.uya
 rg -Fq 'test "aggressive nomination mode allows use-candidate on the first controlling check"' src/webrtc_ice_test.uya
+rg -Fq 'test "local trickle candidate addition reopens completed state until checklist rebuild"' src/webrtc_ice_test.uya
 rg -Fq 'test "consent freshness on selected pair schedules periodic binding checks without leaving completed state"' src/webrtc_ice_test.uya
 rg -Fq 'test "consent freshness timeout transitions selected pair through disconnected and failed"' src/webrtc_ice_test.uya
 rg -Fq 'test "consent freshness recovery restores selected pair after disconnected retry succeeds"' src/webrtc_ice_test.uya
@@ -90,6 +91,11 @@ rg -Fq "export fn ice_agent_clear_checklist" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_clear_remote_candidates" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_add_remote_candidate" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_rebuild_checklist" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_trickle_is_complete" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_note_local_gathering_started" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_note_local_gathering_complete" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_note_remote_gathering_started" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_note_remote_gathering_complete" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_resolve_role_conflict_request" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_connectivity_check_transaction_init" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_connectivity_check_build_binding_request" src/webrtc/ice/agent.uya

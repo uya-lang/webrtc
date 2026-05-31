@@ -93,6 +93,8 @@ fn ice_test_seed_connectivity_check_agent(agent: &IceAgent, role: u8) !u16 {
     agent.remote_candidate_count = 1usize;
 
     try expect((try ice_agent_rebuild_checklist(agent)) == 1usize);
+    ice_agent_note_local_gathering_complete(agent);
+    ice_agent_note_remote_gathering_complete(agent);
     return 0u16;
 }
 
@@ -131,6 +133,8 @@ fn ice_test_seed_selected_pair_agents(controlling_agent: &IceAgent, controlled_a
     controlled_agent.remote_candidate_count = 1usize;
 
     try expect((try ice_agent_rebuild_checklist(controlled_agent)) == 1usize);
+    ice_agent_note_local_gathering_complete(controlled_agent);
+    ice_agent_note_remote_gathering_complete(controlled_agent);
 }
 
 fn ice_test_complete_selected_pair_agents(controlling_agent: &IceAgent, controlled_agent: &IceAgent) !void {
@@ -227,6 +231,9 @@ test "ice helpers expose stable default state for future gathering and checklist
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
     try expect(agent.state == ICE_AGENT_STATE_NEW);
     try expect(agent.role == ICE_AGENT_ROLE_CONTROLLING);
+    try expect(agent.gathering_state == ICE_GATHERING_STATE_NEW);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_NEW);
+    try expect(!ice_agent_trickle_is_complete(&agent));
     try expect(!ice_agent_has_selected_pair(&agent));
 }
 
@@ -355,7 +362,7 @@ test "checklist rebuild sorts compatible pairs and seeds one waiting pair per fo
     ));
 }
 
-test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes" {
+test "checklist rebuild filters incompatible pairs and selected pair survives trickle remote updates" {
     var agent: IceAgent = ice_agent_make();
     ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 89u64);
 
@@ -419,6 +426,8 @@ test "checklist rebuild filters incompatible pairs and selection is invalidated 
     agent.remote_candidate_count = 3usize;
 
     try expect((try ice_agent_rebuild_checklist(&agent)) == 1usize);
+    ice_agent_note_local_gathering_complete(&agent);
+    ice_agent_note_remote_gathering_complete(&agent);
     try expect(agent.checklist[0].priority == candidate_pair_priority(200u32, 100u32));
     agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
     try ice_agent_select_checklist_pair(&agent, 0u16, true);
@@ -438,13 +447,23 @@ test "checklist rebuild filters incompatible pairs and selection is invalidated 
         6503u16,
     );
     _ = try ice_agent_add_remote_candidate(&agent, &extra_remote);
-    try expect(agent.checklist_count == 0usize);
-    try expect(!ice_agent_has_selected_pair(&agent));
+    try expect(agent.checklist_count == 1usize);
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_GATHERING);
+    try expect(!ice_agent_trickle_is_complete(&agent));
 
+    ice_agent_note_remote_gathering_complete(&agent);
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
     try expect((try ice_agent_rebuild_checklist(&agent)) == 2usize);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_COMPLETE);
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(ice_agent_trickle_is_complete(&agent));
     ice_agent_clear_remote_candidates(&agent);
     try expect(agent.remote_candidate_count == 0usize);
     try expect(agent.checklist_count == 0usize);
+    try expect(agent.remote_gathering_state == ICE_GATHERING_STATE_NEW);
 }
 
 test "checklist rebuild rejects fixed pair capacity without leaving partial state" {
@@ -630,6 +649,9 @@ test "role conflict request resolution follows RFC 8445 tie breaker rules" {
 test "regular nomination waits for a valid pair and marks a successful nomination" {
     var agent: IceAgent = ice_agent_make();
     const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
+    ice_agent_note_local_gathering_started(&agent);
+    ice_agent_note_remote_gathering_started(&agent);
+    try expect(!ice_agent_trickle_is_complete(&agent));
 
     var early_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
         24 as byte,
@@ -766,7 +788,13 @@ test "regular nomination waits for a valid pair and marks a successful nominatio
     try expect(agent.checklist[0].selected);
     try expect(agent.checklist[0].nominated);
     try expect(agent.checklist[0].response_count == 2u32);
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect(!ice_agent_trickle_is_complete(&agent));
+    ice_agent_note_local_gathering_complete(&agent);
+    try expect(agent.state == ICE_AGENT_STATE_CONNECTED);
+    ice_agent_note_remote_gathering_complete(&agent);
     try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(ice_agent_trickle_is_complete(&agent));
 }
 
 test "connectivity check success response updates pair timing consent and validity" {
@@ -891,6 +919,40 @@ test "dual agents complete selected pair across nomination request and success r
     try expect(controlling_agent.state == ICE_AGENT_STATE_COMPLETED);
     try expect(controlling_agent.checklist[0].consent_deadline_us == 15002200u64);
     try expect(controlled_agent.checklist[0].consent_deadline_us == 15001800u64);
+}
+
+test "local trickle candidate addition reopens completed state until checklist rebuild" {
+    var controlling_agent: IceAgent = ice_agent_make();
+    var controlled_agent: IceAgent = ice_agent_make();
+    try ice_test_complete_selected_pair_agents(&controlling_agent, &controlled_agent);
+
+    var desc: IceHostInterfaceDescriptor = ice_host_interface_descriptor_make();
+    ice_host_interface_descriptor_init(&desc);
+    try ice_host_interface_descriptor_set_name(&desc, "eth1" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.12" as &[byte]);
+    desc.network_id = 6u16;
+    desc.network_cost = 20u16;
+    desc.is_up = true;
+
+    _ = try ice_agent_add_host_candidate(
+        &controlling_agent,
+        &desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5100u16 },
+    );
+    try expect(controlling_agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect(controlling_agent.gathering_state == ICE_GATHERING_STATE_GATHERING);
+    try expect(controlling_agent.local_candidate_count == 2usize);
+    try expect(controlling_agent.checklist_count == 1usize);
+    try expect(ice_agent_has_selected_pair(&controlling_agent));
+    try expect(!ice_agent_trickle_is_complete(&controlling_agent));
+
+    ice_agent_note_local_gathering_complete(&controlling_agent);
+    try expect(controlling_agent.state == ICE_AGENT_STATE_CONNECTED);
+    try expect((try ice_agent_rebuild_checklist(&controlling_agent)) == 2usize);
+    try expect(controlling_agent.state == ICE_AGENT_STATE_COMPLETED);
+    try expect(controlling_agent.checklist_count == 2usize);
+    try expect(ice_agent_has_selected_pair(&controlling_agent));
+    try expect(ice_agent_trickle_is_complete(&controlling_agent));
 }
 
 test "consent freshness on selected pair schedules periodic binding checks without leaving completed state" {

@@ -705,6 +705,7 @@ export fn ice_agent_prune_srflx_candidates(agent: &IceAgent) usize {
     ice_agent_refresh_local_candidate_priorities(agent);
     if pruned != 0usize {
         ice_agent_clear_checklist(agent);
+        agent.checklist_dirty = true;
     }
     return pruned;
 }
@@ -736,6 +737,7 @@ export fn ice_agent_prune_host_candidates(agent: &IceAgent) usize {
     ice_agent_refresh_local_candidate_priorities(agent);
     if pruned != 0usize {
         ice_agent_clear_checklist(agent);
+        agent.checklist_dirty = true;
     }
     return pruned;
 }
@@ -747,6 +749,7 @@ export fn ice_agent_add_host_candidate(agent: &IceAgent, desc: &IceHostInterface
     if !ice_host_interface_descriptor_is_usable(desc) || port_binding.port == 0u16 {
         return error.InvalidPacket;
     }
+    ice_agent_note_local_gathering_started(agent);
 
     var candidate_local: IceCandidate = ice_candidate_make();
     ice_candidate_init(&candidate_local);
@@ -774,7 +777,10 @@ export fn ice_agent_add_host_candidate(agent: &IceAgent, desc: &IceHostInterface
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
     ice_agent_refresh_local_candidate_priorities(agent);
-    ice_agent_clear_checklist(agent);
+    agent.checklist_dirty = true;
+    if !ice_agent_has_selected_pair(agent) {
+        ice_agent_clear_checklist(agent);
+    }
     return (agent.local_candidate_count - 1) as u16;
 }
 
@@ -865,6 +871,7 @@ export fn ice_agent_add_srflx_candidate(
     if base_candidate.transport != ICE_CANDIDATE_TRANSPORT_UDP {
         return error.UnsupportedCapability;
     }
+    ice_agent_note_local_gathering_started(agent);
 
     var candidate_local: IceCandidate = ice_candidate_make();
     ice_candidate_init(&candidate_local);
@@ -899,7 +906,10 @@ export fn ice_agent_add_srflx_candidate(
     agent.local_candidates[agent.local_candidate_count] = candidate_local;
     agent.local_candidate_count = agent.local_candidate_count + 1;
     ice_agent_refresh_local_candidate_priorities(agent);
-    ice_agent_clear_checklist(agent);
+    agent.checklist_dirty = true;
+    if !ice_agent_has_selected_pair(agent) {
+        ice_agent_clear_checklist(agent);
+    }
     return (agent.local_candidate_count - 1) as u16;
 }
 
@@ -958,7 +968,7 @@ export fn ice_agent_gather_host_candidates_from_descriptors(
         return error.UnsupportedCapability;
     }
 
-    agent.gathering_state = ICE_GATHERING_STATE_GATHERING;
+    ice_agent_note_local_gathering_started(agent);
 
     var result: IceHostGatherResult = IceHostGatherResult{};
     // Rebuilding the host base set invalidates derived srflx candidates that reference old indices.
@@ -969,13 +979,13 @@ export fn ice_agent_gather_host_candidates_from_descriptors(
     while index < descriptor_count {
         result.interface_count = result.interface_count + 1;
         ice_host_gather_process_descriptor(&result, agent, &descriptors[index], ports, port_count) catch {
-            agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+            ice_agent_note_local_gathering_complete(agent);
             return error.UnsupportedCapability;
         };
         index = index + 1;
     }
 
-    agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+    ice_agent_note_local_gathering_complete(agent);
     return ice_host_gather_result_make(
         result.interface_count,
         result.usable_interface_count,
@@ -1010,7 +1020,7 @@ export fn ice_agent_gather_host_candidates(
         return error.IceHostGatherSystemCallFailed;
     }
 
-    agent.gathering_state = ICE_GATHERING_STATE_GATHERING;
+    ice_agent_note_local_gathering_started(agent);
 
     var result: IceHostGatherResult = IceHostGatherResult{};
     // Rebuilding the host base set invalidates derived srflx candidates that reference old indices.
@@ -1025,7 +1035,7 @@ export fn ice_agent_gather_host_candidates(
         if ice_host_interface_descriptor_from_ifaddrs(&desc, current) {
             ice_host_gather_process_descriptor(&result, agent, &desc, ports, port_count) catch {
                 freeifaddrs(list);
-                agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+                ice_agent_note_local_gathering_complete(agent);
                 return error.UnsupportedCapability;
             };
         } else {
@@ -1036,7 +1046,7 @@ export fn ice_agent_gather_host_candidates(
     }
 
     freeifaddrs(list);
-    agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+    ice_agent_note_local_gathering_complete(agent);
     return ice_host_gather_result_make(
         result.interface_count,
         result.usable_interface_count,
