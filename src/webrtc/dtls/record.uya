@@ -54,12 +54,12 @@ export fn dtls_record_parse(packet: &[byte]) !DtlsRecord {
         return error.UnsupportedCapability;
     }
 
-    const version: u16 = try read_be_u16(packet[1:3]);
+    const version: u16 = try read_be_u16(packet[1:2]);
     if version != DTLS_VERSION_1_2 {
         return error.UnsupportedCapability;
     }
 
-    const epoch: u16 = try read_be_u16(packet[3:5]);
+    const epoch: u16 = try read_be_u16(packet[3:2]);
     const sequence_number: u64 =
         ((packet[5] as u64) << 40i32)
         | ((packet[6] as u64) << 32i32)
@@ -67,7 +67,7 @@ export fn dtls_record_parse(packet: &[byte]) !DtlsRecord {
         | ((packet[8] as u64) << 16i32)
         | ((packet[9] as u64) << 8i32)
         | (packet[10] as u64);
-    const length: u16 = try read_be_u16(packet[11:13]);
+    const length: u16 = try read_be_u16(packet[11:2]);
     if (length as usize) > DTLS_RECORD_MAX_PAYLOAD_BYTES {
         return error.InvalidPacket;
     }
@@ -75,7 +75,7 @@ export fn dtls_record_parse(packet: &[byte]) !DtlsRecord {
         return error.InvalidPacket;
     }
 
-    const payload: &[byte] = packet[DTLS_RECORD_HEADER_BYTES:packet.len];
+    const payload: &[byte] = packet[DTLS_RECORD_HEADER_BYTES:length as usize];
     if content_type == DTLS_CONTENT_TYPE_HANDSHAKE {
         try dtls_record_parse_handshake_payload(payload);
     }
@@ -116,15 +116,15 @@ export fn dtls_record_write(header: &DtlsRecordHeader, payload: &[byte], out: &[
     }
 
     out[0] = header.content_type as byte;
-    try write_be_u16(out[1:3], header.version);
-    try write_be_u16(out[3:5], header.epoch);
+    try write_be_u16(out[1:2], header.version);
+    try write_be_u16(out[3:2], header.epoch);
     out[5] = ((header.sequence_number >> 40i32) & 0xffu64) as byte;
     out[6] = ((header.sequence_number >> 32i32) & 0xffu64) as byte;
     out[7] = ((header.sequence_number >> 24i32) & 0xffu64) as byte;
     out[8] = ((header.sequence_number >> 16i32) & 0xffu64) as byte;
     out[9] = ((header.sequence_number >> 8i32) & 0xffu64) as byte;
     out[10] = (header.sequence_number & 0xffu64) as byte;
-    try write_be_u16(out[11:13], header.length);
+    try write_be_u16(out[11:2], header.length);
 
     var index: usize = 0usize;
     while index < payload.len {

@@ -6,6 +6,7 @@ cd "$repo_root"
 
 test -f src/webrtc_dtls_test_main.uya
 test -d src/webrtc/dtls
+test -f src/webrtc/dtls/handshake.uya
 test -f src/webrtc/dtls/model.uya
 test -f src/webrtc/dtls/record.uya
 test -d tests/fixtures/dtls
@@ -25,8 +26,14 @@ rg -Fq "dtls_test_check_record_epoch_and_sequence_cases" src/webrtc_dtls_test_ma
 rg -Fq "dtls_test_check_record_writer_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_handshake_fragment_length_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_reassembly_overlap_and_gap_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_reassembly_two_fragment_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
+rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsHandshakeReassemblyState" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_fragment_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_reassembly_absorb" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_reassembly_take_message" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 

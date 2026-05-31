@@ -1,0 +1,160 @@
+// webrtc.dtls.handshake - DTLS handshake fragment parse / reassembly helpers
+// 模块路径：src/webrtc/dtls/handshake.uya → use webrtc.dtls.handshake;
+
+use webrtc.dtls.model;
+use webrtc.errors;
+
+export const DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES: usize = DTLS_RECORD_MAX_PAYLOAD_BYTES;
+
+export struct DtlsHandshakeFragment {
+    handshake_type: u8 = 0u8,
+    body_length: usize = 0usize,
+    message_sequence: u16 = 0u16,
+    fragment_offset: usize = 0usize,
+    fragment: &[byte] = [],
+}
+
+export struct DtlsHandshakeReassemblyState {
+    active: bool = false,
+    complete: bool = false,
+    handshake_type: u8 = 0u8,
+    body_length: usize = 0usize,
+    message_sequence: u16 = 0u16,
+    received_bytes: usize = 0usize,
+    bytes: [byte: DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES] = [],
+    received_mask: [byte: DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES] = [],
+}
+
+export fn dtls_handshake_reassembly_state_make() DtlsHandshakeReassemblyState {
+    return DtlsHandshakeReassemblyState{};
+}
+
+export fn dtls_handshake_reassembly_init(state: &DtlsHandshakeReassemblyState) void {
+    if state == null {
+        return;
+    }
+    state.active = false;
+    state.complete = false;
+    state.handshake_type = 0u8;
+    state.body_length = 0usize;
+    state.message_sequence = 0u16;
+    state.received_bytes = 0usize;
+
+    var index: usize = 0usize;
+    while index < DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+        state.bytes[index] = 0 as byte;
+        state.received_mask[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {
+    if payload.len < DTLS_HANDSHAKE_HEADER_BYTES {
+        return error.PacketTooShort;
+    }
+
+    const body_length: usize =
+        ((payload[1] as usize) << 16i32)
+        | ((payload[2] as usize) << 8i32)
+        | (payload[3] as usize);
+    const message_sequence: u16 = ((payload[4] as u16) << 8i32) | (payload[5] as u16);
+    const fragment_offset: usize =
+        ((payload[6] as usize) << 16i32)
+        | ((payload[7] as usize) << 8i32)
+        | (payload[8] as usize);
+    const fragment_length: usize =
+        ((payload[9] as usize) << 16i32)
+        | ((payload[10] as usize) << 8i32)
+        | (payload[11] as usize);
+
+    if DTLS_HANDSHAKE_HEADER_BYTES + fragment_length != payload.len {
+        return error.InvalidPacket;
+    }
+    if body_length > DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+        return error.UnsupportedCapability;
+    }
+    if fragment_offset > body_length {
+        return error.InvalidPacket;
+    }
+    if fragment_length > body_length {
+        return error.InvalidPacket;
+    }
+    if fragment_offset + fragment_length > body_length {
+        return error.InvalidPacket;
+    }
+
+    return DtlsHandshakeFragment{
+        handshake_type: payload[0] as u8,
+        body_length: body_length,
+        message_sequence: message_sequence,
+        fragment_offset: fragment_offset,
+        fragment: payload[DTLS_HANDSHAKE_HEADER_BYTES:fragment_length],
+    };
+}
+
+export fn dtls_handshake_reassembly_absorb(state: &DtlsHandshakeReassemblyState, fragment: &DtlsHandshakeFragment) !void {
+    if state == null || fragment == null {
+        return error.InvalidPacket;
+    }
+    if fragment.body_length > DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+        return error.UnsupportedCapability;
+    }
+    if fragment.fragment_offset + fragment.fragment.len > fragment.body_length {
+        return error.InvalidPacket;
+    }
+
+    if !state.active {
+        state.active = true;
+        state.complete = false;
+        state.handshake_type = fragment.handshake_type;
+        state.body_length = fragment.body_length;
+        state.message_sequence = fragment.message_sequence;
+        state.received_bytes = 0usize;
+    } else {
+        if state.handshake_type != fragment.handshake_type
+            || state.body_length != fragment.body_length
+            || state.message_sequence != fragment.message_sequence {
+            return error.InvalidPacket;
+        }
+    }
+
+    var index: usize = 0usize;
+    while index < fragment.fragment.len {
+        const slot: usize = fragment.fragment_offset + index;
+        if slot >= DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+            return error.InvalidPacket;
+        }
+        if state.received_mask[slot] != 0 as byte {
+            return error.InvalidPacket;
+        }
+        state.bytes[slot] = fragment.fragment[index];
+        state.received_mask[slot] = 1 as byte;
+        state.received_bytes = state.received_bytes + 1usize;
+        index = index + 1usize;
+    }
+
+    state.complete = state.received_bytes == state.body_length;
+}
+
+export fn dtls_handshake_reassembly_is_complete(state: &DtlsHandshakeReassemblyState) bool {
+    if state == null {
+        return false;
+    }
+    return state.active && state.complete;
+}
+
+export fn dtls_handshake_reassembly_take_message(state: &DtlsHandshakeReassemblyState, out: &[byte]) !usize {
+    if state == null || !state.active || !state.complete {
+        return error.InvalidPacket;
+    }
+    if out.len < state.body_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    var index: usize = 0usize;
+    while index < state.body_length {
+        out[index] = state.bytes[index];
+        index = index + 1usize;
+    }
+    return state.body_length;
+}

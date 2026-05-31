@@ -1,4 +1,5 @@
 use libc.printf;
+use webrtc.dtls.handshake;
 use webrtc.dtls.model;
 use webrtc.dtls.record;
 
@@ -58,7 +59,8 @@ fn dtls_test_check_record_writer_roundtrip() i32 {
     if parsed.value.header.epoch != 1u16 || parsed.value.header.sequence_number != 7u64 {
         return 33;
     }
-    if parsed.value.payload.len != 4usize || parsed.value.payload[3] != 4 as byte {
+    const parsed_payload: &[byte] = parsed.value.payload;
+    if parsed_payload.len != 4usize || parsed_payload[3] != 4 as byte {
         return 34;
     }
     return 0;
@@ -79,6 +81,113 @@ fn dtls_test_check_handshake_fragment_length_cases() i32 {
 }
 
 fn dtls_test_check_reassembly_overlap_and_gap_cases() i32 {
+    var overlap_record: [byte: 38] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x02 as byte, 0x00 as byte, 0x19 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x14 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x0d as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte,
+    ];
+    var gap_record: [byte: 37] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte, 0x00 as byte, 0x18 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x14 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x08 as byte, 0x00 as byte, 0x00 as byte, 0x0c as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte,
+    ];
+    const overlap_parsed: !DtlsRecord = dtls_record_parse(overlap_record[0:38]);
+    if overlap_parsed.error_id != 0 {
+        return 50;
+    }
+    const overlap_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(overlap_parsed.value.payload);
+    if overlap_fragment.error_id != 0 {
+        return 51;
+    }
+    const gap_parsed: !DtlsRecord = dtls_record_parse(gap_record[0:37]);
+    if gap_parsed.error_id != 0 {
+        return 52;
+    }
+    const gap_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(gap_parsed.value.payload);
+    if gap_fragment.error_id != 0 {
+        return 53;
+    }
+
+    var state: DtlsHandshakeReassemblyState = dtls_handshake_reassembly_state_make();
+    dtls_handshake_reassembly_init(&state);
+    if dtls_handshake_reassembly_absorb(&state, &overlap_fragment.value).error_id != 0 {
+        return 54;
+    }
+    const overlap_again: !void = dtls_handshake_reassembly_absorb(&state, &overlap_fragment.value);
+    if overlap_again.error_id == 0 {
+        return 55;
+    }
+
+    dtls_handshake_reassembly_init(&state);
+    if dtls_handshake_reassembly_absorb(&state, &gap_fragment.value).error_id != 0 {
+        return 56;
+    }
+    if dtls_handshake_reassembly_is_complete(&state) {
+        return 57;
+    }
+    return 0;
+}
+
+fn dtls_test_check_reassembly_two_fragment_roundtrip() i32 {
+    var first_record: [byte: 29] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte, 0x00 as byte, 0x10 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte,
+    ];
+    var second_record: [byte: 29] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x05 as byte, 0x00 as byte, 0x10 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x04 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+    ];
+    const first_parsed: !DtlsRecord = dtls_record_parse(first_record[0:29]);
+    if first_parsed.error_id != 0 {
+        return 60;
+    }
+    const second_parsed: !DtlsRecord = dtls_record_parse(second_record[0:29]);
+    if second_parsed.error_id != 0 {
+        return 61;
+    }
+    const first_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(first_parsed.value.payload);
+    if first_fragment.error_id != 0 {
+        return 62;
+    }
+    const second_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(second_parsed.value.payload);
+    if second_fragment.error_id != 0 {
+        return 63;
+    }
+
+    var state: DtlsHandshakeReassemblyState = dtls_handshake_reassembly_state_make();
+    dtls_handshake_reassembly_init(&state);
+    if dtls_handshake_reassembly_absorb(&state, &first_fragment.value).error_id != 0 {
+        return 64;
+    }
+    if dtls_handshake_reassembly_is_complete(&state) {
+        return 65;
+    }
+    if dtls_handshake_reassembly_absorb(&state, &second_fragment.value).error_id != 0 {
+        return 66;
+    }
+    if !dtls_handshake_reassembly_is_complete(&state) {
+        return 67;
+    }
+    var out: [byte: 16] = [];
+    const message: !usize = dtls_handshake_reassembly_take_message(&state, out[0:16]);
+    if message.error_id != 0 || message.value != 8usize {
+        return 68;
+    }
+    if out[0] != 0xaa as byte || out[7] != 0x44 as byte {
+        return 69;
+    }
     return 0;
 }
 
@@ -102,6 +211,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         return result;
     }
 
+    result = dtls_test_check_record_writer_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
     result = dtls_test_check_handshake_fragment_length_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
@@ -109,6 +224,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_reassembly_overlap_and_gap_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_reassembly_two_fragment_roundtrip();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;
