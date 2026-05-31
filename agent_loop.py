@@ -47,9 +47,23 @@ VALID_CODEX_SANDBOXES = {
     "workspace-write",
     "danger-full-access",
 }
+
+
+def parse_positive_int_env(name, default):
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    try:
+        return max(1, int(raw_value.strip() or str(default)))
+    except ValueError:
+        return default
+
+
 SLEEP_SECONDS = int(os.environ.get("AGENT_SLEEP", "3"))
 HEARTBEAT_SECONDS = max(1, int(os.environ.get("AGENT_HEARTBEAT", "15")))
 MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
+MAX_RUNNABLE_TASKS = parse_positive_int_env("MAX_RUNNABLE_TASKS", 20)
 RESULT_EXIT_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_EXIT_GRACE", "5")))
 RESULT_KILL_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_KILL_GRACE", "3")))
 ANSI_GREEN = "\x1b[32m"
@@ -980,15 +994,18 @@ def parse_todo(todo_file):
 
 
 def choose_runnable_tasks(tasks, state):
-    candidate = preferred_pending_task(tasks, state)
-    if candidate is None:
-        return []
+    runnable = []
 
-    fails = state["failed"].get(candidate["id"], 0)
-    if fails >= MAX_FAILS_PER_TASK:
-        return []
+    for task in ordered_pending_tasks(tasks, state):
+        fails = state["failed"].get(task["id"], 0)
+        if fails >= MAX_FAILS_PER_TASK:
+            continue
 
-    return [candidate]
+        runnable.append(task)
+        if len(runnable) >= MAX_RUNNABLE_TASKS:
+            break
+
+    return runnable
 
 
 def preferred_pending_task(tasks, state):
@@ -1011,16 +1028,35 @@ def preferred_pending_task(tasks, state):
     return resumable_task
 
 
+def ordered_pending_tasks(tasks, state):
+    done_ids = set(state.get("done", []))
+    resumable_tasks = []
+    fresh_tasks = []
+
+    for task in tasks:
+        if task["done_in_file"]:
+            continue
+
+        if task["id"] in done_ids:
+            continue
+
+        if task["in_progress_in_file"]:
+            resumable_tasks.append(task)
+        else:
+            fresh_tasks.append(task)
+
+    return resumable_tasks + fresh_tasks
+
+
 def choose_exhausted_tasks(tasks, state):
-    candidate = preferred_pending_task(tasks, state)
-    if candidate is None:
-        return []
+    exhausted = []
 
-    fails = state["failed"].get(candidate["id"], 0)
-    if fails >= MAX_FAILS_PER_TASK:
-        return [candidate]
+    for task in ordered_pending_tasks(tasks, state):
+        fails = state["failed"].get(task["id"], 0)
+        if fails >= MAX_FAILS_PER_TASK:
+            exhausted.append(task)
 
-    return []
+    return exhausted
 
 
 def reconcile_state_with_todo(state, tasks):
@@ -1359,8 +1395,8 @@ def print_batch_preview(tasks, limit=5):
 def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug_dir, toolchain_bug_repro_dir):
     todo_path = todo_label(root, todo_file)
     project_root = path_label(root, root)
-    current_task = summarize_tasks(runnable_tasks, limit=1)
-    blocked_preview = summarize_tasks(exhausted_tasks, limit=1)
+    current_task = summarize_tasks(runnable_tasks, limit=10)
+    blocked_preview = summarize_tasks(exhausted_tasks, limit=10)
     toolchain_bug_dir_label = path_label(root, toolchain_bug_dir)
     toolchain_bug_repro_dir_label = path_label(root, toolchain_bug_repro_dir)
     git_repo_note = "是" if is_git_repo(root) else "否"
@@ -1378,31 +1414,32 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
 {git_repo_note}
 
 目标：
-优先恢复 todo 中最前面的 `[~]` 任务；如果没有 `[~]`，再处理最前面的 `[ ]` 任务。本次运行只处理这 1 个当前任务。
+优先恢复 todo 中已有的 `[~]` 任务，再处理新的 `[ ]` 任务；在保证质量、验证和提交纪律的前提下，本次运行要尽量多完成上面列出的可推进任务，而不是只做 1 个就停。
 
 当前任务数：{len(runnable_tasks)}
-当前因失败次数达到上限而阻塞的前序任务数：{len(exhausted_tasks)}
+当前因失败次数达到上限而暂时跳过的任务数：{len(exhausted_tasks)}
 
-本轮唯一任务：
+本轮可推进任务（按优先级顺序展示）：
 {current_task}
 
-当前阻塞并停止后续推进的任务：
+当前已达到失败上限、需要暂时跳过的任务：
 {blocked_preview}
 
 要求：
 1. 直接读取并更新 `{todo_path}`，把它当作任务真实来源。
-2. 只处理上面列出的这个当前任务；不要顺手推进任何后续 todo 任务。
-3. 如果 todo 里存在 `[~]`，必须优先继续该恢复任务；只有没有 `[~]` 时，才处理新的 `[ ]` 任务。如果当前任务阻塞、失败或暂时做不完，保持它为 `[~]`，结束本轮，不得跳过到后续任务。
-4. 对代码实现类任务强制执行 TDD：先写或补最小 failing test，再运行它确认失败，然后实现最小改动让它通过，最后做必要的重构和回归。
-5. 优先复用项目里已有的测试、构建、lint、benchmark 入口；如果缺少测试基座而某个 todo 明确要求补齐，就先补最小可运行的项目级测试基座再继续。
-6. 不允许作弊或偷工减料：不要用 stub、假实现、只对当前测试或 fixture 生效的硬编码、跳过断言/验证、注释掉失败路径、吞掉错误、伪造结果、伪造提交，或任何“看起来完成但实际没实现”的手段来冒充完成。
-7. 最终交付必须是完整实现，不是“最小能过测试”的半成品。red/green 阶段可以先做最小改动定位问题，但结束前必须补齐必要的边界处理、错误处理、兼容性、集成逻辑和验收标准要求。
-8. 必须考虑代码性能和资源开销：选择合理的数据结构与算法，避免明显的重复扫描、重复分配、不必要拷贝、无界缓存增长或其他可预见性能退化；如果当前方案有明显性能风险，先修正设计再提交。
-9. 如果当前任务过大，宁可拆分复杂任务也不要提交半成品；可以在 todo 中把剩余工作拆成紧跟当前任务的更具体后续 `[ ]` 子任务，并在总结中说明拆分方案，但不得把部分实现冒充为完成。
-10. 只有在当前任务真正完成并且相关验证通过后，才把对应项改成 `[x]`，并且保留原任务文本，不要改写任务描述。
-11. 对当前任务暂时做不完时保持 `[~]`，并在总结中说明阻塞原因。
-12. 修改代码后必须运行相关测试、构建或最小必要验证，并且这些验证必须实际通过；只有验证通过后才允许创建提交。输出里要说明执行了哪些验证，以及 TDD 的 red/green 分别用了什么命令。如果某个验证只是 skip、mock、空跑或未覆盖真实行为，它不足以证明任务完成，你必须补充更真实的验证。
-13. 如果怀疑遇到了项目工具链 bug（例如编译器、解释器、构建系统、测试运行器、包管理器本身的问题），必须在继续前把 bug 记录下来：
+2. 以上任务按这个优先级顺序推进：先处理 `[~]` 恢复任务，再处理新的 `[ ]` 任务；同类任务尽量保持 todo 中的原始顺序。
+3. 不要只做第一个任务就停。当前一个任务真正完成后，继续推进后面的可推进任务；如果某个任务被明确阻塞，保持它为 `[~]` 并写进 `blocked`，然后继续尝试后面彼此独立、不会被它直接破坏的任务。
+4. 如果后续任务显然依赖前一个未完成任务，先不要硬做依赖项；只有在确认后续任务独立可推进时，才继续处理它。
+5. 对代码实现类任务强制执行 TDD：先写或补最小 failing test，再运行它确认失败，然后实现最小改动让它通过，最后做必要的重构和回归。
+6. 优先复用项目里已有的测试、构建、lint、benchmark 入口；如果缺少测试基座而某个 todo 明确要求补齐，就先补最小可运行的项目级测试基座再继续。
+7. 不允许作弊或偷工减料：不要用 stub、假实现、只对当前测试或 fixture 生效的硬编码、跳过断言/验证、注释掉失败路径、吞掉错误、伪造结果、伪造提交，或任何“看起来完成但实际没实现”的手段来冒充完成。
+8. 最终交付必须是完整实现，不是“最小能过测试”的半成品。red/green 阶段可以先做最小改动定位问题，但结束前必须补齐必要的边界处理、错误处理、兼容性、集成逻辑和验收标准要求。
+9. 必须考虑代码性能和资源开销：选择合理的数据结构与算法，避免明显的重复扫描、重复分配、不必要拷贝、无界缓存增长或其他可预见性能退化；如果当前方案有明显性能风险，先修正设计再提交。
+10. 如果某个任务过大，宁可拆分复杂任务也不要提交半成品；可以在 todo 中把剩余工作拆成紧跟当前任务的更具体后续 `[ ]` 子任务，并在总结中说明拆分方案，但不得把部分实现冒充为完成。
+11. 只有在某个任务真正完成并且相关验证通过后，才把对应项改成 `[x]`，并且保留原任务文本，不要改写任务描述。
+12. 对暂时做不完的任务保持 `[~]`，并在总结中说明阻塞原因；但不要因为一个阻塞任务就放弃本轮其余可独立完成的任务。
+13. 修改代码后必须运行相关测试、构建或最小必要验证，并且这些验证必须实际通过；只有验证通过后才允许创建提交。输出里要说明执行了哪些验证，以及 TDD 的 red/green 分别用了什么命令。如果某个验证只是 skip、mock、空跑或未覆盖真实行为，它不足以证明任务完成，你必须补充更真实的验证。
+14. 如果怀疑遇到了项目工具链 bug（例如编译器、解释器、构建系统、测试运行器、包管理器本身的问题），必须在继续前把 bug 记录下来：
    - 先把问题缩减成最小可复现代码或最小可复现输入。
    - 把复现文件写到 `{toolchain_bug_repro_dir_label}/` 下，文件名用时间戳加短描述，扩展名按项目实际类型决定。
    - 把 bug 报告写到 `{toolchain_bug_dir_label}/` 下，文件名与 repro 对应，后缀 `.md`。
@@ -1417,27 +1454,27 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
      `## Notes`
    - `## Repro File` 小节下一行只放 repro 文件路径，并用反引号包起来。
    - `## Repro Code` 小节必须包含一个 fenced code block，内容要和 repro 文件内容一致；语言标记可按文件类型填写，也可以留空。
-   - 被该工具链 bug 阻塞的当前 todo 任务必须留在 `[~]`，并写进 `blocked`。
-14. 如果当前目录是 git 仓库，并且你在本轮完成了当前任务或新增了当前任务相关的工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的当前任务留给下一轮。
-15. 提交要求：
-   - 当前任务最多创建一个普通提交；不要把多个 todo 任务合并到同一次提交。
+   - 被该工具链 bug 阻塞的任务必须留在 `[~]`，并写进 `blocked`。
+15. 如果当前目录是 git 仓库，并且你在本轮完成了某个任务或新增了该任务相关的工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的任务留给下一轮。
+16. 提交要求：
+   - 可以在一轮里创建多个普通提交，但每个 todo 任务最多对应一个提交；不要把多个 todo 任务合并到同一次提交。
    - 提交消息要自然、简洁，能概括当前任务的真实改动，不要使用机械化模板。
-   - 只 stage 当前任务直接相关的文件；如果工作区里有无关脏改动，不要把它们一起提交。
+   - 每次只 stage 当前要提交的那个任务直接相关的文件；如果工作区里有无关脏改动，不要把它们一起提交。
    - 不要 amend 既有提交。
-16. 如果项目不是 git 仓库，也继续完成任务，并把 `commits` 留空数组。
-17. 不要回退用户已有改动，不要执行 destructive git 操作，也不要扩大到和这个 todo 无关的工作。
-18. 结束前必须输出一行严格单行结果，要求：
+17. 如果项目不是 git 仓库，也继续完成任务，并把 `commits` 留空数组。
+18. 不要回退用户已有改动，不要执行 destructive git 操作，也不要扩大到和这个 todo 无关的工作。
+19. 结束前必须输出一行严格单行结果，要求：
     - 这一行必须以 `{RESULT_PREFIX}` 开头
     - 前缀后面紧跟一个单行 JSON
     - JSON 示例：{{"completed":["任务1"],"blocked":["任务2"],"deferred":["任务3"],"toolchain_bugs":[".agent/toolchain-bugs/bug-report.md"],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
-- completed：只填写本次真正完成、并且已经在 todo 文件中勾选的当前任务文本
-- blocked：只填写本次尝试过但暂时无法完成的当前任务文本
-- deferred：默认使用空数组；不要把后续任务写进这里
-- toolchain_bugs：本次新增或更新的当前任务相关工具链 bug 报告 markdown 路径
-- commits：本次为当前任务新创建的 git commit 哈希，短哈希或长哈希都可以；非 git 项目时用空数组
-- verification：当前任务在提交前实际运行且通过的验证命令，按执行顺序填写；如果 `completed` 非空，这里必须至少有一条
+- completed：填写本次真正完成、并且已经在 todo 文件中勾选的任务文本，可以有多个
+- blocked：填写本次尝试过但暂时无法完成的任务文本，可以有多个
+- deferred：默认使用空数组；不要把没有实际尝试的后续任务写进这里
+- toolchain_bugs：本次新增或更新的任务相关工具链 bug 报告 markdown 路径
+- commits：本次新创建的 git commit 哈希，短哈希或长哈希都可以；非 git 项目时用空数组
+- verification：本次在提交前实际运行且通过的验证命令，按执行顺序填写；如果 `completed` 非空，这里必须至少有一条
 - 没有内容时使用空数组
 """
 
@@ -1471,11 +1508,12 @@ todo 文件：
 
 要求：
 1. 先检查当前 git 状态和最近提交，确认哪些未提交改动属于上述任务或 bug 报告。
-2. 先重新运行与列表中第一个待补提交任务直接相关的验证命令，确认它们通过后，再只 stage 相关文件并立即创建一个清晰、自然的普通提交。
-3. 不要为了补提交而作弊或掩盖未完成工作：如果现有改动仍是半成品、靠硬编码或跳过验证过关、存在明显性能问题，先继续修正或恢复 todo 状态，不要创建“表面完成”的提交。
-4. 不要继续实现新的 todo 任务，不要扩大工作范围，不要把多个 todo 任务合并进同一个补提交，也不要把无关脏改动一起提交。
-5. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[~]` 或修正相关文件，再把这次修正提交掉。
-6. 结束前必须输出一行严格单行结果，要求：
+2. 按列表顺序处理这些待补提交任务；对每个任务先重新运行它直接相关的验证命令，确认通过后，再只 stage 相关文件并立即创建一个清晰、自然的普通提交。
+3. 如果只有 toolchain bug 报告待提交，也要先验证 repro 和报告内容仍然匹配，再单独提交相关文件。
+4. 不要为了补提交而作弊或掩盖未完成工作：如果现有改动仍是半成品、靠硬编码或跳过验证过关、存在明显性能问题，先继续修正或恢复 todo 状态，不要创建“表面完成”的提交。
+5. 不要继续实现新的 todo 任务，不要扩大工作范围，不要把多个 todo 任务合并进同一个补提交，也不要把无关脏改动一起提交。
+6. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[~]` 或修正相关文件，再把这次修正提交掉。
+7. 结束前必须输出一行严格单行结果，要求：
    - 这一行必须以 `{RESULT_PREFIX}` 开头
    - 前缀后面紧跟一个单行 JSON
    - JSON 示例：{{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
@@ -1499,8 +1537,8 @@ def build_dirty_worktree_recovery_prompt(
 ):
     todo_path = todo_label(root, todo_file)
     project_root = path_label(root, root)
-    current_task = summarize_tasks(runnable_tasks, limit=1)
-    blocked_preview = summarize_tasks(exhausted_tasks, limit=1)
+    current_task = summarize_tasks(runnable_tasks, limit=10)
+    blocked_preview = summarize_tasks(exhausted_tasks, limit=10)
     dirty_preview = summarize_strings(dirty_lines, limit=50)
 
     return f"""
@@ -1515,7 +1553,7 @@ def build_dirty_worktree_recovery_prompt(
 todo 文件：
 {todo_path}
 
-当前任务：
+当前待恢复任务：
 {current_task}
 
 当前阻塞并停止后续推进的任务：
@@ -1525,29 +1563,30 @@ todo 文件：
 {dirty_preview}
 
 要求：
-1. 先检查当前 git 状态、todo 勾选和未提交文件，确认这些现有改动与“当前任务”的关系。
-2. 绝对不要开始新的 todo 任务；只允许围绕上面的当前任务继续收尾、补验证、补实现或补提交。
+1. 先检查当前 git 状态、todo 勾选和未提交文件，确认这些现有改动与上面这批任务的关系。
+2. 绝对不要开始新的 todo 任务；只允许围绕上面的这批待恢复任务继续收尾、补验证、补实现或补提交。
 3. 不允许作弊或表面修补：不要靠硬编码、临时 stub、跳过验证、关闭断言、伪造结果或其他取巧手段让当前任务“看起来通过”。
 4. 当前改动必须收敛到完整实现而不是“刚好能过”的半成品；如发现任务过大，宁可保持 `[~]` 并拆分剩余工作，也不要提交未完整实现的结果。
 5. 先重新运行当前任务直接相关的验证命令；如果验证失败，继续修改当前任务相关内容直到通过，或明确判定当前任务阻塞。
 6. 必须考虑代码性能和资源开销；如果当前未提交实现有明显性能缺陷或可预见退化，先修正再提交。
-7. 只有在当前任务验证通过后，才允许创建提交；提交后外层循环才会继续处理下一个任务。
-8. 如果当前任务还没真正完成，就不要为了“清理工作区”而做部分提交；保持它是当前任务的一部分继续迭代。
-9. 如果验证通过，只 stage 当前任务直接相关的现有文件，创建一个清晰、自然的普通提交。
-10. 不要把当前任务和后续任务合并到同一个提交，也不要引入新的无关修改。
-11. 不要回退用户已有改动，不要执行 destructive git 操作。
-12. 结束前必须输出一行严格单行结果，要求：
+7. 尽量把这批任务里能完成的任务都完成；某个任务确认阻塞时，保持它为 `[~]` 并写进 `blocked`，然后继续处理后面独立可推进的任务。
+8. 只有在某个任务验证通过后，才允许创建该任务对应的提交；如果一轮里补完了多个任务，可以创建多个提交，但不要把多个 todo 任务合并进同一个提交。
+9. 如果某个任务还没真正完成，就不要为了“清理工作区”而做部分提交；保持它是当前任务的一部分继续迭代。
+10. 如果验证通过，只 stage 当前正在提交的那个任务直接相关的现有文件，创建一个清晰、自然的普通提交。
+11. 不要把当前任务和后续任务合并到同一个提交，也不要引入新的无关修改。
+12. 不要回退用户已有改动，不要执行 destructive git 操作。
+13. 结束前必须输出一行严格单行结果，要求：
    - 这一行必须以 `{RESULT_PREFIX}` 开头
    - 前缀后面紧跟一个单行 JSON
    - JSON 示例：{{"completed":[],"blocked":["任务文本"],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
-- `completed`：如果你让当前任务真正完成并在 todo 中勾选，填写当前任务文本；否则用空数组
-- `blocked`：如果当前任务仍然无法通过验证或暂时不能完成，填写当前任务文本或阻塞说明
+- `completed`：如果你让某些任务真正完成并在 todo 中勾选，填写这些任务文本；否则用空数组
+- `blocked`：如果某些任务仍然无法通过验证或暂时不能完成，填写这些任务文本或阻塞说明
 - `deferred`：默认使用空数组
 - `toolchain_bugs`：只有这次新增或更新了 bug 报告时才填写
-- `commits`：这次为当前任务创建的新提交哈希
-- `verification`：当前任务提交前实际运行且通过的验证命令；如果 `completed` 或 `commits` 非空，这里必须至少有一条
+- `commits`：这次为这些任务创建的新提交哈希
+- `verification`：这些任务提交前实际运行且通过的验证命令；如果 `completed` 或 `commits` 非空，这里必须至少有一条
 """
 
 
@@ -2084,7 +2123,7 @@ def ensure_pending_commit(state):
 
 def queue_pending_commit(state, completed_tasks, toolchain_bug_reports):
     pending_commit = ensure_pending_commit(state)
-    pending_commit["tasks"] = [task["text"] for task in completed_tasks[:1]]
+    pending_commit["tasks"] = [task["text"] for task in completed_tasks]
     pending_commit["toolchain_bug_reports"] = list(toolchain_bug_reports)
     pending_commit["attempts"] = 0
     pending_commit["updated_at"] = now()
@@ -2095,7 +2134,10 @@ def recovery_task_list(pending_commit):
     task_text = "提交上轮未提交改动"
     pending_tasks = pending_commit.get("tasks", [])
     if pending_tasks:
-        task_text = f"提交上轮未提交改动：{pending_tasks[0]}"
+        if len(pending_tasks) == 1:
+            task_text = f"提交上轮未提交改动：{pending_tasks[0]}"
+        else:
+            task_text = f"提交上轮未提交改动：{pending_tasks[0]} 等 {len(pending_tasks)} 项"
 
     return [
         {
@@ -2164,6 +2206,13 @@ def run_pending_commit_recovery(paths, state):
     if commits:
         print(f"[agent] recovery committed: {len(commits)}")
         merge_unique_strings(state.setdefault("commits", []), commits)
+        remaining_dirty = git_status_lines(paths["root"])
+        if remaining_dirty:
+            print("[agent] recovery committed but worktree is still dirty; will continue recovery")
+            state["current"] = None
+            save_state(paths["state_file"], state)
+            return False
+
         state["pending_commit"] = None
         state["current"] = None
         save_state(paths["state_file"], state)
@@ -2187,16 +2236,16 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
     if not dirty_lines:
         return True
 
-    recovery_tasks = runnable_tasks[:1]
+    recovery_tasks = list(runnable_tasks)
     recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
     batch_head_before = git_head_commit(paths["root"])
     state["current"] = {
         "project_root": path_label(paths["root"], paths["root"]),
         "todo_file": todo_label(paths["root"], paths["todo_file"]),
         "started_at": now(),
-        "task_count": 1,
+        "task_count": len(recovery_tasks),
         "current_task": recovery_tasks[0]["text"],
-        "tasks": [recovery_tasks[0]["text"]],
+        "tasks": [task["text"] for task in recovery_tasks[:20]],
         "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
         "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
         "git_repo": True,
@@ -2211,11 +2260,13 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
 
     print("[agent] continue current task iteration from existing uncommitted changes")
     print(f"[agent] current task: {recovery_tasks[0]['text']}")
+    print(f"[agent] recovery batch: {len(recovery_tasks)} task(s)")
+    print_batch_preview(recovery_tasks)
     print(f"[agent] dirty entries: {len(dirty_lines)}")
     for index, line in enumerate(dirty_lines[:10], start=1):
         print(f"[agent]   {index}. {line}")
 
-    set_tasks_marker(paths["todo_file"], recovery_tasks, "~")
+    set_tasks_marker(paths["todo_file"], recovery_tasks[:1], "~")
     ok, log_file = run_codex(
         paths["root"],
         paths["todo_file"],
@@ -2314,6 +2365,22 @@ def task_for_text(task_text, tasks):
             return task
 
     return None
+
+
+def current_batch_tasks(state, tasks):
+    current = state.get("current")
+    if not isinstance(current, dict):
+        return []
+
+    current_tasks = match_tasks_by_text(normalize_string_list(current.get("tasks", [])), tasks)
+    if current_tasks:
+        return current_tasks
+
+    current_task = task_for_text(current.get("current_task"), tasks)
+    if current_task is None:
+        return []
+
+    return [current_task]
 
 
 def match_tasks_by_text(task_texts, tasks):
@@ -2420,10 +2487,7 @@ def main():
             runnable_tasks = choose_runnable_tasks(tasks_before, state)
             exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
 
-            recovery_tasks = list(runnable_tasks[:1])
-            current_state_task = task_for_text((state.get("current") or {}).get("current_task"), tasks_before)
-            if current_state_task is not None:
-                recovery_tasks = [current_state_task]
+            recovery_tasks = current_batch_tasks(state, tasks_before) or list(runnable_tasks)
 
             if git_repo and has_uncommitted_changes(paths["root"]) and recovery_tasks:
                 recovered = run_dirty_worktree_recovery(paths, state, recovery_tasks, exhausted_tasks)

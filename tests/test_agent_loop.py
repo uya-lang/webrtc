@@ -60,7 +60,7 @@ class AgentLoopSandboxTests(unittest.TestCase):
 
 
 class AgentLoopResumeTests(unittest.TestCase):
-    def test_runnable_prefers_first_in_progress_task_for_resume(self):
+    def test_runnable_prioritizes_in_progress_tasks_but_keeps_batch_open(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -76,9 +76,12 @@ class AgentLoopResumeTests(unittest.TestCase):
             state = module.empty_state(root, todo_file)
             runnable = module.choose_runnable_tasks(tasks, state)
 
-            self.assertEqual([task["text"] for task in runnable], ["resume me first"])
+            self.assertEqual(
+                [task["text"] for task in runnable],
+                ["resume me first", "brand new task", "later task"],
+            )
 
-    def test_exhausted_prefers_in_progress_task_over_new_unchecked_task(self):
+    def test_exhausted_tasks_do_not_block_later_runnable_work(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -98,8 +101,29 @@ class AgentLoopResumeTests(unittest.TestCase):
             runnable = module.choose_runnable_tasks(tasks, state)
             exhausted = module.choose_exhausted_tasks(tasks, state)
 
-            self.assertEqual(runnable, [])
+            self.assertEqual(
+                [task["text"] for task in runnable],
+                ["brand new task", "later task"],
+            )
             self.assertEqual([task["text"] for task in exhausted], ["blocked resume task"])
+
+    def test_runnable_batch_respects_configured_limit(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None, "MAX_RUNNABLE_TASKS": "2"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text(
+                "- [~] resume me first\n- [ ] second task\n- [ ] third task\n",
+                encoding="utf-8",
+            )
+
+            tasks = module.parse_todo(todo_file)
+            state = module.empty_state(root, todo_file)
+            runnable = module.choose_runnable_tasks(tasks, state)
+
+            self.assertEqual([task["text"] for task in runnable], ["resume me first", "second task"])
 
 
 class AgentLoopPromptTests(unittest.TestCase):
@@ -127,6 +151,9 @@ class AgentLoopPromptTests(unittest.TestCase):
             self.assertIn("必须考虑代码性能和资源开销", prompt)
             self.assertIn("宁可拆分复杂任务也不要提交半成品", prompt)
             self.assertIn("它不足以证明任务完成", prompt)
+            self.assertIn("尽量多完成上面列出的可推进任务", prompt)
+            self.assertIn("不要只做第一个任务就停", prompt)
+            self.assertIn("不要因为一个阻塞任务就放弃本轮其余可独立完成的任务", prompt)
 
     def test_dirty_recovery_prompt_requires_full_fix_not_surface_cleanup(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
@@ -377,6 +404,54 @@ class AgentLoopKillTests(unittest.TestCase):
 
             self.assertTrue(changed)
             self.assertEqual(todo_file.read_text(encoding="utf-8"), "- [~] still running\n")
+
+    def test_queue_pending_commit_keeps_all_completed_tasks(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        state = module.empty_state(Path("/tmp/project"), Path("/tmp/project/docs/todo.md"))
+        completed_tasks = [
+            {"text": "task one"},
+            {"text": "task two"},
+        ]
+
+        module.queue_pending_commit(state, completed_tasks, ["bug.md"])
+
+        self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
+        self.assertEqual(state["pending_commit"]["toolchain_bug_reports"], ["bug.md"])
+
+    def test_pending_commit_recovery_stays_open_when_worktree_remains_dirty(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [x] task one\n- [x] task two\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            state = module.empty_state(root, todo_file)
+            state["pending_commit"] = {
+                "tasks": ["task one", "task two"],
+                "toolchain_bug_reports": [],
+                "attempts": 0,
+                "updated_at": "2026-05-31 12:00:00",
+            }
+
+            with patch.object(module, "git_head_commit", return_value="before"):
+                with patch.object(module, "run_codex", return_value=(True, root / "fake.log")):
+                    with patch.object(
+                        module,
+                        "parse_agent_result",
+                        return_value={"commits": ["abc123"], "verification": ["make test"]},
+                    ):
+                        with patch.object(module, "collect_valid_commits", return_value=["abc123"]):
+                            with patch.object(module, "collect_new_commits", return_value=[]):
+                                with patch.object(module, "git_status_lines", return_value=[" M src/example.uya"]):
+                                    recovered = module.run_pending_commit_recovery(paths, state)
+
+            self.assertFalse(recovered)
+            self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
+            self.assertIn("abc123", state["commits"])
 
     def test_kill_stops_runner_and_codex_and_clears_state(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
