@@ -1,0 +1,31 @@
+{
+  "algorithm": "hmac-sha1",
+  "style": "wycheproof-like",
+  "source": "derived from RFC 2202 style cases",
+  "cases": [
+    {
+      "id": "sha1-modified-tag",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "message_ascii": "Hi There",
+      "tag_hex": "b617318655057264e28bc0b6fb378c8ef146be01",
+      "valid": false,
+      "flags": ["ModifiedTag"]
+    },
+    {
+      "id": "sha1-modified-message",
+      "key_ascii": "Jefe",
+      "message_ascii": "what do ya want for nothing!",
+      "tag_hex": "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
+      "valid": false,
+      "flags": ["ModifiedMessage"]
+    },
+    {
+      "id": "sha1-truncated-tag",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "tag_hex": "125d7342b9ac11cd91a39af48aa17b4f63f1",
+      "valid": false,
+      "flags": ["TruncatedTag"]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "algorithm": "sha-1",
+  "source": "FIPS 180-4",
+  "cases": [
+    {
+      "id": "fips180-4-empty",
+      "input_ascii": "",
+      "digest_hex": "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+    },
+    {
+      "id": "fips180-4-abc",
+      "input_ascii": "abc",
+      "digest_hex": "a9993e364706816aba3e25717850c26c9cd0d89d"
+    },
+    {
+      "id": "fips180-4-long",
+      "input_ascii": "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+      "digest_hex": "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+    }
+  ]
+}

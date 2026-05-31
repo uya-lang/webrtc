@@ -1,0 +1,24 @@
+{
+  "algorithm": "hmac-sha256",
+  "source": "RFC 4231",
+  "cases": [
+    {
+      "id": "rfc4231-1",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "message_ascii": "Hi There",
+      "tag_hex": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    },
+    {
+      "id": "rfc4231-2",
+      "key_ascii": "Jefe",
+      "message_ascii": "what do ya want for nothing?",
+      "tag_hex": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    },
+    {
+      "id": "rfc4231-3",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "tag_hex": "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"
+    }
+  ]
+}

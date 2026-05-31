@@ -1,0 +1,31 @@
+{
+  "algorithm": "hmac-sha256",
+  "style": "wycheproof-like",
+  "source": "derived from RFC 4231 style cases",
+  "cases": [
+    {
+      "id": "sha256-modified-tag",
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "message_ascii": "Hi There",
+      "tag_hex": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff0",
+      "valid": false,
+      "flags": ["ModifiedTag"]
+    },
+    {
+      "id": "sha256-modified-message",
+      "key_ascii": "Jefe",
+      "message_ascii": "what do ya want for nothing!",
+      "tag_hex": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+      "valid": false,
+      "flags": ["ModifiedMessage"]
+    },
+    {
+      "id": "sha256-truncated-tag",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "tag_hex": "773ea91e36800e46854db8ebd09181a72959098b3ef8c122",
+      "valid": false,
+      "flags": ["TruncatedTag"]
+    }
+  ]
+}
