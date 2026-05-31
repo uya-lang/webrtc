@@ -7,6 +7,7 @@ cd "$repo_root"
 test -f src/webrtc_crypto_test_main.uya
 test -d src/webrtc/crypto
 test -f src/webrtc/crypto/aes.uya
+test -f src/webrtc/crypto/gcm.uya
 test -f src/webrtc/crypto/ghash.uya
 test -f src/webrtc/crypto/hash.uya
 test -f src/webrtc/crypto/hmac.uya
@@ -28,9 +29,12 @@ rg -Fq "crypto_test_check_sha256_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_hmac_sha1_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_hmac_sha256_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_aes_ctr_vectors" src/webrtc_crypto_test_main.uya
+rg -Fq "crypto_test_check_aes_gcm_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_ghash_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "export fn crypto_aes_key_schedule_init" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_aes_ctr_xor" src/webrtc/crypto/aes.uya
+rg -Fq "export fn crypto_aes_gcm_encrypt" src/webrtc/crypto/gcm.uya
+rg -Fq "export fn crypto_aes_gcm_decrypt_and_verify" src/webrtc/crypto/gcm.uya
 rg -Fq "export fn crypto_ghash_multiply" src/webrtc/crypto/ghash.uya
 rg -Fq "export fn crypto_ghash_digest" src/webrtc/crypto/ghash.uya
 rg -Fq "export fn crypto_sha1_digest" src/webrtc/crypto/hash.uya

@@ -198,7 +198,7 @@
 - [x] 实现 HMAC-SHA1。
 - [x] 实现 HMAC-SHA256。
 - [x] 实现 AES-CTR。
-- [ ] 实现 AES-GCM。
+- [x] 实现 AES-GCM。
 - [x] 实现 GHASH。
 - [ ] 实现 HKDF / TLS PRF 所需函数。
 - [ ] 实现 P-256 field arithmetic。

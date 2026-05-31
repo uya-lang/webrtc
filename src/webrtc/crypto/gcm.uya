@@ -1,0 +1,256 @@
+// webrtc.crypto.gcm - Phase 7 AES-GCM primitive
+// 模块路径：src/webrtc/crypto/gcm.uya → use webrtc.crypto.gcm;
+
+use webrtc.binary;
+use webrtc.crypto.aes;
+use webrtc.crypto.ghash;
+use webrtc.errors;
+
+export const CRYPTO_AES_GCM_TAG_BYTES: usize = 16usize;
+
+fn crypto_gcm_xor_block(dst: &[byte], src: &[byte]) void {
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        dst[index] = dst[index] ^ src[index];
+        index = index + 1usize;
+    }
+}
+
+fn crypto_gcm_inc32(counter: &[byte]) void {
+    var index: usize = CRYPTO_GHASH_BLOCK_BYTES;
+    while index > 12usize {
+        index = index - 1usize;
+        counter[index] = counter[index] + (1 as byte);
+        if counter[index] != 0 as byte {
+            return;
+        }
+    }
+}
+
+fn crypto_gcm_ghash_update(h: &[byte], accumulator: &[byte], data: &[byte]) !void {
+    var block: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var next: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var offset: usize = 0usize;
+
+    while offset < data.len {
+        var index: usize = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES {
+            block[index] = 0 as byte;
+            index = index + 1usize;
+        }
+        index = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES && offset + index < data.len {
+            block[index] = data[offset + index];
+            index = index + 1usize;
+        }
+
+        crypto_gcm_xor_block(accumulator, block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+        try crypto_ghash_multiply(h, accumulator, next[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+        index = 0usize;
+        while index < CRYPTO_GHASH_BLOCK_BYTES {
+            accumulator[index] = next[index];
+            index = index + 1usize;
+        }
+
+        offset = offset + CRYPTO_GHASH_BLOCK_BYTES;
+    }
+}
+
+fn crypto_gcm_write_lengths_block(aad_len: usize, text_len: usize, block: &[byte]) !void {
+    if block.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        block[index] = 0 as byte;
+        index = index + 1usize;
+    }
+    try write_be_u64(block[0:8], (aad_len as u64) * 8u64);
+    try write_be_u64(block[8:8], (text_len as u64) * 8u64);
+}
+
+fn crypto_gcm_derive_hash_subkey(schedule: &CryptoAesKeySchedule, out: &[byte]) !void {
+    if out.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+    var zero_block: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    return crypto_aes_encrypt_block(schedule, zero_block[0:CRYPTO_GHASH_BLOCK_BYTES], out);
+}
+
+fn crypto_gcm_compute_j0(h: &[byte], nonce: &[byte], out: &[byte]) !void {
+    if h.len != CRYPTO_GHASH_BLOCK_BYTES || out.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        out[index] = 0 as byte;
+        index = index + 1usize;
+    }
+
+    if nonce.len == 12usize {
+        index = 0usize;
+        while index < 12usize {
+            out[index] = nonce[index];
+            index = index + 1usize;
+        }
+        out[15] = 1 as byte;
+        return;
+    }
+
+    try crypto_gcm_ghash_update(h, out[0:CRYPTO_GHASH_BLOCK_BYTES], nonce);
+    var length_block: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_gcm_write_lengths_block(0usize, nonce.len, length_block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    crypto_gcm_xor_block(out[0:CRYPTO_GHASH_BLOCK_BYTES], length_block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    var next: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_ghash_multiply(h, out[0:CRYPTO_GHASH_BLOCK_BYTES], next[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    index = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        out[index] = next[index];
+        index = index + 1usize;
+    }
+}
+
+fn crypto_gcm_compute_auth_tag_mask(
+    schedule: &CryptoAesKeySchedule,
+    h: &[byte],
+    j0: &[byte],
+    aad: &[byte],
+    ciphertext: &[byte],
+    out: &[byte],
+) !void {
+    if out.len < CRYPTO_GHASH_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var accumulator: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_gcm_ghash_update(h, accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], aad);
+    try crypto_gcm_ghash_update(h, accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], ciphertext);
+
+    var length_block: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_gcm_write_lengths_block(aad.len, ciphertext.len, length_block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    crypto_gcm_xor_block(accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], length_block[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    var s: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_ghash_multiply(h, accumulator[0:CRYPTO_GHASH_BLOCK_BYTES], s[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+    var encrypted_j0: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_aes_encrypt_block(schedule, j0, encrypted_j0[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        out[index] = encrypted_j0[index] ^ s[index];
+        index = index + 1usize;
+    }
+}
+
+fn crypto_gcm_ctr_crypt(schedule: &CryptoAesKeySchedule, initial_counter: &[byte], input: &[byte], out: &[byte]) !void {
+    if initial_counter.len != CRYPTO_GHASH_BLOCK_BYTES || out.len < input.len {
+        return error.InvalidPacket;
+    }
+
+    var counter: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var keystream: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        counter[index] = initial_counter[index];
+        index = index + 1usize;
+    }
+
+    var offset: usize = 0usize;
+    while offset < input.len {
+        try crypto_aes_encrypt_block(schedule, counter[0:CRYPTO_GHASH_BLOCK_BYTES], keystream[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+        var block_index: usize = 0usize;
+        while block_index < CRYPTO_GHASH_BLOCK_BYTES && offset + block_index < input.len {
+            out[offset + block_index] = input[offset + block_index] ^ keystream[block_index];
+            block_index = block_index + 1usize;
+        }
+
+        crypto_gcm_inc32(counter[0:CRYPTO_GHASH_BLOCK_BYTES]);
+        offset = offset + CRYPTO_GHASH_BLOCK_BYTES;
+    }
+}
+
+export fn crypto_aes_gcm_encrypt(
+    schedule: &CryptoAesKeySchedule,
+    nonce: &[byte],
+    aad: &[byte],
+    plaintext: &[byte],
+    ciphertext_out: &[byte],
+    tag_out: &[byte],
+) !void {
+    if schedule == null || nonce.len == 0usize || ciphertext_out.len < plaintext.len || tag_out.len < CRYPTO_AES_GCM_TAG_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var h: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var j0: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var counter: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var tag: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_gcm_derive_hash_subkey(schedule, h[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    try crypto_gcm_compute_j0(h[0:CRYPTO_GHASH_BLOCK_BYTES], nonce, j0[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        counter[index] = j0[index];
+        index = index + 1usize;
+    }
+    crypto_gcm_inc32(counter[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+    try crypto_gcm_ctr_crypt(schedule, counter[0:CRYPTO_GHASH_BLOCK_BYTES], plaintext, ciphertext_out);
+    try crypto_gcm_compute_auth_tag_mask(
+        schedule,
+        h[0:CRYPTO_GHASH_BLOCK_BYTES],
+        j0[0:CRYPTO_GHASH_BLOCK_BYTES],
+        aad,
+        ciphertext_out[0:plaintext.len],
+        tag[0:CRYPTO_GHASH_BLOCK_BYTES],
+    );
+
+    index = 0usize;
+    while index < CRYPTO_AES_GCM_TAG_BYTES {
+        tag_out[index] = tag[index];
+        index = index + 1usize;
+    }
+}
+
+export fn crypto_aes_gcm_decrypt_and_verify(
+    schedule: &CryptoAesKeySchedule,
+    nonce: &[byte],
+    aad: &[byte],
+    ciphertext: &[byte],
+    tag: &[byte],
+    plaintext_out: &[byte],
+) !void {
+    if schedule == null || nonce.len == 0usize || tag.len != CRYPTO_AES_GCM_TAG_BYTES || plaintext_out.len < ciphertext.len {
+        return error.InvalidPacket;
+    }
+
+    var h: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var j0: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var counter: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    var expected_tag: [byte: CRYPTO_GHASH_BLOCK_BYTES] = [];
+    try crypto_gcm_derive_hash_subkey(schedule, h[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    try crypto_gcm_compute_j0(h[0:CRYPTO_GHASH_BLOCK_BYTES], nonce, j0[0:CRYPTO_GHASH_BLOCK_BYTES]);
+    try crypto_gcm_compute_auth_tag_mask(
+        schedule,
+        h[0:CRYPTO_GHASH_BLOCK_BYTES],
+        j0[0:CRYPTO_GHASH_BLOCK_BYTES],
+        aad,
+        ciphertext,
+        expected_tag[0:CRYPTO_GHASH_BLOCK_BYTES],
+    );
+    if !constant_time_bytes_equal(expected_tag[0:CRYPTO_AES_GCM_TAG_BYTES], tag) {
+        return error.IntegrityCheckFailed;
+    }
+
+    var index: usize = 0usize;
+    while index < CRYPTO_GHASH_BLOCK_BYTES {
+        counter[index] = j0[index];
+        index = index + 1usize;
+    }
+    crypto_gcm_inc32(counter[0:CRYPTO_GHASH_BLOCK_BYTES]);
+
+    return crypto_gcm_ctr_crypt(schedule, counter[0:CRYPTO_GHASH_BLOCK_BYTES], ciphertext, plaintext_out);
+}

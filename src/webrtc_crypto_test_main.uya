@@ -1,5 +1,6 @@
 use libc.printf;
 use webrtc.crypto.aes;
+use webrtc.crypto.gcm;
 use webrtc.crypto.ghash;
 use webrtc.binary;
 use webrtc.crypto.hash;
@@ -272,6 +273,77 @@ fn crypto_test_check_ghash_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_aes_gcm_vectors() i32 {
+    var key: [byte: 16] = [];
+    var nonce: [byte: 12] = [];
+    var empty: [byte: 1] = [];
+    var zero_plaintext: [byte: 16] = [];
+    var ciphertext: [byte: 16] = [];
+    var recovered: [byte: 16] = [];
+    var tag: [byte: 16] = [];
+    var bad_tag: [byte: 16] = [];
+    var expected_tag_empty: [byte: 16] = [
+        0x58 as byte, 0xe2 as byte, 0xfc as byte, 0xce as byte, 0xfa as byte, 0x7e as byte, 0x30 as byte, 0x61 as byte,
+        0x36 as byte, 0x7f as byte, 0x1d as byte, 0x57 as byte, 0xa4 as byte, 0xe7 as byte, 0x45 as byte, 0x5a as byte,
+    ];
+    var expected_ciphertext: [byte: 16] = [
+        0x03 as byte, 0x88 as byte, 0xda as byte, 0xce as byte, 0x60 as byte, 0xb6 as byte, 0xa3 as byte, 0x92 as byte,
+        0xf3 as byte, 0x28 as byte, 0xc2 as byte, 0xb9 as byte, 0x71 as byte, 0xb2 as byte, 0xfe as byte, 0x78 as byte,
+    ];
+    var expected_tag_block: [byte: 16] = [
+        0xab as byte, 0x6e as byte, 0x47 as byte, 0xd4 as byte, 0x2c as byte, 0xec as byte, 0x13 as byte, 0xbd as byte,
+        0xf5 as byte, 0x3a as byte, 0x67 as byte, 0xb2 as byte, 0x12 as byte, 0x57 as byte, 0xbd as byte, 0xdf as byte,
+    ];
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+
+    if crypto_aes_key_schedule_init(&schedule, key[0:16]).error_id != 0 {
+        return 90;
+    }
+    if crypto_aes_gcm_encrypt(&schedule, nonce[0:12], empty[0:0], empty[0:0], ciphertext[0:0], tag[0:16]).error_id != 0 {
+        return 91;
+    }
+    if !constant_time_bytes_equal(tag[0:16], expected_tag_empty[0:16]) {
+        return 92;
+    }
+
+    if crypto_aes_gcm_encrypt(&schedule, nonce[0:12], empty[0:0], zero_plaintext[0:16], ciphertext[0:16], tag[0:16]).error_id != 0 {
+        return 93;
+    }
+    if !constant_time_bytes_equal(ciphertext[0:16], expected_ciphertext[0:16]) {
+        return 94;
+    }
+    if !constant_time_bytes_equal(tag[0:16], expected_tag_block[0:16]) {
+        return 95;
+    }
+    if crypto_aes_gcm_decrypt_and_verify(&schedule, nonce[0:12], empty[0:0], ciphertext[0:16], tag[0:16], recovered[0:16]).error_id != 0 {
+        return 96;
+    }
+    if !constant_time_bytes_equal(recovered[0:16], zero_plaintext[0:16]) {
+        return 97;
+    }
+
+    var index: usize = 0usize;
+    while index < 16usize {
+        bad_tag[index] = tag[index];
+        index = index + 1usize;
+    }
+    bad_tag[15] = bad_tag[15] ^ 0x01 as byte;
+    const bad_result: !void =
+        crypto_aes_gcm_decrypt_and_verify(
+            &schedule,
+            nonce[0:12],
+            empty[0:0],
+            ciphertext[0:16],
+            bad_tag[0:16],
+            recovered[0:16],
+        );
+    if bad_result.error_id != @error_id(error.IntegrityCheckFailed) {
+        return 98;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -319,6 +391,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_ghash_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_aes_gcm_vectors();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;
