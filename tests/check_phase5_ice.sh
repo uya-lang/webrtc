@@ -20,10 +20,12 @@ rg -Fq 'test "checklist rebuild sorts compatible pairs and seeds one waiting pai
 rg -Fq 'test "checklist rebuild filters incompatible pairs and selection is invalidated by candidate changes"' src/webrtc_ice_test.uya
 rg -Fq 'test "checklist rebuild rejects fixed pair capacity without leaving partial state"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check transaction builds authenticated binding requests and marks pair in progress"' src/webrtc_ice_test.uya
+rg -Fq 'test "role conflict request resolution follows RFC 8445 tie breaker rules"' src/webrtc_ice_test.uya
 rg -Fq 'test "regular nomination waits for a valid pair and marks a successful nomination"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check success response updates pair timing consent and validity"' src/webrtc_ice_test.uya
 rg -Fq 'test "aggressive nomination mode allows use-candidate on the first controlling check"' src/webrtc_ice_test.uya
-rg -Fq 'test "connectivity check error responses fail the pair and stale checklist transactions are rejected"' src/webrtc_ice_test.uya
+rg -Fq 'test "role conflict error responses switch roles refresh tie breaker and requeue the pair"' src/webrtc_ice_test.uya
+rg -Fq 'test "non-role-conflict error responses fail the pair and stale checklist transactions are rejected"' src/webrtc_ice_test.uya
 rg -Fq 'test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition upserts transport tuple and copies related metadata"' src/webrtc_ice_test.uya
 rg -Fq 'test "remote candidate addition keeps distinct component and transport tuples"' src/webrtc_ice_test.uya
@@ -71,9 +73,11 @@ rg -Fq "export const ICE_MAX_CANDIDATE_PAIRS" src/webrtc/ice/agent.uya
 rg -Fq "export const ICE_AGENT_ROLE_CONTROLLING" src/webrtc/ice/agent.uya
 rg -Fq "export const ICE_AGENT_STATE_NEW" src/webrtc/ice/agent.uya
 rg -Fq "export const ICE_MAX_CONNECTIVITY_CHECK_USERNAME_BYTES" src/webrtc/ice/agent.uya
+rg -Fq "export const ICE_STUN_ERROR_ROLE_CONFLICT" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceCredentials" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceConnectivityCheckTransaction" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceConnectivityCheckResult" src/webrtc/ice/agent.uya
+rg -Fq "export struct IceRoleConflictResult" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceAgent" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_credentials_set" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_credentials_is_configured" src/webrtc/ice/agent.uya
@@ -82,6 +86,7 @@ rg -Fq "export fn ice_agent_clear_checklist" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_clear_remote_candidates" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_add_remote_candidate" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_rebuild_checklist" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_resolve_role_conflict_request" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_connectivity_check_transaction_init" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_connectivity_check_build_binding_request" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_connectivity_check_handle_response" src/webrtc/ice/agent.uya

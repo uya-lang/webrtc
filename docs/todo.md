@@ -156,7 +156,7 @@
 - [x] 实现 connectivity check transaction。
 - [x] 实现 controlling / controlled role。
 - [x] 实现 nomination。
-- [ ] 实现 role conflict。
+- [x] 实现 role conflict。
 - [ ] 实现 selected pair。
 - [ ] 实现 consent freshness。
 - [ ] 实现 trickle ICE 状态。

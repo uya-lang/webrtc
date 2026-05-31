@@ -14,6 +14,7 @@ export const ICE_MAX_CANDIDATE_PAIRS: usize = 128;
 export const ICE_MAX_UFRAG_BYTES: usize = 32;
 export const ICE_MAX_PASSWORD_BYTES: usize = 256;
 export const ICE_MAX_CONNECTIVITY_CHECK_USERNAME_BYTES: usize = (ICE_MAX_UFRAG_BYTES * 2usize) + 1usize;
+export const ICE_STUN_ERROR_ROLE_CONFLICT: u16 = 487u16;
 
 export const ICE_AGENT_ROLE_UNKNOWN: u8 = 0u8;
 export const ICE_AGENT_ROLE_CONTROLLING: u8 = 1u8;
@@ -46,6 +47,7 @@ export struct IceConnectivityCheckTransaction {
     pair_index: u16 = ICE_CANDIDATE_INDEX_NONE,
     local_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE,
     remote_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE,
+    request_role: u8 = ICE_AGENT_ROLE_UNKNOWN,
     request_priority: u32 = 0u32,
     use_candidate: bool = false,
     sent_at_us: u64 = 0u64,
@@ -55,6 +57,11 @@ export struct IceConnectivityCheckTransaction {
 export struct IceConnectivityCheckResult {
     message_class: u8 = 0u8,
     error_code: u16 = 0u16,
+}
+
+export struct IceRoleConflictResult {
+    error_code: u16 = 0u16,
+    role_changed: bool = false,
 }
 
 export struct IceAgent {
@@ -94,6 +101,7 @@ export fn ice_connectivity_check_transaction_make() IceConnectivityCheckTransact
         pair_index: ICE_CANDIDATE_INDEX_NONE,
         local_candidate_index: ICE_CANDIDATE_INDEX_NONE,
         remote_candidate_index: ICE_CANDIDATE_INDEX_NONE,
+        request_role: ICE_AGENT_ROLE_UNKNOWN,
         request_priority: 0u32,
         use_candidate: false,
         sent_at_us: 0u64,
@@ -399,6 +407,19 @@ fn ice_connectivity_check_result_make(message_class: u8, error_code: u16) IceCon
     };
 }
 
+fn ice_role_conflict_result_make(error_code: u16, role_changed: bool) IceRoleConflictResult {
+    return IceRoleConflictResult{
+        error_code: error_code,
+        role_changed: role_changed,
+    };
+}
+
+// RFC 8445 requires a fresh tie-breaker after a 487 role conflict.
+// Derive a different 64-bit value from the existing seed until a CSPRNG lands in Phase 7.
+fn ice_agent_next_tie_breaker(current: u64) u64 {
+    return current ^ 0x9E3779B97F4A7C15u64;
+}
+
 fn ice_connectivity_check_parse_response(
     packet: &[byte],
     expected_transaction_id: &[byte],
@@ -471,6 +492,16 @@ fn ice_agent_role_supports_checklist(role: u8) bool {
     return role == ICE_AGENT_ROLE_CONTROLLING || role == ICE_AGENT_ROLE_CONTROLLED;
 }
 
+fn ice_agent_role_opposite(role: u8) !u8 {
+    if role == ICE_AGENT_ROLE_CONTROLLING {
+        return ICE_AGENT_ROLE_CONTROLLED;
+    }
+    if role == ICE_AGENT_ROLE_CONTROLLED {
+        return ICE_AGENT_ROLE_CONTROLLING;
+    }
+    return error.InvalidPacket;
+}
+
 fn ice_agent_nomination_mode_is_supported(mode: u8) bool {
     return mode == ICE_NOMINATION_MODE_REGULAR || mode == ICE_NOMINATION_MODE_AGGRESSIVE;
 }
@@ -480,6 +511,92 @@ fn ice_agent_pair_is_ready_for_regular_nomination(pair: &CandidatePair) bool {
         return false;
     }
     return pair.valid && pair.state == ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+}
+
+fn ice_agent_refresh_checklist_priorities(agent: &IceAgent) !void {
+    if agent == null || !ice_agent_role_supports_checklist(agent.role) {
+        return error.InvalidPacket;
+    }
+
+    const local_is_controlling: bool = agent.role == ICE_AGENT_ROLE_CONTROLLING;
+    var pair_index: usize = 0;
+    while pair_index < agent.checklist_count {
+        if pair_index >= ICE_MAX_CANDIDATE_PAIRS {
+            return error.InvalidPacket;
+        }
+        const pair: &CandidatePair = &agent.checklist[pair_index];
+        const local_slot: usize = pair.local_candidate_index as usize;
+        const remote_slot: usize = pair.remote_candidate_index as usize;
+        if local_slot >= ICE_MAX_LOCAL_CANDIDATES {
+            return error.InvalidPacket;
+        }
+        if remote_slot >= ICE_MAX_REMOTE_CANDIDATES {
+            return error.InvalidPacket;
+        }
+        if local_slot >= agent.local_candidate_count {
+            return error.InvalidPacket;
+        }
+        if remote_slot >= agent.remote_candidate_count {
+            return error.InvalidPacket;
+        }
+
+        agent.checklist[pair_index].priority = try candidate_pair_compute_priority(
+            &agent.local_candidates[local_slot],
+            &agent.remote_candidates[remote_slot],
+            local_is_controlling,
+        );
+        pair_index = pair_index + 1;
+    }
+}
+
+fn ice_agent_set_role(agent: &IceAgent, role: u8, refresh_tie_breaker: bool) !void {
+    if agent == null || !ice_agent_role_supports_checklist(role) {
+        return error.InvalidPacket;
+    }
+
+    agent.role = role;
+    if refresh_tie_breaker {
+        agent.tie_breaker = ice_agent_next_tie_breaker(agent.tie_breaker);
+    }
+    try ice_agent_refresh_checklist_priorities(agent);
+}
+
+fn ice_agent_note_role_conflict(pair: &CandidatePair, response_at_us: u64) void {
+    if pair == null {
+        return;
+    }
+
+    if pair.response_count != 0xFFFFFFFFu32 {
+        pair.response_count = pair.response_count + 1u32;
+    }
+    pair.last_response_received_at_us = response_at_us;
+    pair.nominated = false;
+    pair.selected = false;
+    pair.state = ICE_CANDIDATE_PAIR_STATE_WAITING;
+}
+
+fn ice_agent_handle_role_conflict_response(
+    agent: &IceAgent,
+    transaction: &IceConnectivityCheckTransaction,
+    response_at_us: u64,
+) !void {
+    if agent == null || transaction == null {
+        return error.InvalidPacket;
+    }
+    if !ice_agent_role_supports_checklist(transaction.request_role) {
+        return error.InvalidPacket;
+    }
+
+    const pair_slot: usize = transaction.pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+
+    try ice_agent_set_role(agent, try ice_agent_role_opposite(transaction.request_role), true);
+    ice_agent_note_role_conflict(&agent.checklist[pair_slot], response_at_us);
 }
 
 export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
@@ -678,6 +795,36 @@ export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {
     return candidate_pair_is_selected(&agent.checklist[selected_pair_slot]);
 }
 
+export fn ice_agent_resolve_role_conflict_request(
+    agent: &IceAgent,
+    remote_role: u8,
+    remote_tie_breaker: u64,
+) !IceRoleConflictResult {
+    if agent == null
+        || !ice_agent_role_supports_checklist(agent.role)
+        || !ice_agent_role_supports_checklist(remote_role) {
+        return error.InvalidPacket;
+    }
+
+    if agent.role != remote_role {
+        return ice_role_conflict_result_make(0u16, false);
+    }
+
+    if agent.role == ICE_AGENT_ROLE_CONTROLLING {
+        if remote_tie_breaker > agent.tie_breaker {
+            try ice_agent_set_role(agent, ICE_AGENT_ROLE_CONTROLLED, false);
+            return ice_role_conflict_result_make(0u16, true);
+        }
+        return ice_role_conflict_result_make(ICE_STUN_ERROR_ROLE_CONFLICT, false);
+    }
+
+    if remote_tie_breaker < agent.tie_breaker {
+        try ice_agent_set_role(agent, ICE_AGENT_ROLE_CONTROLLING, false);
+        return ice_role_conflict_result_make(0u16, true);
+    }
+    return ice_role_conflict_result_make(ICE_STUN_ERROR_ROLE_CONFLICT, false);
+}
+
 export fn ice_connectivity_check_transaction_init(
     transaction: &IceConnectivityCheckTransaction,
     agent: &IceAgent,
@@ -739,6 +886,7 @@ export fn ice_connectivity_check_transaction_init(
     transaction.pair_index = pair_index;
     transaction.local_candidate_index = pair.local_candidate_index;
     transaction.remote_candidate_index = pair.remote_candidate_index;
+    transaction.request_role = agent.role;
     transaction.request_priority = local_candidate.priority;
     transaction.use_candidate = use_candidate;
     transaction.sent_at_us = 0u64;
@@ -759,6 +907,9 @@ export fn ice_connectivity_check_build_binding_request(
     if agent == null || transaction == null {
         return error.InvalidPacket;
     }
+    if transaction.request_role != agent.role {
+        return error.InvalidPacket;
+    }
     if !ice_connectivity_check_transaction_has_current_pair(agent, transaction)
         || !ice_credentials_is_configured(&agent.local_credentials)
         || !ice_credentials_is_configured(&agent.remote_credentials) {
@@ -777,9 +928,9 @@ export fn ice_connectivity_check_build_binding_request(
     try stun_builder_append_username(&builder, username[0:username_len]);
     try stun_builder_append_priority(&builder, transaction.request_priority);
 
-    if agent.role == ICE_AGENT_ROLE_CONTROLLING {
+    if transaction.request_role == ICE_AGENT_ROLE_CONTROLLING {
         try stun_builder_append_ice_controlling(&builder, agent.tie_breaker);
-    } else if agent.role == ICE_AGENT_ROLE_CONTROLLED {
+    } else if transaction.request_role == ICE_AGENT_ROLE_CONTROLLED {
         try stun_builder_append_ice_controlled(&builder, agent.tie_breaker);
     } else {
         return error.InvalidPacket;
@@ -846,6 +997,8 @@ export fn ice_agent_connectivity_check_handle_response(
         if transaction.use_candidate {
             agent.checklist[pair_slot].nominated = true;
         }
+    } else if result.error_code == ICE_STUN_ERROR_ROLE_CONFLICT {
+        try ice_agent_handle_role_conflict_response(agent, transaction, now_us);
     } else {
         candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
     }

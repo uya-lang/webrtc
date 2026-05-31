@@ -423,6 +423,7 @@ test "connectivity check transaction builds authenticated binding requests and m
         txid[0:STUN_TRANSACTION_ID_BYTES],
         false,
     );
+    try expect(transaction.request_role == ICE_AGENT_ROLE_CONTROLLING);
 
     var packet: [byte: 256] = [];
     const packet_len: usize = try ice_connectivity_check_build_binding_request(
@@ -463,6 +464,73 @@ test "connectivity check transaction builds authenticated binding requests and m
     try expect(agent.checklist[0].request_count == 1u32);
     try expect(agent.checklist[0].last_request_sent_at_us == 1000u64);
     try expect(transaction.sent_at_us == 1000u64);
+}
+
+test "role conflict request resolution follows RFC 8445 tie breaker rules" {
+    var controlling_error_agent: IceAgent = ice_agent_make();
+    _ = try ice_test_seed_connectivity_check_agent(&controlling_error_agent, ICE_AGENT_ROLE_CONTROLLING);
+    const controlling_priority: u64 = controlling_error_agent.checklist[0].priority;
+    const controlling_error: IceRoleConflictResult = try ice_agent_resolve_role_conflict_request(
+        &controlling_error_agent,
+        ICE_AGENT_ROLE_CONTROLLING,
+        controlling_error_agent.tie_breaker - 1u64,
+    );
+    try expect(controlling_error.error_code == ICE_STUN_ERROR_ROLE_CONFLICT);
+    try expect(!controlling_error.role_changed);
+    try expect(controlling_error_agent.role == ICE_AGENT_ROLE_CONTROLLING);
+    try expect(controlling_error_agent.tie_breaker == 0x1122334455667788u64);
+    try expect(controlling_error_agent.checklist[0].priority == controlling_priority);
+
+    var controlling_switch_agent: IceAgent = ice_agent_make();
+    _ = try ice_test_seed_connectivity_check_agent(&controlling_switch_agent, ICE_AGENT_ROLE_CONTROLLING);
+    const controlling_switch: IceRoleConflictResult = try ice_agent_resolve_role_conflict_request(
+        &controlling_switch_agent,
+        ICE_AGENT_ROLE_CONTROLLING,
+        controlling_switch_agent.tie_breaker + 1u64,
+    );
+    try expect(controlling_switch.error_code == 0u16);
+    try expect(controlling_switch.role_changed);
+    try expect(controlling_switch_agent.role == ICE_AGENT_ROLE_CONTROLLED);
+    try expect(controlling_switch_agent.tie_breaker == 0x1122334455667788u64);
+    try expect(controlling_switch_agent.checklist[0].priority == candidate_pair_priority(2113937151u32, 2130706431u32));
+
+    var controlled_error_agent: IceAgent = ice_agent_make();
+    _ = try ice_test_seed_connectivity_check_agent(&controlled_error_agent, ICE_AGENT_ROLE_CONTROLLED);
+    const controlled_priority: u64 = controlled_error_agent.checklist[0].priority;
+    const controlled_error: IceRoleConflictResult = try ice_agent_resolve_role_conflict_request(
+        &controlled_error_agent,
+        ICE_AGENT_ROLE_CONTROLLED,
+        controlled_error_agent.tie_breaker + 1u64,
+    );
+    try expect(controlled_error.error_code == ICE_STUN_ERROR_ROLE_CONFLICT);
+    try expect(!controlled_error.role_changed);
+    try expect(controlled_error_agent.role == ICE_AGENT_ROLE_CONTROLLED);
+    try expect(controlled_error_agent.tie_breaker == 0x1122334455667788u64);
+    try expect(controlled_error_agent.checklist[0].priority == controlled_priority);
+
+    var controlled_switch_agent: IceAgent = ice_agent_make();
+    _ = try ice_test_seed_connectivity_check_agent(&controlled_switch_agent, ICE_AGENT_ROLE_CONTROLLED);
+    const controlled_switch: IceRoleConflictResult = try ice_agent_resolve_role_conflict_request(
+        &controlled_switch_agent,
+        ICE_AGENT_ROLE_CONTROLLED,
+        controlled_switch_agent.tie_breaker - 1u64,
+    );
+    try expect(controlled_switch.error_code == 0u16);
+    try expect(controlled_switch.role_changed);
+    try expect(controlled_switch_agent.role == ICE_AGENT_ROLE_CONTROLLING);
+    try expect(controlled_switch_agent.tie_breaker == 0x1122334455667788u64);
+    try expect(controlled_switch_agent.checklist[0].priority == candidate_pair_priority(2130706431u32, 2113937151u32));
+
+    var no_conflict_agent: IceAgent = ice_agent_make();
+    _ = try ice_test_seed_connectivity_check_agent(&no_conflict_agent, ICE_AGENT_ROLE_CONTROLLING);
+    const no_conflict: IceRoleConflictResult = try ice_agent_resolve_role_conflict_request(
+        &no_conflict_agent,
+        ICE_AGENT_ROLE_CONTROLLED,
+        9u64,
+    );
+    try expect(no_conflict.error_code == 0u16);
+    try expect(!no_conflict.role_changed);
+    try expect(no_conflict_agent.role == ICE_AGENT_ROLE_CONTROLLING);
 }
 
 test "regular nomination waits for a valid pair and marks a successful nomination" {
@@ -735,9 +803,11 @@ test "controlled agent rejects use-candidate connectivity checks" {
     try expect(init_result.error_id == @error_id(error.InvalidPacket));
 }
 
-test "connectivity check error responses fail the pair and stale checklist transactions are rejected" {
+test "role conflict error responses switch roles refresh tie breaker and requeue the pair" {
     var agent: IceAgent = ice_agent_make();
     const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
+    const original_tie_breaker: u64 = agent.tie_breaker;
+    const original_priority: u64 = agent.checklist[0].priority;
 
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
         61 as byte,
@@ -780,7 +850,91 @@ test "connectivity check error responses fail the pair and stale checklist trans
         1900u64,
     );
     try expect(result.message_class == STUN_MESSAGE_CLASS_ERROR_RESPONSE);
-    try expect(result.error_code == 487u16);
+    try expect(result.error_code == ICE_STUN_ERROR_ROLE_CONFLICT);
+    try expect(agent.role == ICE_AGENT_ROLE_CONTROLLED);
+    try expect(agent.tie_breaker == 0x8F154AFD2A2C0B9Du64);
+    try expect(agent.tie_breaker != original_tie_breaker);
+    try expect(agent.checklist[0].state == ICE_CANDIDATE_PAIR_STATE_WAITING);
+    try expect(!agent.checklist[0].valid);
+    try expect(!agent.checklist[0].nominated);
+    try expect(agent.checklist[0].response_count == 1u32);
+    try expect(agent.checklist[0].last_response_received_at_us == 1900u64);
+    try expect(agent.checklist[0].priority == candidate_pair_priority(2113937151u32, 2130706431u32));
+    try expect(agent.checklist[0].priority != original_priority);
+
+    var controlled_agent: IceAgent = ice_agent_make();
+    const controlled_pair_index: u16 = try ice_test_seed_connectivity_check_agent(&controlled_agent, ICE_AGENT_ROLE_CONTROLLED);
+    const controlled_original_tie_breaker: u64 = controlled_agent.tie_breaker;
+    var controlled_transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &controlled_transaction,
+        &controlled_agent,
+        controlled_pair_index,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+        false,
+    );
+    _ = try ice_connectivity_check_build_binding_request(&controlled_agent, &controlled_transaction, request[0:256], 2300u64);
+    const controlled_result: IceConnectivityCheckResult = try ice_agent_connectivity_check_handle_response(
+        &controlled_agent,
+        &controlled_transaction,
+        error_packet[0:error_len],
+        3300u64,
+    );
+    try expect(controlled_result.message_class == STUN_MESSAGE_CLASS_ERROR_RESPONSE);
+    try expect(controlled_result.error_code == ICE_STUN_ERROR_ROLE_CONFLICT);
+    try expect(controlled_agent.role == ICE_AGENT_ROLE_CONTROLLING);
+    try expect(controlled_agent.tie_breaker == 0x8F154AFD2A2C0B9Du64);
+    try expect(controlled_agent.tie_breaker != controlled_original_tie_breaker);
+    try expect(controlled_agent.checklist[0].state == ICE_CANDIDATE_PAIR_STATE_WAITING);
+    try expect(controlled_agent.checklist[0].priority == candidate_pair_priority(2130706431u32, 2113937151u32));
+}
+
+test "non-role-conflict error responses fail the pair and stale checklist transactions are rejected" {
+    var agent: IceAgent = ice_agent_make();
+    const pair_index: u16 = try ice_test_seed_connectivity_check_agent(&agent, ICE_AGENT_ROLE_CONTROLLING);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        61 as byte,
+        62 as byte,
+        63 as byte,
+        64 as byte,
+        65 as byte,
+        66 as byte,
+        67 as byte,
+        68 as byte,
+        69 as byte,
+        70 as byte,
+        71 as byte,
+        72 as byte,
+    ];
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &transaction,
+        &agent,
+        pair_index,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+        false,
+    );
+
+    var request: [byte: 256] = [];
+    _ = try ice_connectivity_check_build_binding_request(&agent, &transaction, request[0:256], 900u64);
+
+    var error_packet: [byte: 256] = [];
+    var error_builder: StunMessageBuilder = stun_message_builder_make();
+    try stun_builder_init_binding_error_response(&error_builder, error_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_error_code(&error_builder, 500u16, "server error" as &[byte]);
+    try stun_builder_append_message_integrity(&error_builder, agent.remote_credentials.pwd[0:agent.remote_credentials.pwd_len]);
+    try stun_builder_append_fingerprint(&error_builder);
+    const error_len: usize = try stun_builder_finish(&error_builder);
+
+    const result: IceConnectivityCheckResult = try ice_agent_connectivity_check_handle_response(
+        &agent,
+        &transaction,
+        error_packet[0:error_len],
+        1900u64,
+    );
+    try expect(result.message_class == STUN_MESSAGE_CLASS_ERROR_RESPONSE);
+    try expect(result.error_code == 500u16);
     try expect(agent.checklist[0].state == ICE_CANDIDATE_PAIR_STATE_FAILED);
     try expect(!agent.checklist[0].valid);
     try expect(agent.checklist[0].response_count == 1u32);
