@@ -2,6 +2,8 @@
 // 模块路径：src/webrtc/dtls/handshake.uya → use webrtc.dtls.handshake;
 
 use webrtc.binary;
+use webrtc.crypto.csprng;
+use webrtc.crypto.p256;
 use webrtc.dtls.model;
 use webrtc.errors;
 
@@ -10,6 +12,11 @@ export const DTLS_HELLO_RANDOM_BYTES: usize = 32usize;
 export const DTLS_HELLO_SESSION_ID_MAX_BYTES: usize = 32usize;
 export const DTLS_HELLO_COOKIE_MAX_BYTES: usize = 255usize;
 export const DTLS_CERTIFICATE_MESSAGE_MAX_ENTRIES: usize = 8usize;
+export const DTLS_ECDHE_CURVE_TYPE_NAMED_CURVE: u8 = 3u8;
+export const DTLS_NAMED_CURVE_SECP256R1: u16 = 23u16;
+export const DTLS_HASH_ALGORITHM_SHA256: u8 = 4u8;
+export const DTLS_SIGNATURE_ALGORITHM_ECDSA: u8 = 3u8;
+export const DTLS_ECDHE_KEY_SHARE_GENERATION_ATTEMPTS: usize = 16usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -44,6 +51,34 @@ export fn dtls_certificate_message_make() DtlsCertificateMessage {
     return DtlsCertificateMessage{
         certificate_count: 0usize,
         certificates: certificates,
+    };
+}
+
+export struct DtlsServerKeyExchange {
+    named_curve: u16 = 0u16,
+    public_key: &[byte] = [],
+    signature_hash_algorithm: u8 = 0u8,
+    signature_algorithm: u8 = 0u8,
+    signature: &[byte] = [],
+}
+
+export struct DtlsClientKeyExchange {
+    public_key: &[byte] = [],
+}
+
+export struct DtlsEcdheKeyShare {
+    private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    public_key: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [],
+    public_key_len: usize = 0usize,
+}
+
+export fn dtls_ecdhe_key_share_make() DtlsEcdheKeyShare {
+    var private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var public_key: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
+    return DtlsEcdheKeyShare{
+        private_key: private_key,
+        public_key: public_key,
+        public_key_len: 0usize,
     };
 }
 
@@ -195,6 +230,51 @@ fn dtls_certificate_validate(message: &DtlsCertificateMessage) !usize {
             return error.UnsupportedCapability;
         }
         index = index + 1usize;
+    }
+    return total_length;
+}
+
+fn dtls_ecdhe_public_key_validate(public_key: &[byte]) !void {
+    if public_key.len != CRYPTO_P256_PUBLIC_KEY_BYTES {
+        return error.InvalidPacket;
+    }
+    if public_key[0] != 0x04 as byte {
+        return error.InvalidPacket;
+    }
+}
+
+fn dtls_server_key_exchange_validate(message: &DtlsServerKeyExchange) !usize {
+    if message == null {
+        return error.InvalidPacket;
+    }
+    if message.named_curve != DTLS_NAMED_CURVE_SECP256R1 {
+        return error.UnsupportedCapability;
+    }
+    try dtls_ecdhe_public_key_validate(message.public_key);
+
+    var total_length: usize = 4usize + message.public_key.len;
+    const has_signature_metadata: bool = message.signature_hash_algorithm != 0u8 || message.signature_algorithm != 0u8;
+    if has_signature_metadata || message.signature.len > 0usize {
+        if !has_signature_metadata || message.signature.len == 0usize || message.signature.len > 0xffffusize {
+            return error.InvalidPacket;
+        }
+        total_length = try checked_add_usize(total_length, 4usize + message.signature.len);
+    }
+    if total_length > DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+        return error.UnsupportedCapability;
+    }
+    return total_length;
+}
+
+fn dtls_client_key_exchange_validate(message: &DtlsClientKeyExchange) !usize {
+    if message == null {
+        return error.InvalidPacket;
+    }
+    try dtls_ecdhe_public_key_validate(message.public_key);
+
+    const total_length: usize = 1usize + message.public_key.len;
+    if total_length > DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES {
+        return error.UnsupportedCapability;
     }
     return total_length;
 }
@@ -503,6 +583,143 @@ export fn dtls_certificate_write(message: &DtlsCertificateMessage, out: &[byte])
     }
 
     return cursor;
+}
+
+export fn dtls_server_key_exchange_parse(body: &[byte]) !DtlsServerKeyExchange {
+    if body.len < 4usize {
+        return error.PacketTooShort;
+    }
+    if body[0] as u8 != DTLS_ECDHE_CURVE_TYPE_NAMED_CURVE {
+        return error.UnsupportedCapability;
+    }
+    const named_curve: u16 = try read_be_u16(body[1:2]);
+    if named_curve != DTLS_NAMED_CURVE_SECP256R1 {
+        return error.UnsupportedCapability;
+    }
+
+    const public_key_length: usize = body[3] as usize;
+    if public_key_length == 0usize || 4usize + public_key_length > body.len {
+        return error.InvalidPacket;
+    }
+    const public_key: &[byte] = body[4:public_key_length];
+    try dtls_ecdhe_public_key_validate(public_key);
+
+    var cursor: usize = 4usize + public_key_length;
+    var signature_hash_algorithm: u8 = 0u8;
+    var signature_algorithm: u8 = 0u8;
+    var signature: &[byte] = body[cursor:0];
+    if cursor < body.len {
+        if cursor + 4usize > body.len {
+            return error.InvalidPacket;
+        }
+        signature_hash_algorithm = body[cursor] as u8;
+        signature_algorithm = body[cursor + 1usize] as u8;
+        const signature_length: usize = (try read_be_u16(body[cursor + 2usize:2])) as usize;
+        cursor = cursor + 4usize;
+        if signature_length == 0usize || cursor + signature_length != body.len {
+            return error.InvalidPacket;
+        }
+        signature = body[cursor:signature_length];
+    }
+
+    return DtlsServerKeyExchange{
+        named_curve: named_curve,
+        public_key: public_key,
+        signature_hash_algorithm: signature_hash_algorithm,
+        signature_algorithm: signature_algorithm,
+        signature: signature,
+    };
+}
+
+export fn dtls_server_key_exchange_write(message: &DtlsServerKeyExchange, out: &[byte]) !usize {
+    const total_length: usize = try dtls_server_key_exchange_validate(message);
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    out[0] = DTLS_ECDHE_CURVE_TYPE_NAMED_CURVE as byte;
+    try write_be_u16(out[1:2], message.named_curve);
+    out[3] = message.public_key.len as byte;
+
+    var cursor: usize = 4usize;
+    var index: usize = 0usize;
+    while index < message.public_key.len {
+        out[cursor + index] = message.public_key[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + message.public_key.len;
+
+    if message.signature.len > 0usize {
+        out[cursor] = message.signature_hash_algorithm as byte;
+        out[cursor + 1usize] = message.signature_algorithm as byte;
+        try write_be_u16(out[cursor + 2usize:2], message.signature.len as u16);
+        cursor = cursor + 4usize;
+
+        index = 0usize;
+        while index < message.signature.len {
+            out[cursor + index] = message.signature[index];
+            index = index + 1usize;
+        }
+        cursor = cursor + message.signature.len;
+    }
+
+    return cursor;
+}
+
+export fn dtls_client_key_exchange_parse(body: &[byte]) !DtlsClientKeyExchange {
+    if body.len < 1usize {
+        return error.PacketTooShort;
+    }
+    const public_key_length: usize = body[0] as usize;
+    if public_key_length == 0usize || 1usize + public_key_length != body.len {
+        return error.InvalidPacket;
+    }
+    const public_key: &[byte] = body[1:public_key_length];
+    try dtls_ecdhe_public_key_validate(public_key);
+    return DtlsClientKeyExchange{
+        public_key: public_key,
+    };
+}
+
+export fn dtls_client_key_exchange_write(message: &DtlsClientKeyExchange, out: &[byte]) !usize {
+    const total_length: usize = try dtls_client_key_exchange_validate(message);
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    out[0] = message.public_key.len as byte;
+    var index: usize = 0usize;
+    while index < message.public_key.len {
+        out[1usize + index] = message.public_key[index];
+        index = index + 1usize;
+    }
+    return total_length;
+}
+
+export fn dtls_ecdhe_p256_key_share_generate(share: &DtlsEcdheKeyShare) !void {
+    if share == null {
+        return error.InvalidPacket;
+    }
+
+    var attempt: usize = 0usize;
+    while attempt < DTLS_ECDHE_KEY_SHARE_GENERATION_ATTEMPTS {
+        try crypto_csprng_fill(share.private_key[0:CRYPTO_P256_FIELD_BYTES]);
+        const public_result: !void = crypto_p256_public_from_private(
+            share.private_key[0:CRYPTO_P256_FIELD_BYTES],
+            share.public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+        );
+        if public_result.error_id == 0 {
+            share.public_key_len = CRYPTO_P256_PUBLIC_KEY_BYTES;
+            return;
+        }
+        attempt = attempt + 1usize;
+    }
+    return error.RandomSourceFailed;
+}
+
+export fn dtls_ecdhe_p256_shared_secret(private_key: &[byte], peer_public_key: &[byte], shared_secret_out: &[byte]) !void {
+    try dtls_ecdhe_public_key_validate(peer_public_key);
+    return crypto_p256_ecdh_shared_secret(private_key, peer_public_key, shared_secret_out);
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {

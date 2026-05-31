@@ -35,6 +35,9 @@ rg -Fq "dtls_test_check_server_hello_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_server_hello_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_certificate_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_certificate_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_ecdhe_key_exchange_roundtrip" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_ecdhe_key_exchange_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_ecdhe_generated_key_share" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
@@ -43,6 +46,9 @@ rg -Fq "export struct DtlsClientHello" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsServerHello" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsCertificateEntry" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsCertificateMessage" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsServerKeyExchange" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsClientKeyExchange" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsEcdheKeyShare" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_fragment_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_absorb" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_take_message" src/webrtc/dtls/handshake.uya
@@ -52,6 +58,12 @@ rg -Fq "export fn dtls_server_hello_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_server_hello_write" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_certificate_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_certificate_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_server_key_exchange_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_server_key_exchange_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_client_key_exchange_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_client_key_exchange_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_ecdhe_p256_key_share_generate" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_ecdhe_p256_shared_secret" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 
