@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import argparse
+import codecs
 import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -48,6 +51,8 @@ HEARTBEAT_SECONDS = max(1, int(os.environ.get("AGENT_HEARTBEAT", "15")))
 MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
 RESULT_EXIT_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_EXIT_GRACE", "5")))
 RESULT_KILL_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_KILL_GRACE", "3")))
+ANSI_GREEN = "\x1b[32m"
+ANSI_RESET = "\x1b[0m"
 
 if not CODEX_SANDBOX:
     CODEX_SANDBOX = DEFAULT_CODEX_SANDBOX
@@ -141,6 +146,185 @@ def format_bytes(byte_count):
         value /= 1024.0
 
     return f"{byte_count}B"
+
+
+def supports_live_output(stream):
+    term = os.environ.get("TERM", "").strip().lower()
+    is_tty = callable(getattr(stream, "isatty", None)) and stream.isatty()
+    return bool(is_tty and term and term != "dumb")
+
+
+def clip_display_text(text, width):
+    clean = " ".join(str(text).splitlines())
+    if width <= 0 or len(clean) <= width:
+        return clean
+    if width <= 3:
+        return clean[:width]
+    return clean[: width - 3] + "..."
+
+
+def build_live_status_parts(current_task, elapsed_seconds=None, log_path=None, log_note=None):
+    task_text = current_task or "无"
+    prefix = "[agent] 当前任务: "
+    suffix_parts = []
+
+    if isinstance(elapsed_seconds, int):
+        suffix_parts.append(f"已运行 {format_duration(elapsed_seconds)}")
+
+    if log_path:
+        suffix_parts.append(f"日志 {log_path}")
+
+    if log_note:
+        suffix_parts.append(log_note)
+
+    suffix = ""
+    if suffix_parts:
+        suffix = " | " + " | ".join(suffix_parts)
+
+    return prefix, task_text, suffix
+
+
+def build_live_status_line(current_task, elapsed_seconds=None, log_path=None, log_note=None):
+    prefix, task_text, suffix = build_live_status_parts(
+        current_task,
+        elapsed_seconds=elapsed_seconds,
+        log_path=log_path,
+        log_note=log_note,
+    )
+    return prefix + task_text + suffix
+
+
+def render_live_status_line(current_task, elapsed_seconds=None, log_path=None, log_note=None, width=None, color=False):
+    prefix, task_text, suffix = build_live_status_parts(
+        current_task,
+        elapsed_seconds=elapsed_seconds,
+        log_path=log_path,
+        log_note=log_note,
+    )
+
+    clipped_task = task_text
+    clipped_suffix = suffix
+
+    if isinstance(width, int) and width > 0:
+        available = max(0, width - len(prefix))
+        if len(task_text) + len(suffix) > available:
+            if len(task_text) >= available:
+                clipped_task = clip_display_text(task_text, available)
+                clipped_suffix = ""
+            else:
+                clipped_suffix = clip_display_text(suffix, available - len(task_text))
+
+    if color and clipped_task:
+        colored_task = f"{ANSI_GREEN}{clipped_task}{ANSI_RESET}"
+    else:
+        colored_task = clipped_task
+
+    return prefix + colored_task + clipped_suffix
+
+
+class LiveOutputDisplay:
+    def __init__(self, stream, enabled=None):
+        self.stream = stream
+        self.enabled = supports_live_output(stream) if enabled is None else enabled
+        self.active = False
+        self.rows = 24
+        self.cols = 80
+        self.current_task = "无"
+        self.last_header = None
+
+    def _write(self, text):
+        self.stream.write(text)
+
+    def _flush(self):
+        flush = getattr(self.stream, "flush", None)
+        if callable(flush):
+            flush()
+
+    def _refresh_size(self):
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        self.cols = max(20, int(size.columns or 80))
+        self.rows = max(2, int(size.lines or 24))
+
+    def start(self, current_task):
+        self.current_task = current_task or "无"
+        self.active = True
+        self.last_header = None
+
+        if not self.enabled:
+            self._write(build_live_status_line(self.current_task) + "\n")
+            self._flush()
+            return
+
+        self._refresh_size()
+        self._write("\x1b[2J\x1b[H")
+        self._write("\n")
+        self._write(f"\x1b[2;{self.rows}r")
+        self._write("\x1b[2;1H")
+        self.update(current_task=self.current_task, force=True)
+
+    def update(self, current_task=None, elapsed_seconds=None, log_path=None, log_note=None, force=False):
+        if current_task is not None:
+            self.current_task = current_task or "无"
+
+        plain_header = render_live_status_line(
+            self.current_task,
+            elapsed_seconds=elapsed_seconds,
+            log_path=log_path,
+            log_note=log_note,
+            width=self.cols if self.enabled else None,
+            color=False,
+        )
+
+        if not self.enabled:
+            self.last_header = plain_header
+            return
+
+        self._refresh_size()
+        plain_header = render_live_status_line(
+            self.current_task,
+            elapsed_seconds=elapsed_seconds,
+            log_path=log_path,
+            log_note=log_note,
+            width=self.cols,
+            color=False,
+        )
+        if plain_header == self.last_header and not force:
+            return
+        rendered_header = render_live_status_line(
+            self.current_task,
+            elapsed_seconds=elapsed_seconds,
+            log_path=log_path,
+            log_note=log_note,
+            width=self.cols,
+            color=True,
+        )
+
+        self._write("\x1b7")
+        self._write("\x1b[1;1H")
+        self._write("\x1b[2K")
+        self._write(rendered_header)
+        self._write("\x1b8")
+        self._flush()
+        self.last_header = plain_header
+
+    def write(self, text):
+        if not text:
+            return
+
+        self._write(text)
+        self._flush()
+
+    def finish(self):
+        if not self.active:
+            return
+
+        if self.enabled:
+            self._write("\x1b[r")
+            self._write(f"\x1b[{self.rows};1H")
+            self._write("\n")
+
+        self._flush()
+        self.active = False
 
 
 def resolve_root(raw_root):
@@ -1085,122 +1269,221 @@ def run_codex(
 
     cmd = build_codex_exec_command(root, prompt)
 
-    with log_file.open("w", encoding="utf-8") as handle:
-        handle.write(f"[{now()}] START BATCH\n")
-        handle.write(f"PROJECT_ROOT: {path_label(root, root)}\n")
-        handle.write(f"TODO: {todo_label(root, todo_file)}\n")
-        handle.write(f"RUNNABLE: {len(runnable_tasks)}\n")
-        handle.write(f"EXHAUSTED: {len(exhausted_tasks)}\n\n")
-        handle.write(f"TOOLCHAIN_BUG_DIR: {path_label(root, toolchain_bug_dir)}\n")
-        handle.write(f"TOOLCHAIN_BUG_REPRO_DIR: {path_label(root, toolchain_bug_repro_dir)}\n\n")
-        handle.write(summarize_tasks(runnable_tasks, limit=50) + "\n\n")
-        handle.write("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
-        handle.flush()
+    current_task = runnable_tasks[0]["text"] if runnable_tasks else "无"
+    display = LiveOutputDisplay(sys.stdout)
+    log_path_text = path_label(root, log_file)
+
+    with log_file.open("wb") as handle:
+        def write_log_text(text):
+            data = text.encode("utf-8", errors="replace")
+            handle.write(data)
+            handle.flush()
+            return len(data)
+
+        def write_log_bytes(data):
+            handle.write(data)
+            handle.flush()
+            return len(data)
+
+        log_size = 0
+        log_size += write_log_text(f"[{now()}] START BATCH\n")
+        log_size += write_log_text(f"PROJECT_ROOT: {path_label(root, root)}\n")
+        log_size += write_log_text(f"TODO: {todo_label(root, todo_file)}\n")
+        log_size += write_log_text(f"RUNNABLE: {len(runnable_tasks)}\n")
+        log_size += write_log_text(f"EXHAUSTED: {len(exhausted_tasks)}\n\n")
+        log_size += write_log_text(f"TOOLCHAIN_BUG_DIR: {path_label(root, toolchain_bug_dir)}\n")
+        log_size += write_log_text(f"TOOLCHAIN_BUG_REPRO_DIR: {path_label(root, toolchain_bug_repro_dir)}\n\n")
+        log_size += write_log_text(summarize_tasks(runnable_tasks, limit=50) + "\n\n")
+        log_size += write_log_text("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
+
+        display.start(current_task)
+
+        process = None
+        selector = None
+        pipe_open = False
+        returncode = 1
 
         try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=root,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-            )
-        except FileNotFoundError:
-            handle.write(f"[{now()}] ERROR: command not found: {CODEX_CMD}\n")
-            return False, log_file
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=root,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    text=False,
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                message = f"[{now()}] ERROR: command not found: {CODEX_CMD}\n"
+                log_size += write_log_text(message)
+                display.write(message)
+                return False, log_file
 
-        start_monotonic = time.monotonic()
-        next_heartbeat = start_monotonic + HEARTBEAT_SECONDS
-        last_reported_size = log_file.stat().st_size if log_file.exists() else 0
-        last_log_size = last_reported_size
-        last_log_update_monotonic = start_monotonic
-        last_log_update_at = now()
-        result_seen_monotonic = None
-        terminate_sent_monotonic = None
+            selector = selectors.DefaultSelector()
+            if process.stdout is not None:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                pipe_open = True
 
-        if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-            state["current"]["pid"] = process.pid
-            state["current"]["heartbeat_at"] = now()
-            state["current"]["elapsed_seconds"] = 0
-            state["current"]["log_bytes"] = last_log_size
-            state["current"]["log_updated_at"] = last_log_update_at
-            save_state(state_file, state)
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            scan_buffer = ""
+            decoder_flushed = False
 
-        while True:
-            returncode = process.poll()
-            current_monotonic = time.monotonic()
-            current_log_size = log_file.stat().st_size if log_file.exists() else 0
+            def note_result_detected():
+                nonlocal result_seen_monotonic
+                if result_seen_monotonic is not None:
+                    return
 
-            if current_log_size > last_log_size:
-                last_log_size = current_log_size
-                last_log_update_monotonic = current_monotonic
-                last_log_update_at = now()
-                if result_seen_monotonic is None and parse_agent_result(log_file):
-                    result_seen_monotonic = current_monotonic
-                    print(
-                        "[agent] result detected: waiting briefly for codex to exit "
-                        f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
-                    )
-
-            if returncode is not None:
-                elapsed_seconds = int(current_monotonic - start_monotonic)
-                if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-                    state["current"]["elapsed_seconds"] = elapsed_seconds
-                    state["current"]["heartbeat_at"] = now()
-                    state["current"]["log_bytes"] = last_log_size
-                    state["current"]["log_updated_at"] = last_log_update_at
-                    save_state(state_file, state)
-                break
-
-            if result_seen_monotonic is not None:
-                if (
-                    terminate_sent_monotonic is None
-                    and current_monotonic - result_seen_monotonic >= RESULT_EXIT_GRACE_SECONDS
-                ):
-                    print("[agent] codex still running after final result; sending SIGTERM")
-                    send_signal_to_process_group(process, signal.SIGTERM)
-                    terminate_sent_monotonic = current_monotonic
-
-                if (
-                    terminate_sent_monotonic is not None
-                    and current_monotonic - terminate_sent_monotonic >= RESULT_KILL_GRACE_SECONDS
-                ):
-                    print("[agent] codex ignored SIGTERM after final result; sending SIGKILL")
-                    send_signal_to_process_group(process, signal.SIGKILL)
-                    terminate_sent_monotonic = current_monotonic + 10_000
-
-            if current_monotonic >= next_heartbeat:
-                elapsed_seconds = int(current_monotonic - start_monotonic)
-                delta_bytes = max(0, current_log_size - last_reported_size)
-                if delta_bytes > 0:
-                    log_note = f"+{format_bytes(delta_bytes)} output"
-                else:
-                    quiet_for = int(current_monotonic - last_log_update_monotonic)
-                    log_note = f"no new output for {format_duration(quiet_for)}"
-
-                current_task = runnable_tasks[0]["text"] if runnable_tasks else "无"
+                result_seen_monotonic = time.monotonic()
                 print(
-                    "[agent] heartbeat: "
-                    f"{format_duration(elapsed_seconds)} running | "
-                    f"current={current_task} | "
-                    f"log={path_label(root, log_file)} | "
-                    f"{log_note}"
+                    "[agent] result detected: waiting briefly for codex to exit "
+                    f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
                 )
 
-                if state is not None and state_file is not None and isinstance(state.get("current"), dict):
-                    state["current"]["elapsed_seconds"] = elapsed_seconds
-                    state["current"]["heartbeat_at"] = now()
-                    state["current"]["log_bytes"] = current_log_size
-                    state["current"]["log_updated_at"] = last_log_update_at
-                    save_state(state_file, state)
+            def scan_result_text(text):
+                nonlocal scan_buffer
+                if not text or result_seen_monotonic is not None:
+                    return
 
-                last_reported_size = current_log_size
-                next_heartbeat = current_monotonic + HEARTBEAT_SECONDS
+                scan_buffer += text
+                while "\n" in scan_buffer:
+                    line, scan_buffer = scan_buffer.split("\n", 1)
+                    if line.rstrip("\r").startswith(RESULT_PREFIX):
+                        note_result_detected()
+                        return
 
-            time.sleep(1)
+            def flush_decoder_tail():
+                nonlocal scan_buffer, decoder_flushed
+                if decoder_flushed:
+                    return
 
-        handle.write(f"\n[{now()}] EXIT CODE: {returncode}\n")
+                tail_text = decoder.decode(b"", final=True)
+                decoder_flushed = True
+                if tail_text:
+                    display.write(tail_text)
+                    scan_result_text(tail_text)
+                if scan_buffer.rstrip("\r").startswith(RESULT_PREFIX):
+                    note_result_detected()
+                scan_buffer = ""
+
+            start_monotonic = time.monotonic()
+            next_heartbeat = start_monotonic + HEARTBEAT_SECONDS
+            last_reported_size = log_size
+            last_log_size = log_size
+            last_log_update_monotonic = start_monotonic
+            last_log_update_at = now()
+            result_seen_monotonic = None
+            terminate_sent_monotonic = None
+
+            if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                state["current"]["pid"] = process.pid
+                state["current"]["heartbeat_at"] = now()
+                state["current"]["elapsed_seconds"] = 0
+                state["current"]["log_bytes"] = last_log_size
+                state["current"]["log_updated_at"] = last_log_update_at
+                save_state(state_file, state)
+
+            while True:
+                current_monotonic = time.monotonic()
+                heartbeat_in = max(0.0, next_heartbeat - current_monotonic)
+                timeout = min(1.0, heartbeat_in) if heartbeat_in > 0 else 0.0
+
+                if pipe_open:
+                    events = selector.select(timeout)
+                    for key, _mask in events:
+                        chunk = os.read(key.fileobj.fileno(), 4096)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            pipe_open = False
+                            continue
+
+                        log_size += write_log_bytes(chunk)
+                        last_log_size = log_size
+                        last_log_update_monotonic = time.monotonic()
+                        last_log_update_at = now()
+
+                        text_chunk = decoder.decode(chunk)
+                        if text_chunk:
+                            display.write(text_chunk)
+                            scan_result_text(text_chunk)
+                elif timeout > 0:
+                    time.sleep(timeout)
+
+                current_monotonic = time.monotonic()
+                returncode = process.poll()
+
+                if not pipe_open:
+                    flush_decoder_tail()
+
+                if result_seen_monotonic is not None:
+                    if (
+                        terminate_sent_monotonic is None
+                        and current_monotonic - result_seen_monotonic >= RESULT_EXIT_GRACE_SECONDS
+                    ):
+                        print("[agent] codex still running after final result; sending SIGTERM")
+                        send_signal_to_process_group(process, signal.SIGTERM)
+                        terminate_sent_monotonic = current_monotonic
+
+                    if (
+                        terminate_sent_monotonic is not None
+                        and current_monotonic - terminate_sent_monotonic >= RESULT_KILL_GRACE_SECONDS
+                    ):
+                        print("[agent] codex ignored SIGTERM after final result; sending SIGKILL")
+                        send_signal_to_process_group(process, signal.SIGKILL)
+                        terminate_sent_monotonic = current_monotonic + 10_000
+
+                if current_monotonic >= next_heartbeat:
+                    elapsed_seconds = int(current_monotonic - start_monotonic)
+                    delta_bytes = max(0, last_log_size - last_reported_size)
+                    if delta_bytes > 0:
+                        log_note = f"+{format_bytes(delta_bytes)} output"
+                    else:
+                        quiet_for = int(current_monotonic - last_log_update_monotonic)
+                        log_note = f"no new output for {format_duration(quiet_for)}"
+
+                    if display.enabled:
+                        display.update(
+                            current_task=current_task,
+                            elapsed_seconds=elapsed_seconds,
+                            log_path=log_path_text,
+                            log_note=log_note,
+                        )
+                    else:
+                        print(
+                            "[agent] heartbeat: "
+                            f"{format_duration(elapsed_seconds)} running | "
+                            f"current={current_task} | "
+                            f"log={log_path_text} | "
+                            f"{log_note}"
+                        )
+
+                    if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                        state["current"]["elapsed_seconds"] = elapsed_seconds
+                        state["current"]["heartbeat_at"] = now()
+                        state["current"]["log_bytes"] = last_log_size
+                        state["current"]["log_updated_at"] = last_log_update_at
+                        save_state(state_file, state)
+
+                    last_reported_size = last_log_size
+                    next_heartbeat = current_monotonic + HEARTBEAT_SECONDS
+
+                if returncode is not None and not pipe_open:
+                    elapsed_seconds = int(current_monotonic - start_monotonic)
+                    if state is not None and state_file is not None and isinstance(state.get("current"), dict):
+                        state["current"]["elapsed_seconds"] = elapsed_seconds
+                        state["current"]["heartbeat_at"] = now()
+                        state["current"]["log_bytes"] = last_log_size
+                        state["current"]["log_updated_at"] = last_log_update_at
+                        save_state(state_file, state)
+                    break
+
+            write_log_text(f"\n[{now()}] EXIT CODE: {returncode}\n")
+        finally:
+            if selector is not None:
+                selector.close()
+            if process is not None and process.stdout is not None:
+                process.stdout.close()
+            display.finish()
 
     return returncode == 0, log_file
 

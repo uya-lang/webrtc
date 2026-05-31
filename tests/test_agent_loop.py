@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 import tempfile
@@ -148,6 +149,49 @@ class AgentLoopPromptTests(unittest.TestCase):
             self.assertIn("不允许作弊或表面修补", prompt)
             self.assertIn("完整实现而不是“刚好能过”的半成品", prompt)
             self.assertIn("必须考虑代码性能和资源开销", prompt)
+
+
+class FakeTTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class AgentLoopLiveOutputTests(unittest.TestCase):
+    def test_live_display_uses_fixed_header_and_scroll_region_for_tty(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
+        stream = FakeTTY()
+        display = module.LiveOutputDisplay(stream, enabled=True)
+
+        with patch.object(module.shutil, "get_terminal_size", return_value=os.terminal_size((60, 12))):
+            display.start("实现实时输出")
+            display.update(
+                current_task="实现实时输出",
+                elapsed_seconds=65,
+                log_path=".agent/logs/current.log",
+                log_note="+1.0KB output",
+                force=True,
+            )
+            display.write("line one\nline two\n")
+            display.finish()
+
+        rendered = stream.getvalue()
+        self.assertIn("\x1b[2J\x1b[H", rendered)
+        self.assertIn("\x1b[2;12r", rendered)
+        self.assertIn("[agent] 当前任务: ", rendered)
+        self.assertIn("\x1b[32m实现实时输出\x1b[0m", rendered)
+        self.assertIn("line one\nline two\n", rendered)
+        self.assertIn("\x1b[r", rendered)
+
+    def test_live_display_falls_back_to_plain_text_when_not_using_tty_mode(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        stream = io.StringIO()
+        display = module.LiveOutputDisplay(stream, enabled=False)
+
+        display.start("普通输出")
+        display.write("hello\n")
+        display.finish()
+
+        self.assertEqual(stream.getvalue(), "[agent] 当前任务: 普通输出\nhello\n")
 
 
 class AgentLoopKillTests(unittest.TestCase):
