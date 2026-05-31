@@ -256,6 +256,21 @@ def build_live_status_parts(current_task, elapsed_seconds=None, log_path=None, l
     return prefix, task_text, suffix
 
 
+def build_live_meta_parts(elapsed_seconds=None, log_path=None, log_note=None):
+    parts = []
+
+    if isinstance(elapsed_seconds, int):
+        parts.append(f"已运行 {format_duration(elapsed_seconds)}")
+
+    if log_path:
+        parts.append(f"日志 {log_path}")
+
+    if log_note:
+        parts.append(log_note)
+
+    return parts
+
+
 def build_live_status_line(current_task, elapsed_seconds=None, log_path=None, log_note=None):
     prefix, task_text, suffix = build_live_status_parts(
         current_task,
@@ -294,6 +309,38 @@ def render_live_status_line(current_task, elapsed_seconds=None, log_path=None, l
     return prefix + colored_task + clipped_suffix
 
 
+def render_live_header_lines(current_task, elapsed_seconds=None, log_path=None, log_note=None, width=None, color=False):
+    task_prefix = "[agent] 当前任务: "
+    task_text = current_task or "无"
+    task_available = None
+    if isinstance(width, int) and width > 0:
+        task_available = max(0, width - len(task_prefix))
+
+    if task_available is not None:
+        task_text = clip_display_text(task_text, task_available)
+
+    if color and task_text:
+        task_line = task_prefix + ANSI_GREEN + task_text + ANSI_RESET
+    else:
+        task_line = task_prefix + task_text
+
+    meta_prefix = "[agent] "
+    meta_parts = build_live_meta_parts(
+        elapsed_seconds=elapsed_seconds,
+        log_path=log_path,
+        log_note=log_note,
+    )
+    meta_text = " | ".join(meta_parts) if meta_parts else "等待输出"
+    meta_available = None
+    if isinstance(width, int) and width > 0:
+        meta_available = max(0, width - len(meta_prefix))
+    if meta_available is not None:
+        meta_text = clip_display_text(meta_text, meta_available)
+    meta_line = meta_prefix + meta_text
+
+    return task_line, meta_line
+
+
 class LiveOutputDisplay:
     def __init__(self, stream, enabled=None):
         self.stream = stream
@@ -304,6 +351,10 @@ class LiveOutputDisplay:
         self.current_task = "无"
         self.last_header = None
         self.pending_escape = ""
+        self.header_rows = 2
+        self.scroll_top = self.header_rows + 1
+        self.cursor_row = self.scroll_top
+        self.cursor_col = 1
 
     def _write(self, text):
         self.stream.write(text)
@@ -316,13 +367,78 @@ class LiveOutputDisplay:
     def _refresh_size(self):
         size = shutil.get_terminal_size(fallback=(80, 24))
         self.cols = max(20, int(size.columns or 80))
-        self.rows = max(2, int(size.lines or 24))
+        self.rows = max(self.scroll_top, int(size.lines or 24))
+
+    def _clamp_cursor(self):
+        self.cursor_row = min(max(self.scroll_top, self.cursor_row), self.rows)
+        self.cursor_col = min(max(1, self.cursor_col), self.cols)
+
+    def _track_cursor(self, text):
+        for char in text:
+            if char == "\n":
+                self.cursor_row = min(self.rows, self.cursor_row + 1)
+                self.cursor_col = 1
+                continue
+            if char == "\r":
+                self.cursor_col = 1
+                continue
+            if char == "\t":
+                next_stop = ((self.cursor_col - 1) // 8 + 1) * 8 + 1
+                self.cursor_col = min(max(1, next_stop), self.cols)
+                continue
+
+            if self.cursor_col >= self.cols:
+                if self.cursor_row < self.rows:
+                    self.cursor_row += 1
+                self.cursor_col = 1
+            else:
+                self.cursor_col += 1
+
+        self._clamp_cursor()
+
+    def _draw_header(self, elapsed_seconds=None, log_path=None, log_note=None, force=False):
+        if not self.enabled:
+            return
+
+        self._refresh_size()
+        plain_header = render_live_header_lines(
+            self.current_task,
+            elapsed_seconds=elapsed_seconds,
+            log_path=log_path,
+            log_note=log_note,
+            width=self.cols,
+            color=False,
+        )
+        if plain_header == self.last_header and not force:
+            return
+
+        rendered_task, rendered_meta = render_live_header_lines(
+            self.current_task,
+            elapsed_seconds=elapsed_seconds,
+            log_path=log_path,
+            log_note=log_note,
+            width=self.cols,
+            color=True,
+        )
+
+        self._clamp_cursor()
+        self._write("\x1b[1;1H")
+        self._write("\x1b[2K")
+        self._write(rendered_task)
+        self._write("\x1b[2;1H")
+        self._write("\x1b[2K")
+        self._write(rendered_meta)
+        self._write(f"\x1b[{self.cursor_row};{self.cursor_col}H")
+        self._flush()
+        self.last_header = plain_header
 
     def start(self, current_task):
         self.current_task = current_task or "无"
         self.active = True
         self.last_header = None
         self.pending_escape = ""
+        self.cursor_row = self.scroll_top
+        self.cursor_col = 1
 
         if not self.enabled:
             self._write(build_live_status_line(self.current_task) + "\n")
@@ -331,10 +447,9 @@ class LiveOutputDisplay:
 
         self._refresh_size()
         self._write("\x1b[2J\x1b[H")
-        self._write("\n")
-        self._write(f"\x1b[2;{self.rows}r")
-        self._write("\x1b[2;1H")
-        self.update(current_task=self.current_task, force=True)
+        self._write(f"\x1b[{self.scroll_top};{self.rows}r")
+        self._write(f"\x1b[{self.scroll_top};1H")
+        self._draw_header(force=True)
 
     def update(self, current_task=None, elapsed_seconds=None, log_path=None, log_note=None, force=False):
         if current_task is not None:
@@ -353,33 +468,12 @@ class LiveOutputDisplay:
             self.last_header = plain_header
             return
 
-        self._refresh_size()
-        plain_header = render_live_status_line(
-            self.current_task,
+        self._draw_header(
             elapsed_seconds=elapsed_seconds,
             log_path=log_path,
             log_note=log_note,
-            width=self.cols,
-            color=False,
+            force=force,
         )
-        if plain_header == self.last_header and not force:
-            return
-        rendered_header = render_live_status_line(
-            self.current_task,
-            elapsed_seconds=elapsed_seconds,
-            log_path=log_path,
-            log_note=log_note,
-            width=self.cols,
-            color=True,
-        )
-
-        self._write("\x1b7")
-        self._write("\x1b[1;1H")
-        self._write("\x1b[2K")
-        self._write(rendered_header)
-        self._write("\x1b8")
-        self._flush()
-        self.last_header = plain_header
 
     def write(self, text):
         if not text:
@@ -394,6 +488,8 @@ class LiveOutputDisplay:
                 return
 
         self._write(text)
+        if self.enabled:
+            self._track_cursor(text)
         self._flush()
 
     def finish(self):

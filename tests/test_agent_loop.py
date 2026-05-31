@@ -190,10 +190,12 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
 
         rendered = stream.getvalue()
         self.assertIn("\x1b[2J\x1b[H", rendered)
-        self.assertIn("\x1b[2;12r", rendered)
+        self.assertIn("\x1b[3;12r", rendered)
         self.assertIn("[agent] 当前任务: ", rendered)
         self.assertIn("\x1b[32m实现实时输出\x1b[0m", rendered)
+        self.assertIn("[agent] 已运行 01:05 | 日志 .agent/logs/current.log", rendered)
         self.assertIn("line one\nline two\n", rendered)
+        self.assertIn("\x1b[3;1Hline one\nline two\n", rendered)
         self.assertIn("\x1b[r", rendered)
 
     def test_live_display_does_not_forward_cursor_movement_from_child_output(self):
@@ -208,8 +210,10 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
             display.finish()
 
         rendered = stream.getvalue()
-        self.assertEqual(rendered.count("\x1b[1;1H"), 1)
+        self.assertNotIn("\x1b7", rendered)
+        self.assertNotIn("\x1b8", rendered)
         self.assertIn("日志仍应留在滚动区\n", rendered)
+        self.assertIn("\x1b[3;1H日志仍应留在滚动区\n", rendered)
 
     def test_live_display_falls_back_to_plain_text_when_not_using_tty_mode(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
