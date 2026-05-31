@@ -180,7 +180,7 @@
 - [x] 实现 ChannelBind。
 - [x] 实现 relay candidate 注入 ICE。
 - [x] 实现 allocation refresh timer。
-- [ ] 增加 coturn interop 测试。
+- [x] 增加 coturn interop 测试。
 
 验收标准：
 

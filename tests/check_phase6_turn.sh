@@ -5,12 +5,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 test -f src/webrtc_turn_test_main.uya
+test -f src/webrtc_turn_coturn_test_main.uya
 test -d src/webrtc/turn
 test -f src/webrtc/turn/auth.uya
 test -f src/webrtc/turn/allocation.uya
 test -f src/webrtc/turn/model.uya
 test -f src/webrtc/turn/parse.uya
 test -f src/webrtc/turn/write.uya
+test -x tests/check_phase6_turn_coturn.sh
 
 rg -Fq "export const TURN_METHOD_ALLOCATE" src/webrtc/turn/model.uya
 rg -Fq "export const TURN_ATTRIBUTE_REQUESTED_TRANSPORT" src/webrtc/turn/model.uya
@@ -94,5 +96,7 @@ rg -Fq "turn_test_check_allocation_refresh_timer_schedules_before_expiry" src/we
 rg -Fq "turn_test_check_allocation_refresh_timer_retry_and_expiry" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_send_data_indication_roundtrip" src/webrtc_turn_test_main.uya
 rg -Fq "turn_test_check_send_data_indication_invalid_paths" src/webrtc_turn_test_main.uya
+rg -Fq "turn_coturn_test_run" src/webrtc_turn_coturn_test_main.uya
 
 ../uya/bin/uya run src/webrtc_turn_test_main.uya
+bash tests/check_phase6_turn_coturn.sh

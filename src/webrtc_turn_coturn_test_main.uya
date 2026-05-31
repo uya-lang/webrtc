@@ -1,0 +1,468 @@
+use libc.printf;
+use libc.syscall;
+use std.http.server.fill_sockaddr_loopback_16;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.turn.allocation;
+use webrtc.turn.auth;
+use webrtc.turn.model;
+use webrtc.turn.parse;
+use webrtc.turn.write;
+
+const COTURN_PORT: u16 = 34780u16;
+const COTURN_REQUESTED_LIFETIME_SECONDS: u32 = 600u32;
+const COTURN_REFRESH_LIFETIME_SECONDS: u32 = 300u32;
+const COTURN_CHANNEL_NUMBER: u16 = 0x4001u16;
+const COTURN_PEER_PORT: u16 = 40000u16;
+const COTURN_SOCKADDR_BYTES: usize = 16usize;
+const COTURN_PACKET_BYTES: usize = 2048usize;
+
+fn turn_coturn_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn turn_coturn_test_fill_transaction_id(dst: &[byte], seed: u8) void {
+    var i: usize = 0usize;
+    while i < dst.len {
+        dst[i] = (seed + (i as u8)) as byte;
+        i = i + 1usize;
+    }
+}
+
+fn turn_coturn_test_socket_open() !i32 {
+    const fd: i32 = try sys_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+    var bind_addr: [byte: COTURN_SOCKADDR_BYTES] = [];
+    fill_sockaddr_loopback_16(0u16, &bind_addr[0] as &byte);
+    _ = try sys_bind(fd, &bind_addr[0] as *void, COTURN_SOCKADDR_BYTES as u32);
+
+    var server_addr: [byte: COTURN_SOCKADDR_BYTES] = [];
+    fill_sockaddr_loopback_16(COTURN_PORT, &server_addr[0] as &byte);
+    _ = try sys_connect(fd, &server_addr[0] as *void, COTURN_SOCKADDR_BYTES as u32);
+    return fd;
+}
+
+fn turn_coturn_test_socket_send(fd: i32, packet: &[byte]) !usize {
+    if packet.len == 0usize {
+        return error.InvalidPacket;
+    }
+
+    const written: isize = try sys_send(fd, &packet[0] as *const byte, packet.len, 0i32);
+    return written as usize;
+}
+
+fn turn_coturn_test_socket_recv(fd: i32, packet: &[byte]) !usize {
+    if packet.len == 0usize {
+        return error.InvalidPacket;
+    }
+
+    const read_len: isize = try sys_recv(fd, &packet[0], packet.len, 0i32);
+    return read_len as usize;
+}
+
+fn turn_coturn_test_verify_fingerprint(packet: &[byte]) !void {
+    return stun_verify_fingerprint(packet);
+}
+
+fn turn_coturn_test_verify_message_integrity(packet: &[byte], credentials: &TurnLongTermCredentials) !void {
+    if credentials == null || credentials.key_len == 0usize {
+        return error.InvalidPacket;
+    }
+    return stun_verify_message_integrity(packet, credentials.key[0:credentials.key_len]);
+}
+
+fn turn_coturn_test_run() i32 {
+    const fd_result: !i32 = turn_coturn_test_socket_open();
+    if fd_result.error_id != 0 {
+        return 10;
+    }
+    const fd: i32 = fd_result.value;
+
+    var response_packet: [byte: COTURN_PACKET_BYTES] = [];
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+
+    var challenge_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_coturn_test_fill_transaction_id(challenge_txid[0:STUN_TRANSACTION_ID_BYTES], 1u8);
+    var challenge_request: [byte: 256] = [];
+    var challenge_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_request(&challenge_builder, challenge_request[0:256], challenge_txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 11;
+    }
+    if turn_builder_append_requested_transport_udp(&challenge_builder).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 12;
+    }
+    if turn_builder_append_requested_address_family(&challenge_builder, TURN_REQUESTED_ADDRESS_FAMILY_IPV4).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 13;
+    }
+    if turn_builder_append_lifetime(&challenge_builder, COTURN_REQUESTED_LIFETIME_SECONDS).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 14;
+    }
+    const challenge_request_len_result: !usize = turn_builder_finish(&challenge_builder);
+    if challenge_request_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 15;
+    }
+    const challenge_written_result: !usize =
+        turn_coturn_test_socket_send(fd, challenge_request[0:challenge_request_len_result.value]);
+    if challenge_written_result.error_id != 0 || challenge_written_result.value != challenge_request_len_result.value {
+        _ = sys_close(fd) catch {};
+        return 16;
+    }
+    const challenge_response_len_result: !usize =
+        turn_coturn_test_socket_recv(fd, response_packet[0:COTURN_PACKET_BYTES]);
+    if challenge_response_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 17;
+    }
+    const challenge_response_len: usize = challenge_response_len_result.value;
+    if turn_coturn_test_verify_fingerprint(response_packet[0:challenge_response_len]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 18;
+    }
+    const challenge_result: !TurnAuthenticationChallenge =
+        turn_authentication_challenge_parse(
+            response_packet[0:challenge_response_len],
+            TURN_METHOD_ALLOCATE,
+            challenge_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if challenge_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 19;
+    }
+    const challenge: TurnAuthenticationChallenge = challenge_result.value;
+    if challenge.error_code != TURN_ERROR_UNAUTHORIZED {
+        _ = sys_close(fd) catch {};
+        return 20;
+    }
+    if !challenge.realm_present || !turn_coturn_test_bytes_equal(challenge.realm, "uya.test" as &[byte]) {
+        _ = sys_close(fd) catch {};
+        return 21;
+    }
+    if turn_long_term_credentials_init_from_challenge(
+        &credentials,
+        "uya" as &[byte],
+        "uya-pass" as &[byte],
+        &challenge,
+    ).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 22;
+    }
+    if !turn_long_term_credentials_is_ready(&credentials) {
+        _ = sys_close(fd) catch {};
+        return 23;
+    }
+
+    var allocate_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_coturn_test_fill_transaction_id(allocate_txid[0:STUN_TRANSACTION_ID_BYTES], 31u8);
+    var allocate_request: [byte: 512] = [];
+    var allocate_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_request(&allocate_builder, allocate_request[0:512], allocate_txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 24;
+    }
+    if turn_builder_append_requested_transport_udp(&allocate_builder).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 25;
+    }
+    if turn_builder_append_requested_address_family(&allocate_builder, TURN_REQUESTED_ADDRESS_FAMILY_IPV4).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 26;
+    }
+    if turn_builder_append_lifetime(&allocate_builder, COTURN_REQUESTED_LIFETIME_SECONDS).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 27;
+    }
+    if turn_builder_append_long_term_credentials(&allocate_builder, &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 28;
+    }
+    const allocate_request_len_result: !usize = turn_builder_finish(&allocate_builder);
+    if allocate_request_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 29;
+    }
+    const allocate_written_result: !usize =
+        turn_coturn_test_socket_send(fd, allocate_request[0:allocate_request_len_result.value]);
+    if allocate_written_result.error_id != 0 || allocate_written_result.value != allocate_request_len_result.value {
+        _ = sys_close(fd) catch {};
+        return 30;
+    }
+    const allocate_response_len_result: !usize =
+        turn_coturn_test_socket_recv(fd, response_packet[0:COTURN_PACKET_BYTES]);
+    if allocate_response_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 31;
+    }
+    const allocate_response_len: usize = allocate_response_len_result.value;
+    if turn_coturn_test_verify_fingerprint(response_packet[0:allocate_response_len]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 32;
+    }
+    if turn_coturn_test_verify_message_integrity(response_packet[0:allocate_response_len], &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 33;
+    }
+    const allocate_response_result: !TurnAllocateSuccessResponse =
+        turn_allocate_success_response_parse(
+            response_packet[0:allocate_response_len],
+            allocate_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if allocate_response_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 34;
+    }
+    const allocate_response: TurnAllocateSuccessResponse = allocate_response_result.value;
+    if allocate_response.relayed_address_count == 0usize {
+        _ = sys_close(fd) catch {};
+        return 35;
+    }
+    if allocate_response.relayed_addresses[0].family != STUN_ADDRESS_FAMILY_IPV4 {
+        _ = sys_close(fd) catch {};
+        return 36;
+    }
+
+    var allocation_state: TurnAllocationState = turn_allocation_state_make();
+    if turn_allocation_state_apply_allocate_success(&allocation_state, &allocate_response, 1_000_000u64).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 37;
+    }
+    if !allocation_state.active || allocation_state.refresh_inflight {
+        _ = sys_close(fd) catch {};
+        return 38;
+    }
+    if allocation_state.relayed_address_count != allocate_response.relayed_address_count {
+        _ = sys_close(fd) catch {};
+        return 39;
+    }
+    if allocation_state.refresh_at_us <= 1_000_000u64 || allocation_state.expires_at_us <= allocation_state.refresh_at_us {
+        _ = sys_close(fd) catch {};
+        return 40;
+    }
+
+    var peer_ipv4: [byte: 4] = [127 as byte, 0 as byte, 0 as byte, 1 as byte];
+
+    var permission_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_coturn_test_fill_transaction_id(permission_txid[0:STUN_TRANSACTION_ID_BYTES], 61u8);
+    var permission_request: [byte: 512] = [];
+    var permission_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_create_permission_request(&permission_builder, permission_request[0:512], permission_txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 41;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&permission_builder, COTURN_PEER_PORT, peer_ipv4[0:4]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 42;
+    }
+    if turn_builder_append_long_term_credentials(&permission_builder, &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 43;
+    }
+    const permission_request_len_result: !usize = turn_builder_finish(&permission_builder);
+    if permission_request_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 44;
+    }
+    const permission_written_result: !usize =
+        turn_coturn_test_socket_send(fd, permission_request[0:permission_request_len_result.value]);
+    if permission_written_result.error_id != 0 || permission_written_result.value != permission_request_len_result.value {
+        _ = sys_close(fd) catch {};
+        return 45;
+    }
+    const permission_response_len_result: !usize =
+        turn_coturn_test_socket_recv(fd, response_packet[0:COTURN_PACKET_BYTES]);
+    if permission_response_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 46;
+    }
+    const permission_response_len: usize = permission_response_len_result.value;
+    if turn_coturn_test_verify_fingerprint(response_packet[0:permission_response_len]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 47;
+    }
+    if turn_coturn_test_verify_message_integrity(response_packet[0:permission_response_len], &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 48;
+    }
+    const permission_response_result: !TurnCreatePermissionSuccessResponse =
+        turn_create_permission_success_response_parse(
+            response_packet[0:permission_response_len],
+            permission_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if permission_response_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 49;
+    }
+    const permission_response: TurnCreatePermissionSuccessResponse = permission_response_result.value;
+    if !permission_response.message_integrity_present {
+        _ = sys_close(fd) catch {};
+        return 50;
+    }
+
+    var channel_bind_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_coturn_test_fill_transaction_id(channel_bind_txid[0:STUN_TRANSACTION_ID_BYTES], 91u8);
+    var channel_bind_request: [byte: 512] = [];
+    var channel_bind_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_request(&channel_bind_builder, channel_bind_request[0:512], channel_bind_txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 51;
+    }
+    if turn_builder_append_channel_number(&channel_bind_builder, COTURN_CHANNEL_NUMBER).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 52;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&channel_bind_builder, COTURN_PEER_PORT, peer_ipv4[0:4]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 53;
+    }
+    if turn_builder_append_long_term_credentials(&channel_bind_builder, &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 54;
+    }
+    const channel_bind_request_len_result: !usize = turn_builder_finish(&channel_bind_builder);
+    if channel_bind_request_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 55;
+    }
+    const channel_bind_written_result: !usize =
+        turn_coturn_test_socket_send(fd, channel_bind_request[0:channel_bind_request_len_result.value]);
+    if channel_bind_written_result.error_id != 0 || channel_bind_written_result.value != channel_bind_request_len_result.value {
+        _ = sys_close(fd) catch {};
+        return 56;
+    }
+    const channel_bind_response_len_result: !usize =
+        turn_coturn_test_socket_recv(fd, response_packet[0:COTURN_PACKET_BYTES]);
+    if channel_bind_response_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 57;
+    }
+    const channel_bind_response_len: usize = channel_bind_response_len_result.value;
+    if turn_coturn_test_verify_fingerprint(response_packet[0:channel_bind_response_len]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 58;
+    }
+    if turn_coturn_test_verify_message_integrity(response_packet[0:channel_bind_response_len], &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 59;
+    }
+    const channel_bind_response_result: !TurnChannelBindSuccessResponse =
+        turn_channel_bind_success_response_parse(
+            response_packet[0:channel_bind_response_len],
+            channel_bind_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if channel_bind_response_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 60;
+    }
+    const channel_bind_response: TurnChannelBindSuccessResponse = channel_bind_response_result.value;
+    if !channel_bind_response.message_integrity_present {
+        _ = sys_close(fd) catch {};
+        return 61;
+    }
+
+    var refresh_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_coturn_test_fill_transaction_id(refresh_txid[0:STUN_TRANSACTION_ID_BYTES], 121u8);
+    var refresh_request: [byte: 512] = [];
+    var refresh_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_refresh_request(&refresh_builder, refresh_request[0:512], refresh_txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 62;
+    }
+    if turn_builder_append_lifetime(&refresh_builder, COTURN_REFRESH_LIFETIME_SECONDS).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 63;
+    }
+    if turn_builder_append_long_term_credentials(&refresh_builder, &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 64;
+    }
+    const refresh_request_len_result: !usize = turn_builder_finish(&refresh_builder);
+    if refresh_request_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 65;
+    }
+    const refresh_written_result: !usize =
+        turn_coturn_test_socket_send(fd, refresh_request[0:refresh_request_len_result.value]);
+    if refresh_written_result.error_id != 0 || refresh_written_result.value != refresh_request_len_result.value {
+        _ = sys_close(fd) catch {};
+        return 66;
+    }
+    const refresh_response_len_result: !usize =
+        turn_coturn_test_socket_recv(fd, response_packet[0:COTURN_PACKET_BYTES]);
+    if refresh_response_len_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 67;
+    }
+    const refresh_response_len: usize = refresh_response_len_result.value;
+    if turn_coturn_test_verify_fingerprint(response_packet[0:refresh_response_len]).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 68;
+    }
+    if turn_coturn_test_verify_message_integrity(response_packet[0:refresh_response_len], &credentials).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 69;
+    }
+    const refresh_response_result: !TurnRefreshSuccessResponse =
+        turn_refresh_success_response_parse(
+            response_packet[0:refresh_response_len],
+            refresh_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if refresh_response_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 70;
+    }
+    const refresh_response: TurnRefreshSuccessResponse = refresh_response_result.value;
+    if !refresh_response.lifetime_present || refresh_response.lifetime_seconds == 0u32 {
+        _ = sys_close(fd) catch {};
+        return 71;
+    }
+    if turn_allocation_state_apply_refresh_success(&allocation_state, &refresh_response, 2_000_000u64).error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return 72;
+    }
+    if !allocation_state.active || allocation_state.refresh_inflight {
+        _ = sys_close(fd) catch {};
+        return 73;
+    }
+    if allocation_state.lifetime_seconds != refresh_response.lifetime_seconds {
+        _ = sys_close(fd) catch {};
+        return 74;
+    }
+    if allocation_state.refresh_at_us <= 2_000_000u64 || allocation_state.expires_at_us <= allocation_state.refresh_at_us {
+        _ = sys_close(fd) catch {};
+        return 75;
+    }
+    if turn_allocation_state_tick(&allocation_state, 2_000_000u64) {
+        _ = sys_close(fd) catch {};
+        return 76;
+    }
+
+    _ = sys_close(fd) catch {};
+    return 0;
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const result: i32 = turn_coturn_test_run();
+    if result != 0 {
+        _ = printf("TURN_COTURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+    return 0;
+}
