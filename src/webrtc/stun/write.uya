@@ -3,6 +3,7 @@
 
 use webrtc.binary;
 use webrtc.stun.model;
+use webrtc.stun.parse;
 
 fn stun_builder_copy_transaction_id(dst: &[byte], src: &[byte]) !void {
     if src.len != STUN_TRANSACTION_ID_BYTES {
@@ -154,6 +155,36 @@ export fn stun_builder_append_xor_mapped_address_ipv6(builder: &StunMessageBuild
     }
 
     return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS, value[0:20]);
+}
+
+export fn stun_builder_append_message_integrity(builder: &StunMessageBuilder, key: &[byte]) !void {
+    const attr_start: usize = try stun_builder_reserve(builder, STUN_ATTRIBUTE_HEADER_BYTES + 20usize);
+    const body_len: usize = builder.cursor - STUN_HEADER_BYTES;
+
+    try write_be_u16(builder.bytes[2:2], body_len as u16);
+
+    var digest: [byte: 20] = [];
+    try stun_message_integrity_compute(builder.bytes[0:attr_start], body_len as u16, key, digest[0:20]);
+    try write_be_u16(builder.bytes[attr_start:2], STUN_ATTRIBUTE_MESSAGE_INTEGRITY);
+    try write_be_u16(builder.bytes[attr_start + 2:2], 20u16);
+
+    var i: usize = 0;
+    while i < 20usize {
+        builder.bytes[attr_start + STUN_ATTRIBUTE_HEADER_BYTES + i] = digest[i];
+        i = i + 1;
+    }
+}
+
+export fn stun_builder_append_fingerprint(builder: &StunMessageBuilder) !void {
+    const attr_start: usize = try stun_builder_reserve(builder, STUN_ATTRIBUTE_HEADER_BYTES + 4usize);
+    const body_len: usize = builder.cursor - STUN_HEADER_BYTES;
+
+    try write_be_u16(builder.bytes[2:2], body_len as u16);
+
+    const fingerprint: u32 = stun_fingerprint_compute(builder.bytes[0:attr_start]);
+    try write_be_u16(builder.bytes[attr_start:2], STUN_ATTRIBUTE_FINGERPRINT);
+    try write_be_u16(builder.bytes[attr_start + 2:2], 4u16);
+    try write_be_u32(builder.bytes[attr_start + STUN_ATTRIBUTE_HEADER_BYTES:4], fingerprint);
 }
 
 export fn stun_builder_append_error_code(builder: &StunMessageBuilder, code: u16, reason: &[byte]) !void {

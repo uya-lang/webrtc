@@ -13,6 +13,10 @@ const STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLING: u32 = 16u32;
 const STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY: u32 = 32u32;
 const STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 64u32;
 const STUN_BINDING_REQUEST_SEEN_FINGERPRINT: u32 = 128u32;
+const STUN_MESSAGE_INTEGRITY_BYTES: usize = 20usize;
+const STUN_CRC32_POLYNOMIAL: u32 = 0xEDB88320u32;
+const STUN_FINGERPRINT_XOR: u32 = 0x5354554Eu32;
+const STUN_SHA1_BLOCK_BYTES: usize = 64usize;
 
 fn stun_message_type_decode_method(raw_type: u16) u16 {
     return (raw_type & 0x000Fu16)
@@ -74,6 +78,216 @@ fn stun_binding_request_attribute_known(attr_type: u16) bool {
 
 fn stun_xor_cookie_bytes(dst: &[byte]) !void {
     try write_be_u32(dst, STUN_MAGIC_COOKIE);
+}
+
+fn stun_crc32(bytes: &[byte]) u32 {
+    var crc: u32 = 0xFFFFFFFFu32;
+    var i: usize = 0;
+    while i < bytes.len {
+        crc = crc ^ (bytes[i] as u32);
+
+        var bit_index: usize = 0;
+        while bit_index < 8 {
+            if (crc & 1u32) != 0u32 {
+                crc = (crc >> 1u32) ^ STUN_CRC32_POLYNOMIAL;
+            } else {
+                crc = crc >> 1u32;
+            }
+            bit_index = bit_index + 1;
+        }
+
+        i = i + 1;
+    }
+
+    return ~crc;
+}
+
+fn stun_u32_rotate_left(value: u32, count: u32) u32 {
+    return (value << count) | (value >> (32u32 - count));
+}
+
+fn stun_u32_add(lhs: u32, rhs: u32) u32 {
+    return ((((lhs as u64) + (rhs as u64)) & 0xFFFFFFFFu64) as u32);
+}
+
+fn stun_u32_add5(a: u32, b: u32, c: u32, d: u32, e: u32) u32 {
+    var sum: u64 = (a as u64) + (b as u64);
+    sum = sum + (c as u64);
+    sum = sum + (d as u64);
+    sum = sum + (e as u64);
+    return ((sum & 0xFFFFFFFFu64) as u32);
+}
+
+fn stun_sha1_schedule_get(schedule: &[byte], index: usize) !u32 {
+    return read_be_u32(schedule[index * 4usize:4]);
+}
+
+fn stun_sha1_schedule_set(schedule: &[byte], index: usize, value: u32) !void {
+    try write_be_u32(schedule[index * 4usize:4], value);
+}
+
+fn stun_sha1_process_block(block: &[byte], h0: &u32, h1: &u32, h2: &u32, h3: &u32, h4: &u32) !void {
+    if block.len != STUN_SHA1_BLOCK_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var schedule: [byte: STUN_SHA1_BLOCK_BYTES] = [];
+    var index: usize = 0;
+    while index < 16usize {
+        try stun_sha1_schedule_set(schedule[0:STUN_SHA1_BLOCK_BYTES], index, try read_be_u32(block[index * 4usize:4]));
+        index = index + 1;
+    }
+
+    var a: u32 = h0;
+    var b: u32 = h1;
+    var c: u32 = h2;
+    var d: u32 = h3;
+    var e: u32 = h4;
+
+    var round: usize = 0;
+    while round < 80usize {
+        var word: u32 = 0u32;
+        if round < 16usize {
+            word = try stun_sha1_schedule_get(schedule[0:STUN_SHA1_BLOCK_BYTES], round);
+        } else {
+            const slot: usize = round & 15usize;
+            word = stun_u32_rotate_left(
+                (try stun_sha1_schedule_get(schedule[0:STUN_SHA1_BLOCK_BYTES], (round + 13usize) & 15usize))
+                    ^ (try stun_sha1_schedule_get(schedule[0:STUN_SHA1_BLOCK_BYTES], (round + 8usize) & 15usize))
+                    ^ (try stun_sha1_schedule_get(schedule[0:STUN_SHA1_BLOCK_BYTES], (round + 2usize) & 15usize))
+                    ^ (try stun_sha1_schedule_get(schedule[0:STUN_SHA1_BLOCK_BYTES], slot)),
+                1u32,
+            );
+            try stun_sha1_schedule_set(schedule[0:STUN_SHA1_BLOCK_BYTES], slot, word);
+        }
+
+        var f: u32 = 0u32;
+        var k: u32 = 0u32;
+        if round < 20usize {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999u32;
+        } else if round < 40usize {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1u32;
+        } else if round < 60usize {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDCu32;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6u32;
+        }
+
+        const next: u32 = stun_u32_add5(stun_u32_rotate_left(a, 5u32), f, e, k, word);
+        e = d;
+        d = c;
+        c = stun_u32_rotate_left(b, 30u32);
+        b = a;
+        a = next;
+        round = round + 1;
+    }
+
+    h0 = stun_u32_add(h0, a);
+    h1 = stun_u32_add(h1, b);
+    h2 = stun_u32_add(h2, c);
+    h3 = stun_u32_add(h3, d);
+    h4 = stun_u32_add(h4, e);
+}
+
+fn stun_sha1_update_chunk(
+    block: &[byte],
+    block_len: &usize,
+    part: &[byte],
+    h0: &u32,
+    h1: &u32,
+    h2: &u32,
+    h3: &u32,
+    h4: &u32,
+) !void {
+    var index: usize = 0;
+    while index < part.len {
+        block[block_len] = part[index];
+        block_len = block_len + 1;
+        if block_len == STUN_SHA1_BLOCK_BYTES {
+            try stun_sha1_process_block(block[0:STUN_SHA1_BLOCK_BYTES], h0, h1, h2, h3, h4);
+            block_len = 0;
+        }
+        index = index + 1;
+    }
+}
+
+fn stun_sha1_digest4(part0: &[byte], part1: &[byte], part2: &[byte], part3: &[byte], out: &[byte]) !void {
+    var h0: u32 = 0x67452301u32;
+    var h1: u32 = 0xEFCDAB89u32;
+    var h2: u32 = 0x98BADCFEu32;
+    var h3: u32 = 0x10325476u32;
+    var h4: u32 = 0xC3D2E1F0u32;
+
+    var block: [byte: STUN_SHA1_BLOCK_BYTES] = [];
+    var block_len: usize = 0;
+    const total_len: u64 = (part0.len as u64) + (part1.len as u64) + (part2.len as u64) + (part3.len as u64);
+
+    try stun_sha1_update_chunk(block[0:STUN_SHA1_BLOCK_BYTES], &block_len, part0, &h0, &h1, &h2, &h3, &h4);
+    try stun_sha1_update_chunk(block[0:STUN_SHA1_BLOCK_BYTES], &block_len, part1, &h0, &h1, &h2, &h3, &h4);
+    try stun_sha1_update_chunk(block[0:STUN_SHA1_BLOCK_BYTES], &block_len, part2, &h0, &h1, &h2, &h3, &h4);
+    try stun_sha1_update_chunk(block[0:STUN_SHA1_BLOCK_BYTES], &block_len, part3, &h0, &h1, &h2, &h3, &h4);
+
+    block[block_len] = 0x80 as byte;
+    block_len = block_len + 1;
+    if block_len > 56usize {
+        while block_len < STUN_SHA1_BLOCK_BYTES {
+            block[block_len] = 0 as byte;
+            block_len = block_len + 1;
+        }
+        try stun_sha1_process_block(block[0:STUN_SHA1_BLOCK_BYTES], &h0, &h1, &h2, &h3, &h4);
+        block_len = 0;
+    }
+
+    while block_len < 56usize {
+        block[block_len] = 0 as byte;
+        block_len = block_len + 1;
+    }
+
+    try write_be_u64(block[56:8], total_len * 8u64);
+    try stun_sha1_process_block(block[0:STUN_SHA1_BLOCK_BYTES], &h0, &h1, &h2, &h3, &h4);
+
+    try write_be_u32(out[0:4], h0);
+    try write_be_u32(out[4:4], h1);
+    try write_be_u32(out[8:4], h2);
+    try write_be_u32(out[12:4], h3);
+    try write_be_u32(out[16:4], h4);
+}
+
+fn stun_hmac_sha1_digest3(key: &[byte], part0: &[byte], part1: &[byte], part2: &[byte], out: &[byte]) !void {
+    var key_block: [byte: STUN_SHA1_BLOCK_BYTES] = [];
+    if key.len > STUN_SHA1_BLOCK_BYTES {
+        var key_digest: [byte: STUN_MESSAGE_INTEGRITY_BYTES] = [];
+        try stun_sha1_digest4(key, [], [], [], key_digest[0:STUN_MESSAGE_INTEGRITY_BYTES]);
+
+        var digest_index: usize = 0;
+        while digest_index < STUN_MESSAGE_INTEGRITY_BYTES {
+            key_block[digest_index] = key_digest[digest_index];
+            digest_index = digest_index + 1;
+        }
+    } else {
+        var key_index: usize = 0;
+        while key_index < key.len {
+            key_block[key_index] = key[key_index];
+            key_index = key_index + 1;
+        }
+    }
+
+    var inner_pad: [byte: STUN_SHA1_BLOCK_BYTES] = [];
+    var outer_pad: [byte: STUN_SHA1_BLOCK_BYTES] = [];
+    var pad_index: usize = 0;
+    while pad_index < STUN_SHA1_BLOCK_BYTES {
+        inner_pad[pad_index] = key_block[pad_index] ^ 0x36 as byte;
+        outer_pad[pad_index] = key_block[pad_index] ^ 0x5C as byte;
+        pad_index = pad_index + 1;
+    }
+
+    var inner_digest: [byte: STUN_MESSAGE_INTEGRITY_BYTES] = [];
+    try stun_sha1_digest4(inner_pad[0:STUN_SHA1_BLOCK_BYTES], part0, part1, part2, inner_digest[0:STUN_MESSAGE_INTEGRITY_BYTES]);
+    try stun_sha1_digest4(outer_pad[0:STUN_SHA1_BLOCK_BYTES], inner_digest[0:STUN_MESSAGE_INTEGRITY_BYTES], [], [], out);
 }
 
 export fn stun_header_parse(bytes: &[byte]) !StunMessageHeader {
@@ -201,6 +415,96 @@ export fn stun_parse_ice_role_tiebreaker(value: &[byte]) !u64 {
         return error.InvalidPacket;
     }
     return read_be_u64(value);
+}
+
+export fn stun_parse_message_integrity(value: &[byte]) !&[byte] {
+    if value.len != STUN_MESSAGE_INTEGRITY_BYTES {
+        return error.InvalidPacket;
+    }
+    return value;
+}
+
+export fn stun_message_integrity_compute(packet_prefix: &[byte], message_length: u16, key: &[byte], out: &[byte]) !void {
+    if packet_prefix.len < 4 {
+        return error.PacketTooShort;
+    }
+
+    var header_prefix: [byte: 4] = [];
+    header_prefix[0] = packet_prefix[0];
+    header_prefix[1] = packet_prefix[1];
+    try write_be_u16(header_prefix[2:2], message_length);
+
+    try stun_hmac_sha1_digest3(
+        key,
+        header_prefix[0:4],
+        packet_prefix[4:packet_prefix.len - 4],
+        [],
+        out,
+    );
+}
+
+export fn stun_verify_message_integrity(packet: &[byte], key: &[byte]) !void {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+
+    var iter: StunAttributeIterator = StunAttributeIterator{};
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    while iter.cursor < iter.bytes.len {
+        const attr_offset: usize = STUN_HEADER_BYTES + iter.cursor;
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        if attr.attr_type != STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+            continue;
+        }
+
+        const actual: &[byte] = try stun_parse_message_integrity(attr.value);
+        const signed_length: u16 = (attr_offset + STUN_ATTRIBUTE_HEADER_BYTES + actual.len - STUN_HEADER_BYTES) as u16;
+        var expected: [byte: STUN_MESSAGE_INTEGRITY_BYTES] = [];
+        try stun_message_integrity_compute(packet[0:attr_offset], signed_length, key, expected[0:STUN_MESSAGE_INTEGRITY_BYTES]);
+        if !constant_time_bytes_equal(actual, expected[0:STUN_MESSAGE_INTEGRITY_BYTES]) {
+            return error.IntegrityCheckFailed;
+        }
+        return;
+    }
+
+    return error.InvalidPacket;
+}
+
+export fn stun_parse_fingerprint(value: &[byte]) !u32 {
+    if value.len != 4 {
+        return error.InvalidPacket;
+    }
+    return read_be_u32(value);
+}
+
+export fn stun_fingerprint_compute(bytes: &[byte]) u32 {
+    return stun_crc32(bytes) ^ STUN_FINGERPRINT_XOR;
+}
+
+export fn stun_verify_fingerprint(packet: &[byte]) !void {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+
+    var iter: StunAttributeIterator = StunAttributeIterator{};
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    while iter.cursor < iter.bytes.len {
+        const attr_offset: usize = STUN_HEADER_BYTES + iter.cursor;
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        if attr.attr_type != STUN_ATTRIBUTE_FINGERPRINT {
+            continue;
+        }
+        if iter.cursor != iter.bytes.len {
+            return error.InvalidPacket;
+        }
+
+        const actual: u32 = try stun_parse_fingerprint(attr.value);
+        const expected: u32 = stun_fingerprint_compute(packet[0:attr_offset]);
+        if actual != expected {
+            return error.FingerprintMismatch;
+        }
+        return;
+    }
+
+    return error.InvalidPacket;
 }
 
 export fn stun_parse_xor_mapped_address(value: &[byte], transaction_id: &[byte]) !StunXorMappedAddress {

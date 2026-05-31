@@ -30,6 +30,8 @@ rg -Fq 'test "binding request parser rejects duplicate username and unknown comp
 rg -Fq 'test "binding builders encode request success response and error response"' src/webrtc_stun_test.uya
 rg -Fq 'test "xor mapped address username priority use-candidate and ice role attributes roundtrip"' src/webrtc_stun_test.uya
 rg -Fq 'test "error code parser and builder roundtrip"' src/webrtc_stun_test.uya
+rg -Fq 'test "message integrity parser builder and verifier roundtrip"' src/webrtc_stun_test.uya
+rg -Fq 'test "fingerprint parser builder and verifier roundtrip"' src/webrtc_stun_test.uya
 
 rg -Fq "export struct StunMessageHeader" src/webrtc/stun/model.uya
 rg -Fq "export struct StunAttribute" src/webrtc/stun/model.uya
@@ -47,6 +49,12 @@ rg -Fq "export fn stun_parse_username" src/webrtc/stun/parse.uya
 rg -Fq "export fn stun_parse_priority" src/webrtc/stun/parse.uya
 rg -Fq "export fn stun_parse_use_candidate" src/webrtc/stun/parse.uya
 rg -Fq "export fn stun_parse_ice_role_tiebreaker" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_parse_message_integrity" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_message_integrity_compute" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_verify_message_integrity" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_parse_fingerprint" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_fingerprint_compute" src/webrtc/stun/parse.uya
+rg -Fq "export fn stun_verify_fingerprint" src/webrtc/stun/parse.uya
 rg -Fq "export fn stun_parse_error_code" src/webrtc/stun/parse.uya
 rg -Fq "export fn stun_builder_init_binding_request" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_init_binding_success_response" src/webrtc/stun/write.uya
@@ -58,6 +66,8 @@ rg -Fq "export fn stun_builder_append_ice_controlled" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_append_ice_controlling" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_append_xor_mapped_address_ipv4" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_append_xor_mapped_address_ipv6" src/webrtc/stun/write.uya
+rg -Fq "export fn stun_builder_append_message_integrity" src/webrtc/stun/write.uya
+rg -Fq "export fn stun_builder_append_fingerprint" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_append_error_code" src/webrtc/stun/write.uya
 rg -Fq "export fn stun_builder_finish" src/webrtc/stun/write.uya
 rg -Fq "benchmark_main_emit_stun_parse_jsonl" benchmarks/bench_stun_parse.uya

@@ -44,3 +44,40 @@ test "xor mapped address username priority use-candidate and ice role attributes
 test "error code parser and builder roundtrip" {
     try expect(STUN_ATTRIBUTE_ERROR_CODE == 0x0009u16);
 }
+
+test "message integrity parser builder and verifier roundtrip" {
+    try expect(STUN_ATTRIBUTE_MESSAGE_INTEGRITY == 0x0008u16);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    var packet: [byte: 128] = [];
+    var builder: StunMessageBuilder = StunMessageBuilder{};
+
+    try stun_builder_init_binding_request(&builder, packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_username(&builder, "demo" as &[byte]);
+    try stun_builder_append_priority(&builder, 0x6E0001FFu32);
+    try stun_builder_append_message_integrity(&builder, "uya-secret" as &[byte]);
+    try stun_builder_append_fingerprint(&builder);
+
+    const written_len: usize = try stun_builder_finish(&builder);
+    try expect(written_len > STUN_HEADER_BYTES);
+    try stun_verify_message_integrity(packet[0:written_len], "uya-secret" as &[byte]);
+    try stun_verify_fingerprint(packet[0:written_len]);
+}
+
+test "fingerprint parser builder and verifier roundtrip" {
+    try expect(STUN_ATTRIBUTE_FINGERPRINT == 0x8028u16);
+    try expect(stun_fingerprint_compute([]) == 0x5354554Eu32);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    var packet: [byte: 128] = [];
+    var builder: StunMessageBuilder = StunMessageBuilder{};
+
+    try stun_builder_init_binding_request(&builder, packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_username(&builder, "demo" as &[byte]);
+    try stun_builder_append_priority(&builder, 0x6E0001FFu32);
+    try stun_builder_append_fingerprint(&builder);
+
+    const written_len: usize = try stun_builder_finish(&builder);
+    try expect(written_len > STUN_HEADER_BYTES);
+    try stun_verify_fingerprint(packet[0:written_len]);
+}

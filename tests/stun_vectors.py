@@ -287,7 +287,7 @@ def verify_message_integrity(packet: bytes, key: bytes, attr_type: int = ATTR_ME
     digestmod = hashlib.sha1 if attr_type == ATTR_MESSAGE_INTEGRITY else hashlib.sha256
     attr = find_first_attribute(packet, attr_type)
     attr_end = attr.offset + ATTRIBUTE_HEADER_BYTES + len(attr.value)
-    signed = bytearray(packet[:attr_end])
+    signed = bytearray(packet[: attr.offset])
     signed[2:4] = struct.pack("!H", attr_end - HEADER_BYTES)
     expected = hmac.new(key, signed, digestmod=digestmod).digest()
     return hmac.compare_digest(expected, attr.value)
@@ -307,6 +307,23 @@ def build_attribute(attr_type: int, value: bytes) -> bytes:
     return struct.pack("!HH", attr_type, len(value)) + value + padding
 
 
+def append_fingerprint(packet: bytes) -> bytes:
+    packet_with_length = bytearray(packet)
+    final_body_len = len(packet_with_length) - HEADER_BYTES + ATTRIBUTE_HEADER_BYTES + 4
+    packet_with_length[2:4] = struct.pack("!H", final_body_len)
+    fingerprint = (zlib.crc32(packet_with_length) & 0xFFFFFFFF) ^ 0x5354554E
+    return bytes(packet_with_length) + build_attribute(ATTR_FINGERPRINT, struct.pack("!I", fingerprint))
+
+
+def append_message_integrity(packet: bytes, key: bytes, attr_type: int = ATTR_MESSAGE_INTEGRITY) -> bytes:
+    digestmod = hashlib.sha1 if attr_type == ATTR_MESSAGE_INTEGRITY else hashlib.sha256
+    packet_with_length = bytearray(packet)
+    final_body_len = len(packet_with_length) - HEADER_BYTES + ATTRIBUTE_HEADER_BYTES + digestmod().digest_size
+    packet_with_length[2:4] = struct.pack("!H", final_body_len)
+    digest = hmac.new(key, packet_with_length, digestmod=digestmod).digest()
+    return bytes(packet_with_length) + build_attribute(attr_type, digest)
+
+
 def encode_xor_mapped_address(address: str, port: int, transaction_id: bytes) -> bytes:
     ip = ipaddress.ip_address(address)
     x_port = struct.pack("!H", port ^ (MAGIC_COOKIE >> 16))
@@ -324,15 +341,27 @@ def encode_error_code(code: int, reason: str) -> bytes:
     return b"\x00\x00" + bytes([code // 100, code % 100]) + reason.encode("utf-8")
 
 
-def build_message(message_class: int, transaction_id: bytes, attrs: list[tuple[int, bytes]]) -> bytes:
+def build_message(
+    message_class: int,
+    transaction_id: bytes,
+    attrs: list[tuple[int, bytes]],
+    *,
+    integrity_key: bytes | None = None,
+    include_fingerprint: bool = False,
+) -> bytes:
     if len(transaction_id) != 12:
         raise StunError("transaction id must be 12 bytes")
     body = b"".join(build_attribute(attr_type, value) for attr_type, value in attrs)
-    return (
+    packet = (
         struct.pack("!HHI", encode_message_type(BINDING_METHOD, message_class), len(body), MAGIC_COOKIE)
         + transaction_id
         + body
     )
+    if integrity_key is not None:
+        packet = append_message_integrity(packet, integrity_key)
+    if include_fingerprint:
+        packet = append_fingerprint(packet)
+    return packet
 
 
 def build_binding_request(
@@ -344,6 +373,8 @@ def build_binding_request(
     ice_controlled: int | None = None,
     ice_controlling: int | None = None,
     software: str | None = None,
+    integrity_key: bytes | None = None,
+    include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
     if software is not None:
@@ -358,27 +389,57 @@ def build_binding_request(
         attrs.append((ATTR_ICE_CONTROLLED, struct.pack("!Q", ice_controlled)))
     if ice_controlling is not None:
         attrs.append((ATTR_ICE_CONTROLLING, struct.pack("!Q", ice_controlling)))
-    return build_message(CLASS_REQUEST, transaction_id, attrs)
+    return build_message(
+        CLASS_REQUEST,
+        transaction_id,
+        attrs,
+        integrity_key=integrity_key,
+        include_fingerprint=include_fingerprint,
+    )
 
 
 def build_binding_success_response(
-    transaction_id: bytes, address: str, port: int, *, software: str | None = None
+    transaction_id: bytes,
+    address: str,
+    port: int,
+    *,
+    software: str | None = None,
+    integrity_key: bytes | None = None,
+    include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
     if software is not None:
         attrs.append((ATTR_SOFTWARE, software.encode("utf-8")))
     attrs.append((ATTR_XOR_MAPPED_ADDRESS, encode_xor_mapped_address(address, port, transaction_id)))
-    return build_message(CLASS_SUCCESS_RESPONSE, transaction_id, attrs)
+    return build_message(
+        CLASS_SUCCESS_RESPONSE,
+        transaction_id,
+        attrs,
+        integrity_key=integrity_key,
+        include_fingerprint=include_fingerprint,
+    )
 
 
 def build_binding_error_response(
-    transaction_id: bytes, code: int, reason: str, *, software: str | None = None
+    transaction_id: bytes,
+    code: int,
+    reason: str,
+    *,
+    software: str | None = None,
+    integrity_key: bytes | None = None,
+    include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
     if software is not None:
         attrs.append((ATTR_SOFTWARE, software.encode("utf-8")))
     attrs.append((ATTR_ERROR_CODE, encode_error_code(code, reason)))
-    return build_message(CLASS_ERROR_RESPONSE, transaction_id, attrs)
+    return build_message(
+        CLASS_ERROR_RESPONSE,
+        transaction_id,
+        attrs,
+        integrity_key=integrity_key,
+        include_fingerprint=include_fingerprint,
+    )
 
 
 def assert_raises(label: str, fn) -> None:
@@ -398,18 +459,21 @@ def run_rfc_vector_tests() -> None:
     assert parsed_request["username"] == "evtj:h6vY"
     assert parsed_request["priority"] == 0x6E0001FF
     assert parsed_request["ice_controlled"] == 0x932FF9B151263B36
+    assert verify_message_integrity(request, RFC5769_PASSWORD)
     assert verify_fingerprint(request)
 
     ipv4_response = load_hex_fixture(FIXTURE_DIR / "rfc5769_binding_response_ipv4.hex")
     _, parsed_ipv4 = parse_binding_success_response(ipv4_response)
     assert parsed_ipv4["software"] == "test vector"
     assert parsed_ipv4["xor_mapped_address"] == ("192.0.2.1", 32853)
+    assert verify_message_integrity(ipv4_response, RFC5769_PASSWORD)
     assert verify_fingerprint(ipv4_response)
 
     ipv6_response = load_hex_fixture(FIXTURE_DIR / "rfc5769_binding_response_ipv6.hex")
     _, parsed_ipv6 = parse_binding_success_response(ipv6_response)
     assert parsed_ipv6["software"] == "test vector"
     assert parsed_ipv6["xor_mapped_address"] == ("2001:db8:1234:5678:11:2233:4455:6677", 32853)
+    assert verify_message_integrity(ipv6_response, RFC5769_PASSWORD)
     assert verify_fingerprint(ipv6_response)
 
 
@@ -438,6 +502,7 @@ def run_negative_tests() -> None:
 
 def run_builder_tests() -> None:
     transaction_id = bytes(range(1, 13))
+    integrity_key = b"uya-secret"
 
     request = build_binding_request(
         transaction_id,
@@ -446,6 +511,8 @@ def run_builder_tests() -> None:
         use_candidate=True,
         ice_controlling=0x1122334455667788,
         software="uya-test",
+        integrity_key=integrity_key,
+        include_fingerprint=True,
     )
     header, parsed_request = parse_binding_request(request)
     assert header.raw_type == 0x0001
@@ -454,17 +521,44 @@ def run_builder_tests() -> None:
     assert parsed_request["priority"] == 0x6E0001FF
     assert parsed_request["use_candidate"] is True
     assert parsed_request["ice_controlling"] == 0x1122334455667788
+    assert verify_message_integrity(request, integrity_key)
+    assert verify_fingerprint(request)
 
-    success = build_binding_success_response(transaction_id, "192.0.2.33", 3478, software="uya-test")
+    success = build_binding_success_response(
+        transaction_id,
+        "192.0.2.33",
+        3478,
+        software="uya-test",
+        integrity_key=integrity_key,
+        include_fingerprint=True,
+    )
     success_header, parsed_success = parse_binding_success_response(success)
     assert success_header.raw_type == 0x0101
     assert parsed_success["software"] == "uya-test"
     assert parsed_success["xor_mapped_address"] == ("192.0.2.33", 3478)
+    assert verify_message_integrity(success, integrity_key)
+    assert verify_fingerprint(success)
 
-    error = build_binding_error_response(transaction_id, 487, "Role Conflict", software="uya-test")
+    error = build_binding_error_response(
+        transaction_id,
+        487,
+        "Role Conflict",
+        software="uya-test",
+        integrity_key=integrity_key,
+        include_fingerprint=True,
+    )
     error_header, parsed_error = parse_binding_error_response(error)
     assert error_header.raw_type == 0x0111
     assert parsed_error["error_code"] == (487, "Role Conflict")
+    assert verify_message_integrity(error, integrity_key)
+    assert verify_fingerprint(error)
+
+    corrupted_integrity = bytearray(request)
+    corrupted_integrity[24] ^= 0x01
+    assert not verify_message_integrity(bytes(corrupted_integrity), integrity_key)
+
+    corrupted_request = request[:-1] + bytes([request[-1] ^ 0x01])
+    assert not verify_fingerprint(corrupted_request)
 
 
 def run_fuzz_corpus_smoke() -> None:

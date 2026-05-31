@@ -89,28 +89,28 @@
 
 ## Phase 3：SDP parser/writer 与 JSEP 模型
 
-- [ ] 先收集 Chrome/Firefox SDP fixtures。
-- [ ] 先增加 SDP parse/write/parse roundtrip failing tests。
-- [ ] 先增加缺失 fingerprint、ice-pwd、rtcp-mux、不支持能力的错误测试。
-- [ ] 定义 `SessionDescription`、`MediaSection`、`CodecParameters`、`HeaderExtension`。
-- [ ] 实现 SDP 行扫描和字段 parser。
-- [ ] 支持 `v/o/s/t` 基础字段。
-- [ ] 支持 `m=` audio/video/application。
-- [ ] 支持 `a=group:BUNDLE`。
-- [ ] 支持 `a=mid`。
-- [ ] 支持 `a=ice-ufrag` / `a=ice-pwd`。
-- [ ] 支持 `a=fingerprint`。
-- [ ] 支持 `a=setup`。
-- [ ] 支持 `a=rtcp-mux`。
-- [ ] 支持 `a=candidate`。
-- [ ] 支持 `a=rtpmap` / `a=fmtp` / `a=rtcp-fb`。
-- [ ] 支持 `a=extmap`。
-- [ ] 支持 Opus SDP 参数：`minptime`、`maxptime`、`useinbandfec`、`stereo`、`sprop-stereo`、`usedtx`。
-- [ ] 支持 VP8 SDP 能力和反馈：`rtcp-fb` NACK、PLI、FIR、Transport-CC。
-- [ ] 支持 DataChannel application section。
-- [ ] 实现 SDP writer。
-- [ ] 实现 JSEP validator：bundle、rtcp-mux、fingerprint、payload type、direction。
-- [ ] 增加 `bench_sdp_parse`。
+- [x] 先收集 Chrome/Firefox SDP fixtures。
+- [x] 先增加 SDP parse/write/parse roundtrip failing tests。
+- [x] 先增加缺失 fingerprint、ice-pwd、rtcp-mux、不支持能力的错误测试。
+- [x] 定义 `SessionDescription`、`MediaSection`、`CodecParameters`、`HeaderExtension`。
+- [x] 实现 SDP 行扫描和字段 parser。
+- [x] 支持 `v/o/s/t` 基础字段。
+- [x] 支持 `m=` audio/video/application。
+- [x] 支持 `a=group:BUNDLE`。
+- [x] 支持 `a=mid`。
+- [x] 支持 `a=ice-ufrag` / `a=ice-pwd`。
+- [x] 支持 `a=fingerprint`。
+- [x] 支持 `a=setup`。
+- [x] 支持 `a=rtcp-mux`。
+- [x] 支持 `a=candidate`。
+- [x] 支持 `a=rtpmap` / `a=fmtp` / `a=rtcp-fb`。
+- [x] 支持 `a=extmap`。
+- [x] 支持 Opus SDP 参数：`minptime`、`maxptime`、`useinbandfec`、`stereo`、`sprop-stereo`、`usedtx`。
+- [x] 支持 VP8 SDP 能力和反馈：`rtcp-fb` NACK、PLI、FIR、Transport-CC。
+- [x] 支持 DataChannel application section。
+- [x] 实现 SDP writer。
+- [x] 实现 JSEP validator：bundle、rtcp-mux、fingerprint、payload type、direction。
+- [x] 增加 `bench_sdp_parse`。
 
 验收标准：
 
@@ -133,9 +133,9 @@
 - [x] 实现 PRIORITY。
 - [x] 实现 USE-CANDIDATE。
 - [x] 实现 ICE-CONTROLLING / ICE-CONTROLLED。
-- [ ] 实现 MESSAGE-INTEGRITY。
+- [x] 实现 MESSAGE-INTEGRITY。
 - [ ] 实现 MESSAGE-INTEGRITY-SHA256。
-- [ ] 实现 FINGERPRINT。
+- [x] 实现 FINGERPRINT。
 - [x] 实现 ERROR-CODE。
 
 验收标准：
