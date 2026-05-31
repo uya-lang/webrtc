@@ -2,6 +2,7 @@ use libc.printf;
 use webrtc.crypto.aes;
 use webrtc.crypto.gcm;
 use webrtc.crypto.ghash;
+use webrtc.crypto.csprng;
 use webrtc.binary;
 use webrtc.crypto.hash;
 use webrtc.crypto.hmac;
@@ -611,6 +612,43 @@ fn crypto_test_check_ecdsa_p256_vectors() i32 {
     return 0;
 }
 
+fn crypto_test_check_csprng_wrapper() i32 {
+    var out: [byte: 24] = [];
+    if crypto_csprng_fill(out[0:24]).error_id != 0 {
+        return 160;
+    }
+    if crypto_csprng_u32().error_id != 0 {
+        return 161;
+    }
+    if crypto_csprng_u64().error_id != 0 {
+        return 162;
+    }
+
+    crypto_random_test_reset();
+    crypto_random_test_set_fail_open(true);
+    const fill_failure: !void = crypto_csprng_fill(out[0:24]);
+    if fill_failure.error_id != @error_id(error.RandomSourceFailed) {
+        return 163;
+    }
+
+    crypto_random_test_reset();
+    crypto_random_test_set_fail_read(true);
+    const u32_failure: !u32 = crypto_csprng_u32();
+    if u32_failure.error_id != @error_id(error.RandomSourceFailed) {
+        return 164;
+    }
+
+    crypto_random_test_reset();
+    crypto_random_test_set_fail_read(true);
+    const u64_failure: !u64 = crypto_csprng_u64();
+    if u64_failure.error_id != @error_id(error.RandomSourceFailed) {
+        return 165;
+    }
+    crypto_random_test_reset();
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -694,6 +732,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = crypto_test_check_ecdsa_p256_vectors();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_csprng_wrapper();
     if result != 0 {
         _ = printf("CRYPTO_TEST_FAIL %d\n", result);
         return result;

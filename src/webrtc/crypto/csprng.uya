@@ -1,0 +1,21 @@
+// webrtc.crypto.csprng - Phase 7 CSPRNG boundary built on platform entropy
+// 模块路径：src/webrtc/crypto/csprng.uya → use webrtc.crypto.csprng;
+
+use webrtc.binary;
+use webrtc.crypto.random;
+
+export fn crypto_csprng_fill(dst: &[byte]) !void {
+    return crypto_random_fill(dst);
+}
+
+export fn crypto_csprng_u32() !u32 {
+    var bytes: [byte: 4] = [];
+    try crypto_random_fill(bytes[0:4]);
+    return read_be_u32(bytes[0:4]);
+}
+
+export fn crypto_csprng_u64() !u64 {
+    var bytes: [byte: 8] = [];
+    try crypto_random_fill(bytes[0:8]);
+    return read_be_u64(bytes[0:8]);
+}
