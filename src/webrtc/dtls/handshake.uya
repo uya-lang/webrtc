@@ -24,6 +24,9 @@ export const DTLS_FINISHED_TRANSCRIPT_HASH_BYTES: usize = 32usize;
 export const DTLS_EXPORTER_RANDOM_BYTES: usize = 32usize;
 export const DTLS_EXPORTER_MAX_LABEL_BYTES: usize = 255usize;
 export const DTLS_EXPORTER_MAX_SEED_BYTES: usize = DTLS_EXPORTER_MAX_LABEL_BYTES + (2usize * DTLS_EXPORTER_RANDOM_BYTES);
+export const DTLS_HANDSHAKE_RETRANSMISSION_INITIAL_TIMEOUT_US: u64 = 1_000_000u64;
+export const DTLS_HANDSHAKE_RETRANSMISSION_MAX_TIMEOUT_US: u64 = 60_000_000u64;
+export const DTLS_HANDSHAKE_RETRANSMISSION_MAX_RETRIES: u32 = 6u32;
 export const DTLS_EXTENSION_USE_SRTP: u16 = 14u16;
 export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80: u16 = 0x0001u16;
 export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32: u16 = 0x0002u16;
@@ -115,6 +118,20 @@ export fn dtls_use_srtp_extension_make() DtlsUseSrtpExtension {
     };
 }
 
+export struct DtlsHandshakeRetransmissionTimer {
+    active: bool = false,
+    timed_out: bool = false,
+    retransmissions_sent: u32 = 0u32,
+    max_retransmissions: u32 = 0u32,
+    current_timeout_us: u64 = 0u64,
+    max_timeout_us: u64 = 0u64,
+    next_deadline_us: u64 = 0u64,
+}
+
+export fn dtls_handshake_retransmission_timer_make() DtlsHandshakeRetransmissionTimer {
+    return DtlsHandshakeRetransmissionTimer{};
+}
+
 export struct DtlsHandshakeFragment {
     handshake_type: u8 = 0u8,
     body_length: usize = 0usize,
@@ -191,6 +208,20 @@ fn dtls_write_u24(dst: &[byte], value: usize) !void {
     dst[0] = ((value >> 16i32) & 0xffusize) as byte;
     dst[1] = ((value >> 8i32) & 0xffusize) as byte;
     dst[2] = (value & 0xffusize) as byte;
+}
+
+fn dtls_u64_add_saturating(lhs: u64, rhs: u64) u64 {
+    if rhs > 0xffffffffffffffffu64 - lhs {
+        return 0xffffffffffffffffu64;
+    }
+    return lhs + rhs;
+}
+
+fn dtls_u64_mul2_saturating(value: u64) u64 {
+    if value > 0x7fffffffffffffffu64 {
+        return 0xffffffffffffffffu64;
+    }
+    return value * 2u64;
 }
 
 fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
@@ -316,6 +347,13 @@ fn dtls_finished_validate(message: &DtlsFinished) !void {
     if message == null || message.verify_data.len != DTLS_FINISHED_VERIFY_DATA_BYTES {
         return error.InvalidPacket;
     }
+}
+
+fn dtls_handshake_retransmission_timer_reschedule(timer: &DtlsHandshakeRetransmissionTimer, now_us: u64) void {
+    if timer == null {
+        return;
+    }
+    timer.next_deadline_us = dtls_u64_add_saturating(now_us, timer.current_timeout_us);
 }
 
 fn dtls_use_srtp_profile_supported(profile: u16) bool {
@@ -1046,6 +1084,71 @@ export fn dtls_exporter_compute(master_secret: &[byte], label: &[byte], client_r
         index = index + 1usize;
     }
     return dtls_tls12_p_hash_sha256(master_secret, seed[0:cursor], out);
+}
+
+export fn dtls_handshake_retransmission_timer_start(
+    timer: &DtlsHandshakeRetransmissionTimer,
+    now_us: u64,
+    initial_timeout_us: u64,
+    max_timeout_us: u64,
+    max_retransmissions: u32,
+) !void {
+    if timer == null
+        || initial_timeout_us == 0u64
+        || max_timeout_us < initial_timeout_us
+        || max_retransmissions == 0u32 {
+        return error.InvalidPacket;
+    }
+
+    timer.active = true;
+    timer.timed_out = false;
+    timer.retransmissions_sent = 0u32;
+    timer.max_retransmissions = max_retransmissions;
+    timer.current_timeout_us = initial_timeout_us;
+    timer.max_timeout_us = max_timeout_us;
+    dtls_handshake_retransmission_timer_reschedule(timer, now_us);
+}
+
+export fn dtls_handshake_retransmission_timer_stop(timer: &DtlsHandshakeRetransmissionTimer) void {
+    if timer == null {
+        return;
+    }
+    timer.active = false;
+    timer.timed_out = false;
+    timer.retransmissions_sent = 0u32;
+    timer.max_retransmissions = 0u32;
+    timer.current_timeout_us = 0u64;
+    timer.max_timeout_us = 0u64;
+    timer.next_deadline_us = 0u64;
+}
+
+export fn dtls_handshake_retransmission_timer_should_fire(timer: &DtlsHandshakeRetransmissionTimer, now_us: u64) bool {
+    if timer == null || !timer.active || timer.timed_out {
+        return false;
+    }
+    return now_us >= timer.next_deadline_us;
+}
+
+export fn dtls_handshake_retransmission_timer_fire(timer: &DtlsHandshakeRetransmissionTimer, now_us: u64) !bool {
+    if timer == null || !timer.active || timer.timed_out || now_us < timer.next_deadline_us {
+        return error.InvalidPacket;
+    }
+
+    if timer.retransmissions_sent >= timer.max_retransmissions {
+        timer.active = false;
+        timer.timed_out = true;
+        timer.next_deadline_us = 0u64;
+        return false;
+    }
+
+    timer.retransmissions_sent = timer.retransmissions_sent + 1u32;
+    var next_timeout_us: u64 = dtls_u64_mul2_saturating(timer.current_timeout_us);
+    if next_timeout_us > timer.max_timeout_us {
+        next_timeout_us = timer.max_timeout_us;
+    }
+    timer.current_timeout_us = next_timeout_us;
+    dtls_handshake_retransmission_timer_reschedule(timer, now_us);
+    return true;
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {

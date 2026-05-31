@@ -46,6 +46,8 @@ rg -Fq "dtls_test_check_use_srtp_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_use_srtp_negotiation" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_retransmission_timer_backoff" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_retransmission_timer_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsHandshakeReassemblyState" src/webrtc/dtls/handshake.uya
@@ -58,6 +60,7 @@ rg -Fq "export struct DtlsClientKeyExchange" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsEcdheKeyShare" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsFinished" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsUseSrtpExtension" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsHandshakeRetransmissionTimer" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_fragment_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_absorb" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_take_message" src/webrtc/dtls/handshake.uya
@@ -81,6 +84,11 @@ rg -Fq "export fn dtls_use_srtp_extension_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_use_srtp_extension_write" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_use_srtp_negotiate" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_exporter_compute" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_retransmission_timer_make" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_retransmission_timer_start" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_retransmission_timer_stop" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_retransmission_timer_should_fire" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_handshake_retransmission_timer_fire" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 

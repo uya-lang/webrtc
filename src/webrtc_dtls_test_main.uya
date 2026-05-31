@@ -847,6 +847,74 @@ fn dtls_test_check_exporter_invalid_cases() i32 {
     return 0;
 }
 
+fn dtls_test_check_retransmission_timer_backoff() i32 {
+    var timer: DtlsHandshakeRetransmissionTimer = dtls_handshake_retransmission_timer_make();
+    if dtls_handshake_retransmission_timer_start(&timer, 1000u64, 100u64, 400u64, 2u32).error_id != 0 {
+        return 155;
+    }
+    if !timer.active || timer.timed_out {
+        return 156;
+    }
+    if timer.next_deadline_us != 1100u64 || timer.current_timeout_us != 100u64 {
+        return 157;
+    }
+    if dtls_handshake_retransmission_timer_should_fire(&timer, 1099u64) {
+        return 158;
+    }
+    if !dtls_handshake_retransmission_timer_should_fire(&timer, 1100u64) {
+        return 159;
+    }
+    const first_fire: !bool = dtls_handshake_retransmission_timer_fire(&timer, 1100u64);
+    if first_fire.error_id != 0 || !first_fire.value {
+        return 160;
+    }
+    if timer.retransmissions_sent != 1u32 || timer.current_timeout_us != 200u64 || timer.next_deadline_us != 1300u64 {
+        return 161;
+    }
+    const second_fire: !bool = dtls_handshake_retransmission_timer_fire(&timer, 1300u64);
+    if second_fire.error_id != 0 || !second_fire.value {
+        return 162;
+    }
+    if timer.retransmissions_sent != 2u32 || timer.current_timeout_us != 400u64 || timer.next_deadline_us != 1700u64 {
+        return 163;
+    }
+    const timeout_fire: !bool = dtls_handshake_retransmission_timer_fire(&timer, 1700u64);
+    if timeout_fire.error_id != 0 || timeout_fire.value {
+        return 164;
+    }
+    if timer.active || !timer.timed_out {
+        return 165;
+    }
+    dtls_handshake_retransmission_timer_stop(&timer);
+    if timer.active || timer.timed_out || timer.next_deadline_us != 0u64 {
+        return 166;
+    }
+    return 0;
+}
+
+fn dtls_test_check_retransmission_timer_invalid_cases() i32 {
+    var timer: DtlsHandshakeRetransmissionTimer = dtls_handshake_retransmission_timer_make();
+    if dtls_handshake_retransmission_timer_start(&timer, 0u64, 0u64, 400u64, 2u32).error_id == 0 {
+        return 167;
+    }
+    if dtls_handshake_retransmission_timer_start(&timer, 0u64, 100u64, 50u64, 2u32).error_id == 0 {
+        return 168;
+    }
+    if dtls_handshake_retransmission_timer_start(&timer, 0u64, 100u64, 400u64, 0u32).error_id == 0 {
+        return 169;
+    }
+    if dtls_handshake_retransmission_timer_fire(&timer, 0u64).error_id == 0 {
+        return 170;
+    }
+    if dtls_handshake_retransmission_timer_start(&timer, 500u64, 100u64, 400u64, 1u32).error_id != 0 {
+        return 171;
+    }
+    if dtls_handshake_retransmission_timer_fire(&timer, 599u64).error_id == 0 {
+        return 172;
+    }
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -984,6 +1052,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_exporter_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_retransmission_timer_backoff();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_retransmission_timer_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;

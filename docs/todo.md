@@ -226,7 +226,7 @@
 - [x] 实现 Finished 校验。
 - [x] 实现 SRTP protection profile negotiation。
 - [x] 实现 DTLS exporter。
-- [ ] 实现 handshake retransmission timer。
+- [x] 实现 handshake retransmission timer。
 - [ ] 实现 alert。
 - [ ] 实现 certificate fingerprint 校验。
 - [ ] 集成 ICE selected pair。
