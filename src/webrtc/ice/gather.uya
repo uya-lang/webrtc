@@ -1,0 +1,521 @@
+// webrtc.ice.gather - host candidate gathering、接口枚举与去重
+// 模块路径：src/webrtc/ice/gather.uya → use webrtc.ice.gather;
+
+use webrtc.errors;
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+
+export const ICE_MAX_INTERFACE_NAME_BYTES: usize = 32;
+export const ICE_MAX_HOST_PORT_BINDINGS: usize = 4;
+
+const ICE_AF_INET: u16 = 2u16;
+const ICE_AF_INET6: u16 = 10u16;
+const ICE_IFF_UP: u32 = 0x1u32;
+const ICE_IFF_LOOPBACK: u32 = 0x8u32;
+const ICE_INET_ADDRSTRLEN: usize = 16;
+const ICE_INET6_ADDRSTRLEN: usize = 46;
+const ICE_FNV64_OFFSET_BASIS: u64 = 14695981039346656037u64;
+const ICE_FNV64_PRIME: u64 = 1099511628211u64;
+
+export error IceHostGatherSystemCallFailed;
+export error IceHostGatherNoPortBindings;
+
+struct SockAddr {
+    sa_family: u16 = 0u16,
+    sa_data: [byte: 14] = [],
+}
+
+struct InAddr {
+    s_addr: u32 = 0u32,
+}
+
+struct SockAddrIn {
+    sin_family: u16 = 0u16,
+    sin_port: u16 = 0u16,
+    sin_addr: InAddr = InAddr{},
+    sin_zero: [byte: 8] = [],
+}
+
+struct In6Addr {
+    s6_addr: [byte: 16] = [],
+}
+
+struct SockAddrIn6 {
+    sin6_family: u16 = 0u16,
+    sin6_port: u16 = 0u16,
+    sin6_flowinfo: u32 = 0u32,
+    sin6_addr: In6Addr = In6Addr{},
+    sin6_scope_id: u32 = 0u32,
+}
+
+struct IfAddrs {
+    ifa_next: &IfAddrs,
+    ifa_name: &byte,
+    ifa_flags: u32 = 0u32,
+    ifa_addr: &SockAddr,
+    ifa_netmask: &SockAddr,
+    ifa_ifu: &SockAddr,
+    ifa_data: &void,
+}
+
+extern "libc" fn getifaddrs(ifap: & &IfAddrs) i32;
+extern "libc" fn freeifaddrs(ifa: &IfAddrs) void;
+extern "libc" fn if_nametoindex(ifname: *const byte) u32;
+extern "libc" fn inet_ntop(af: i32, src: &const void, dst: &byte, size: u32) &byte;
+
+export struct IceHostPortBinding {
+    component_id: u16 = ICE_COMPONENT_RTP,
+    port: u16 = 0u16,
+}
+
+export struct IceHostInterfaceDescriptor {
+    interface_name: [byte: ICE_MAX_INTERFACE_NAME_BYTES] = [],
+    interface_name_len: usize = 0,
+    family: u8 = ICE_ADDRESS_FAMILY_NONE,
+    host: [byte: ICE_MAX_ADDRESS_BYTES] = [],
+    host_len: usize = 0,
+    network_id: u16 = 0u16,
+    network_cost: u16 = 0u16,
+    is_up: bool = false,
+    is_loopback: bool = false,
+}
+
+export struct IceHostGatherResult {
+    interface_count: usize = 0,
+    usable_interface_count: usize = 0,
+    candidate_count: usize = 0,
+    duplicate_count: usize = 0,
+    pruned_host_count: usize = 0,
+    skipped_down_count: usize = 0,
+    skipped_unsupported_count: usize = 0,
+    skipped_link_local_count: usize = 0,
+    skipped_unspecified_count: usize = 0,
+    skipped_zero_port_count: usize = 0,
+}
+
+fn ice_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn ice_ascii_lower(value: byte) byte {
+    if value >= 'A' as byte && value <= 'Z' as byte {
+        return value + 32 as byte;
+    }
+    return value;
+}
+
+fn ice_c_string_len(value: &byte, max_len: usize) usize {
+    if value == null {
+        return 0;
+    }
+
+    var len: usize = 0;
+    while len < max_len && value[len] != 0 as byte {
+        len = len + 1;
+    }
+    return len;
+}
+
+fn ice_hash_fnv1a_extend(state: u64, bytes: &[byte]) u64 {
+    var hash: u64 = state;
+    var i: usize = 0;
+    while i < bytes.len {
+        hash = (hash ^ (bytes[i] as u64)) * ICE_FNV64_PRIME;
+        i = i + 1;
+    }
+    return hash;
+}
+
+fn ice_hash_fnv1a_u8(state: u64, value: u8) u64 {
+    var single: [byte: 1] = [];
+    single[0] = value as byte;
+    return ice_hash_fnv1a_extend(state, single[0:1]);
+}
+
+fn ice_hex_digit(value: u8) byte {
+    if value < 10u8 {
+        return ('0' as byte) + (value as byte);
+    }
+    return ('a' as byte) + ((value - 10u8) as byte);
+}
+
+fn ice_write_foundation_hex(candidate: &IceCandidate, hash: u64) !void {
+    var hex: [byte: 16] = [];
+    var shift: u32 = 0u32;
+    while shift < 16u32 {
+        const nibble_shift: u32 = (15u32 - shift) * 4u32;
+        const nibble: u8 = ((hash >> nibble_shift) & 0xFu64) as u8;
+        hex[shift as usize] = ice_hex_digit(nibble);
+        shift = shift + 1u32;
+    }
+    try ice_candidate_set_foundation(candidate, hex[0:16]);
+}
+
+fn ice_host_interface_foundation_hash(desc: &IceHostInterfaceDescriptor) u64 {
+    var hash: u64 = ICE_FNV64_OFFSET_BASIS;
+    hash = ice_hash_fnv1a_extend(hash, desc.interface_name[0:desc.interface_name_len]);
+    hash = ice_hash_fnv1a_u8(hash, desc.family);
+    hash = ice_hash_fnv1a_u8(hash, ICE_CANDIDATE_TRANSPORT_UDP);
+    return hash;
+}
+
+fn ice_host_interface_has_prefix(desc: &IceHostInterfaceDescriptor, prefix: &[byte]) bool {
+    if desc.host_len < prefix.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < prefix.len {
+        if ice_ascii_lower(desc.host[i]) != prefix[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn ice_host_interface_is_unspecified(desc: &IceHostInterfaceDescriptor) bool {
+    if desc.family == ICE_ADDRESS_FAMILY_IPV4 {
+        return ice_bytes_equal(desc.host[0:desc.host_len], "0.0.0.0" as &[byte]);
+    }
+    if desc.family == ICE_ADDRESS_FAMILY_IPV6 {
+        return ice_bytes_equal(desc.host[0:desc.host_len], "::" as &[byte]);
+    }
+    return true;
+}
+
+fn ice_host_interface_is_link_local_ipv6(desc: &IceHostInterfaceDescriptor) bool {
+    if desc.family != ICE_ADDRESS_FAMILY_IPV6 || desc.host_len < 3 {
+        return false;
+    }
+
+    return ice_host_interface_has_prefix(desc, "fe8" as &[byte])
+        || ice_host_interface_has_prefix(desc, "fe9" as &[byte])
+        || ice_host_interface_has_prefix(desc, "fea" as &[byte])
+        || ice_host_interface_has_prefix(desc, "feb" as &[byte]);
+}
+
+fn ice_host_interface_descriptor_from_ifaddrs(desc: &IceHostInterfaceDescriptor, entry: &IfAddrs) bool {
+    if desc == null || entry == null || entry.ifa_name == null || entry.ifa_addr == null {
+        return false;
+    }
+
+    ice_host_interface_descriptor_init(desc);
+    desc.is_up = (entry.ifa_flags & ICE_IFF_UP) != 0u32;
+    desc.is_loopback = (entry.ifa_flags & ICE_IFF_LOOPBACK) != 0u32;
+
+    if ice_host_interface_descriptor_set_name(desc, entry.ifa_name[0:ice_c_string_len(entry.ifa_name, ICE_MAX_INTERFACE_NAME_BYTES)]).error_id != 0 {
+        return false;
+    }
+
+    const network_id: u32 = if_nametoindex(entry.ifa_name as *const byte);
+    desc.network_id = if network_id > 65535u32 { 65535u16 } else { network_id as u16 };
+
+    if entry.ifa_addr.sa_family == ICE_AF_INET {
+        const addr4: &SockAddrIn = entry.ifa_addr as &SockAddrIn;
+        var out4: [byte: ICE_INET_ADDRSTRLEN] = [];
+        if inet_ntop(ICE_AF_INET as i32, &addr4.sin_addr as &const void, &out4[0], ICE_INET_ADDRSTRLEN as u32) == null {
+            return false;
+        }
+        return ice_host_interface_descriptor_set_host(desc, ICE_ADDRESS_FAMILY_IPV4, out4[0:ice_c_string_len(&out4[0], ICE_INET_ADDRSTRLEN)]).error_id == 0;
+    }
+
+    if entry.ifa_addr.sa_family == ICE_AF_INET6 {
+        const addr6: &SockAddrIn6 = entry.ifa_addr as &SockAddrIn6;
+        var out6: [byte: ICE_INET6_ADDRSTRLEN] = [];
+        if inet_ntop(ICE_AF_INET6 as i32, &addr6.sin6_addr as &const void, &out6[0], ICE_INET6_ADDRSTRLEN as u32) == null {
+            return false;
+        }
+        return ice_host_interface_descriptor_set_host(desc, ICE_ADDRESS_FAMILY_IPV6, out6[0:ice_c_string_len(&out6[0], ICE_INET6_ADDRSTRLEN)]).error_id == 0;
+    }
+
+    return false;
+}
+
+fn ice_host_candidate_matches(lhs: &IceCandidate, rhs: &IceCandidate) bool {
+    if lhs.candidate_type != rhs.candidate_type {
+        return false;
+    }
+    if lhs.component_id != rhs.component_id || lhs.transport != rhs.transport {
+        return false;
+    }
+    return ice_transport_address_equal(&lhs.address, &rhs.address);
+}
+
+fn ice_host_gather_process_descriptor(
+    result: &IceHostGatherResult,
+    agent: &IceAgent,
+    desc: &IceHostInterfaceDescriptor,
+    ports: &IceHostPortBinding,
+    port_count: usize,
+) !void {
+    if !desc.is_up {
+        result.skipped_down_count = result.skipped_down_count + 1;
+        return;
+    }
+    if !ice_host_interface_descriptor_is_usable(desc) {
+        result.skipped_unsupported_count = result.skipped_unsupported_count + 1;
+        return;
+    }
+    if ice_host_interface_is_unspecified(desc) {
+        result.skipped_unspecified_count = result.skipped_unspecified_count + 1;
+        return;
+    }
+    if ice_host_interface_is_link_local_ipv6(desc) {
+        result.skipped_link_local_count = result.skipped_link_local_count + 1;
+        return;
+    }
+
+    result.usable_interface_count = result.usable_interface_count + 1;
+
+    var port_index: usize = 0;
+    while port_index < port_count {
+        if ports[port_index].port == 0u16 {
+            result.skipped_zero_port_count = result.skipped_zero_port_count + 1;
+            port_index = port_index + 1;
+            continue;
+        }
+
+        const before_count: usize = agent.local_candidate_count;
+        _ = try ice_agent_add_host_candidate(agent, desc, ports[port_index]);
+        if agent.local_candidate_count == before_count {
+            result.duplicate_count = result.duplicate_count + 1;
+        } else {
+            result.candidate_count = result.candidate_count + 1;
+        }
+
+        port_index = port_index + 1;
+    }
+}
+
+export fn ice_host_interface_descriptor_init(desc: &IceHostInterfaceDescriptor) void {
+    if desc == null {
+        return;
+    }
+
+    desc.interface_name_len = 0;
+    desc.family = ICE_ADDRESS_FAMILY_NONE;
+    desc.host_len = 0;
+    desc.network_id = 0u16;
+    desc.network_cost = 0u16;
+    desc.is_up = false;
+    desc.is_loopback = false;
+}
+
+export fn ice_host_interface_descriptor_set_name(desc: &IceHostInterfaceDescriptor, name: &[byte]) !void {
+    if desc == null {
+        return error.InvalidPacket;
+    }
+    if name.len == 0 || name.len > ICE_MAX_INTERFACE_NAME_BYTES {
+        return error.UnsupportedCapability;
+    }
+
+    desc.interface_name_len = name.len;
+
+    var i: usize = 0;
+    while i < ICE_MAX_INTERFACE_NAME_BYTES {
+        desc.interface_name[i] = 0 as byte;
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < name.len {
+        desc.interface_name[i] = name[i];
+        i = i + 1;
+    }
+}
+
+export fn ice_host_interface_descriptor_set_host(desc: &IceHostInterfaceDescriptor, family: u8, host: &[byte]) !void {
+    if desc == null {
+        return error.InvalidPacket;
+    }
+    if family != ICE_ADDRESS_FAMILY_IPV4 && family != ICE_ADDRESS_FAMILY_IPV6 {
+        return error.UnsupportedCapability;
+    }
+    if host.len == 0 || host.len > ICE_MAX_ADDRESS_BYTES {
+        return error.UnsupportedCapability;
+    }
+
+    desc.family = family;
+    desc.host_len = host.len;
+
+    var i: usize = 0;
+    while i < ICE_MAX_ADDRESS_BYTES {
+        desc.host[i] = 0 as byte;
+        i = i + 1;
+    }
+
+    i = 0;
+    while i < host.len {
+        desc.host[i] = host[i];
+        i = i + 1;
+    }
+}
+
+export fn ice_host_interface_descriptor_is_usable(desc: &IceHostInterfaceDescriptor) bool {
+    if desc == null {
+        return false;
+    }
+    if desc.family != ICE_ADDRESS_FAMILY_IPV4 && desc.family != ICE_ADDRESS_FAMILY_IPV6 {
+        return false;
+    }
+    return desc.host_len > 0;
+}
+
+export fn ice_agent_prune_host_candidates(agent: &IceAgent) usize {
+    if agent == null || agent.local_candidate_count == 0 {
+        return 0;
+    }
+
+    var write_index: usize = 0;
+    var read_index: usize = 0;
+    while read_index < agent.local_candidate_count {
+        if agent.local_candidates[read_index].candidate_type != ICE_CANDIDATE_TYPE_HOST {
+            if write_index != read_index {
+                agent.local_candidates[write_index] = agent.local_candidates[read_index];
+            }
+            write_index = write_index + 1;
+        }
+        read_index = read_index + 1;
+    }
+
+    const pruned: usize = agent.local_candidate_count - write_index;
+    while write_index < agent.local_candidate_count {
+        ice_candidate_init(&agent.local_candidates[write_index]);
+        write_index = write_index + 1;
+    }
+
+    agent.local_candidate_count = agent.local_candidate_count - pruned;
+    return pruned;
+}
+
+export fn ice_agent_add_host_candidate(agent: &IceAgent, desc: &IceHostInterfaceDescriptor, port_binding: IceHostPortBinding) !u16 {
+    if agent == null || desc == null {
+        return error.InvalidPacket;
+    }
+    if !ice_host_interface_descriptor_is_usable(desc) || port_binding.port == 0u16 {
+        return error.InvalidPacket;
+    }
+
+    var candidate_local: IceCandidate = IceCandidate{};
+    ice_candidate_init(&candidate_local);
+    candidate_local.component_id = port_binding.component_id;
+    candidate_local.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate_local.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate_local.network_id = desc.network_id;
+    candidate_local.network_cost = desc.network_cost;
+    candidate_local.generation = agent.generation;
+    try ice_transport_address_set(&candidate_local.address, desc.family, desc.host[0:desc.host_len], port_binding.port);
+    try ice_write_foundation_hex(&candidate_local, ice_host_interface_foundation_hash(desc));
+
+    var existing_index: usize = 0;
+    while existing_index < agent.local_candidate_count {
+        if ice_host_candidate_matches(&agent.local_candidates[existing_index], &candidate_local) {
+            return existing_index as u16;
+        }
+        existing_index = existing_index + 1;
+    }
+
+    if agent.local_candidate_count >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.UnsupportedCapability;
+    }
+
+    agent.local_candidates[agent.local_candidate_count] = candidate_local;
+    agent.local_candidate_count = agent.local_candidate_count + 1;
+    return (agent.local_candidate_count - 1) as u16;
+}
+
+export fn ice_agent_gather_host_candidates_from_descriptors(
+    agent: &IceAgent,
+    descriptors: &IceHostInterfaceDescriptor,
+    descriptor_count: usize,
+    ports: &IceHostPortBinding,
+    port_count: usize,
+) !IceHostGatherResult {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if port_count == 0 {
+        return error.IceHostGatherNoPortBindings;
+    }
+    if port_count > ICE_MAX_HOST_PORT_BINDINGS {
+        return error.UnsupportedCapability;
+    }
+
+    agent.gathering_state = ICE_GATHERING_STATE_GATHERING;
+
+    var result: IceHostGatherResult = IceHostGatherResult{};
+    result.pruned_host_count = ice_agent_prune_host_candidates(agent);
+
+    var index: usize = 0;
+    while index < descriptor_count {
+        result.interface_count = result.interface_count + 1;
+        ice_host_gather_process_descriptor(&result, agent, &descriptors[index], ports, port_count) catch {
+            agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+            return error.UnsupportedCapability;
+        };
+        index = index + 1;
+    }
+
+    agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+    return result;
+}
+
+export fn ice_agent_gather_host_candidates(
+    agent: &IceAgent,
+    ports: &IceHostPortBinding,
+    port_count: usize,
+) !IceHostGatherResult {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if port_count == 0 {
+        return error.IceHostGatherNoPortBindings;
+    }
+    if port_count > ICE_MAX_HOST_PORT_BINDINGS {
+        return error.UnsupportedCapability;
+    }
+
+    var list: &IfAddrs = null;
+    if getifaddrs(&list) != 0 {
+        return error.IceHostGatherSystemCallFailed;
+    }
+
+    agent.gathering_state = ICE_GATHERING_STATE_GATHERING;
+
+    var result: IceHostGatherResult = IceHostGatherResult{};
+    result.pruned_host_count = ice_agent_prune_host_candidates(agent);
+
+    var current: &IfAddrs = list;
+    while current != null {
+        result.interface_count = result.interface_count + 1;
+
+        var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+        if ice_host_interface_descriptor_from_ifaddrs(&desc, current) {
+            ice_host_gather_process_descriptor(&result, agent, &desc, ports, port_count) catch {
+                freeifaddrs(list);
+                agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+                return error.UnsupportedCapability;
+            };
+        } else {
+            result.skipped_unsupported_count = result.skipped_unsupported_count + 1;
+        }
+
+        current = current.ifa_next;
+    }
+
+    freeifaddrs(list);
+    agent.gathering_state = ICE_GATHERING_STATE_COMPLETE;
+    return result;
+}

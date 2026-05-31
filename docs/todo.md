@@ -148,7 +148,7 @@
 ## Phase 5：ICE host/srflx
 
 - [x] 定义 `IceCandidate`、`CandidatePair`、`IceAgent`。
-- [ ] 实现 host candidate gathering。
+- [x] 实现 host candidate gathering。
 - [ ] 实现 STUN server reflexive candidate gathering。
 - [ ] 实现 remote candidate 添加。
 - [ ] 实现 candidate priority 计算。

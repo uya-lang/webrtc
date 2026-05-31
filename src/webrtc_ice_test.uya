@@ -2,6 +2,22 @@ use std.testing.expect;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
+use webrtc.ice.gather;
+
+fn ice_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
 
 test "ice candidate model owns transport address and related address metadata" {
     try expect(ICE_MAX_FOUNDATION_BYTES >= 16);
@@ -41,4 +57,158 @@ test "ice helpers expose stable default state for future gathering and checklist
     try expect(agent.state == ICE_AGENT_STATE_NEW);
     try expect(agent.role == ICE_AGENT_ROLE_CONTROLLING);
     try expect(!ice_agent_has_selected_pair(&agent));
+}
+
+test "host candidate helpers copy bounded address foundation and equality state" {
+    var address: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&address, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte], 5000u16);
+    try expect(ice_transport_address_is_set(&address));
+
+    var same: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&same, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte], 5000u16);
+    try expect(ice_transport_address_equal(&address, &same));
+
+    var different: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&different, ICE_ADDRESS_FAMILY_IPV6, "::1" as &[byte], 5000u16);
+    try expect(!ice_transport_address_equal(&address, &different));
+
+    var candidate: IceCandidate = IceCandidate{};
+    ice_candidate_init(&candidate);
+    try ice_candidate_set_foundation(&candidate, "eth0v4udp" as &[byte]);
+    try expect(candidate.foundation_len == 9);
+    try expect(ice_test_bytes_equal(candidate.foundation[0:candidate.foundation_len], "eth0v4udp" as &[byte]));
+}
+
+test "host candidate gathering from descriptors deduplicates per component and prunes stale host entries" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
+    agent.generation = 9u32;
+
+    var ports: [IceHostPortBinding: 2] = [
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTCP, port: 5001u16 },
+    ];
+
+    var descriptors: [IceHostInterfaceDescriptor: 5] = [];
+    ice_host_interface_descriptor_init(&descriptors[0]);
+    try ice_host_interface_descriptor_set_name(&descriptors[0], "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[0], ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
+    descriptors[0].network_id = 4u16;
+    descriptors[0].is_up = true;
+
+    ice_host_interface_descriptor_init(&descriptors[1]);
+    try ice_host_interface_descriptor_set_name(&descriptors[1], "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[1], ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
+    descriptors[1].network_id = 4u16;
+    descriptors[1].is_up = true;
+
+    ice_host_interface_descriptor_init(&descriptors[2]);
+    try ice_host_interface_descriptor_set_name(&descriptors[2], "wlan0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[2], ICE_ADDRESS_FAMILY_IPV4, "198.51.100.9" as &[byte]);
+    descriptors[2].network_id = 9u16;
+    descriptors[2].is_up = false;
+
+    ice_host_interface_descriptor_init(&descriptors[3]);
+    try ice_host_interface_descriptor_set_name(&descriptors[3], "lo" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[3], ICE_ADDRESS_FAMILY_IPV4, "127.0.0.1" as &[byte]);
+    descriptors[3].network_id = 1u16;
+    descriptors[3].is_up = true;
+    descriptors[3].is_loopback = true;
+
+    ice_host_interface_descriptor_init(&descriptors[4]);
+    try ice_host_interface_descriptor_set_name(&descriptors[4], "eth1" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[4], ICE_ADDRESS_FAMILY_IPV6, "fe80::9" as &[byte]);
+    descriptors[4].network_id = 7u16;
+    descriptors[4].is_up = true;
+
+    const result: IceHostGatherResult = try ice_agent_gather_host_candidates_from_descriptors(
+        &agent,
+        &descriptors[0],
+        5usize,
+        &ports[0],
+        2usize,
+    );
+    try expect(result.interface_count == 5usize);
+    try expect(result.usable_interface_count == 3usize);
+    try expect(result.candidate_count == 4usize);
+    try expect(result.duplicate_count == 2usize);
+    try expect(result.skipped_down_count == 1usize);
+    try expect(result.skipped_link_local_count == 1usize);
+    try expect(agent.gathering_state == ICE_GATHERING_STATE_COMPLETE);
+    try expect(agent.local_candidate_count == 4usize);
+    try expect(agent.local_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_HOST);
+    try expect(agent.local_candidates[0].generation == 9u32);
+    try expect(ice_test_bytes_equal(
+        agent.local_candidates[0].foundation[0:agent.local_candidates[0].foundation_len],
+        agent.local_candidates[1].foundation[0:agent.local_candidates[1].foundation_len],
+    ));
+    try expect(agent.local_candidates[0].address.port == 5000u16);
+    try expect(agent.local_candidates[1].address.port == 5001u16);
+    try expect(agent.local_candidates[0].network_id == 4u16);
+    try expect(agent.local_candidates[2].network_id == 1u16);
+
+    var next_ports: [IceHostPortBinding: 1] = [
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 7000u16 },
+    ];
+    var next_descriptors: [IceHostInterfaceDescriptor: 1] = [];
+    ice_host_interface_descriptor_init(&next_descriptors[0]);
+    try ice_host_interface_descriptor_set_name(&next_descriptors[0], "lo" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&next_descriptors[0], ICE_ADDRESS_FAMILY_IPV4, "127.0.0.1" as &[byte]);
+    next_descriptors[0].network_id = 1u16;
+    next_descriptors[0].is_up = true;
+    next_descriptors[0].is_loopback = true;
+
+    const next_result: IceHostGatherResult = try ice_agent_gather_host_candidates_from_descriptors(
+        &agent,
+        &next_descriptors[0],
+        1usize,
+        &next_ports[0],
+        1usize,
+    );
+    try expect(next_result.pruned_host_count == 4usize);
+    try expect(next_result.candidate_count == 1usize);
+    try expect(agent.local_candidate_count == 1usize);
+    try expect(agent.local_candidates[0].address.port == 7000u16);
+}
+
+test "host candidate gathering skips unspecified addresses and zero-port bindings" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 11u64);
+
+    var ports: [IceHostPortBinding: 2] = [
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 0u16 },
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 3478u16 },
+    ];
+
+    var descriptors: [IceHostInterfaceDescriptor: 3] = [];
+    ice_host_interface_descriptor_init(&descriptors[0]);
+    try ice_host_interface_descriptor_set_name(&descriptors[0], "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[0], ICE_ADDRESS_FAMILY_IPV4, "0.0.0.0" as &[byte]);
+    descriptors[0].is_up = true;
+
+    ice_host_interface_descriptor_init(&descriptors[1]);
+    try ice_host_interface_descriptor_set_name(&descriptors[1], "eth1" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[1], ICE_ADDRESS_FAMILY_IPV6, "::" as &[byte]);
+    descriptors[1].is_up = true;
+
+    ice_host_interface_descriptor_init(&descriptors[2]);
+    try ice_host_interface_descriptor_set_name(&descriptors[2], "eth2" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&descriptors[2], ICE_ADDRESS_FAMILY_IPV4, "203.0.113.44" as &[byte]);
+    descriptors[2].network_id = 12u16;
+    descriptors[2].is_up = true;
+
+    const result: IceHostGatherResult = try ice_agent_gather_host_candidates_from_descriptors(
+        &agent,
+        &descriptors[0],
+        3usize,
+        &ports[0],
+        2usize,
+    );
+    try expect(result.skipped_unspecified_count == 2usize);
+    try expect(result.skipped_zero_port_count == 1usize);
+    try expect(result.candidate_count == 1usize);
+    try expect(agent.gathering_state == ICE_GATHERING_STATE_COMPLETE);
+    try expect(agent.local_candidate_count == 1usize);
+    try expect(agent.local_candidates[0].address.port == 3478u16);
+    try expect(agent.local_candidates[0].network_id == 12u16);
 }
