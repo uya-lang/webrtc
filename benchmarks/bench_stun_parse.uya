@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 4 STUN parser baseline 占位：后续接入真实 ns/packet 和 allocation count。
+export fn benchmark_main_emit_stun_parse_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_stun_parse",
+        suite: "phase4",
+        unit: "ns/packet",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

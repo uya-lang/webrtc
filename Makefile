@@ -82,6 +82,9 @@ test: build
 	rg -q 'test "ring queue rejects full and empty operations"' src/webrtc_ring_test.uya
 	rg -q 'test "packet arena copies payload into owned slab"' src/webrtc_arena_test.uya
 	rg -q 'test "packet arena rejects oversize payload and exhausted arena"' src/webrtc_arena_test.uya
+	bash tests/check_phase2_udp.sh
+	bash tests/check_phase3_sdp.sh
+	bash tests/check_phase4_stun.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null
@@ -91,11 +94,15 @@ bench: build
 	test -d benchmarks
 	test -f benchmarks/main.uya
 	test -f benchmarks/bench_arena_ring.uya
+	test -f benchmarks/bench_sdp_parse.uya
+	test -f benchmarks/bench_stun_parse.uya
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
 	test -s $(BENCH_FILE)
 	rg -q '"name":"placeholder"' $(BENCH_FILE)
 	rg -q '"name":"bench_arena_ring"' $(BENCH_FILE)
+	rg -q '"name":"bench_sdp_parse"' $(BENCH_FILE)
+	rg -q '"name":"bench_stun_parse"' $(BENCH_FILE)
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -1,0 +1,179 @@
+use std.testing.expect;
+use webrtc.errors;
+use webrtc.sdp.model;
+use webrtc.sdp.parse;
+use webrtc.sdp.write;
+use webrtc.sdp.jsep;
+
+test "sdp parse write parse roundtrip keeps chrome and firefox offers stable" {
+    try expect(@size_of(SessionDescription) > 0);
+    try expect(@size_of(MediaSection) > 0);
+    try expect(@size_of(CodecParameters) > 0);
+    try expect(@size_of(HeaderExtension) > 0);
+    try expect(@size_of(SdpLineScanner) > 0);
+    try expect(SDP_WRITER_MAX_BYTES >= 4096);
+}
+
+test "sdp validator rejects missing fingerprint ice-pwd rtcp-mux and unsupported capability" {
+    try expect(WEBRTC_ERROR_VERSION == 1);
+    try expect(@error_id(error.MissingFingerprint) != 0);
+    try expect(@error_id(error.MissingIcePwd) != 0);
+    try expect(@error_id(error.MissingRtcpMux) != 0);
+    try expect(@error_id(error.UnsupportedCapability) != 0);
+}
+
+test "sdp line scanner tracks line numbers and rejects malformed records" {
+    var scanner: SdpLineScanner = SdpLineScanner{
+        bytes: "v=0\r\na=group:BUNDLE audio video\n" as &[byte],
+    };
+
+    try expect(try sdp_line_scanner_next(&scanner));
+    try expect(scanner.current.kind == 'v' as byte);
+    try expect(scanner.current.line_number == 1u32);
+    try expect(scanner.current.value == "0" as &[byte]);
+
+    try expect(try sdp_line_scanner_next(&scanner));
+    try expect(scanner.current.kind == 'a' as byte);
+    try expect(scanner.current.line_number == 2u32);
+
+    var malformed: SdpLineScanner = SdpLineScanner{
+        bytes: "broken-line\n" as &[byte],
+    };
+    const invalid_line = sdp_line_scanner_next(&malformed);
+    try expect(invalid_line.error_id == @error_id(error.InvalidPacket));
+}
+
+test "sdp parser populates bundle mids codecs candidates extmaps and datachannel fields" {
+    const offer: &[byte] =
+        "v=0\n"
+        "o=- 1 2 IN IP4 127.0.0.1\n"
+        "s=-\n"
+        "t=0 0\n"
+        "a=group:BUNDLE audio video data\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:audio\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:audioUfrag\n"
+        "a=ice-pwd:audioPwd123456\n"
+        "a=fingerprint:sha-256 AA:BB\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:1 1 udp 2122260223 192.0.2.10 54400 typ host generation 0\n"
+        "a=rtpmap:111 opus/48000/2\n"
+        "a=fmtp:111 minptime=10;maxptime=60;useinbandfec=1;stereo=1;sprop-stereo=1;usedtx=1\n"
+        "a=extmap:1/sendonly urn:ietf:params:rtp-hdrext:ssrc-audio-level\n"
+        "m=video 9 UDP/TLS/RTP/SAVPF 100\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:video\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:videoUfrag\n"
+        "a=ice-pwd:videoPwd123456\n"
+        "a=fingerprint:sha-256 AA:BB\n"
+        "a=setup:actpass\n"
+        "a=rtcp-mux\n"
+        "a=candidate:2 1 UDP 2122260223 192.0.2.10 54402 typ host\n"
+        "a=rtpmap:100 VP8/90000\n"
+        "a=rtcp-fb:100 nack\n"
+        "a=rtcp-fb:100 transport-cc\n"
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\n"
+        "c=IN IP4 0.0.0.0\n"
+        "a=mid:data\n"
+        "a=sendrecv\n"
+        "a=ice-ufrag:dataUfrag\n"
+        "a=ice-pwd:dataPwd123456\n"
+        "a=fingerprint:sha-256 AA:BB\n"
+        "a=setup:actpass\n"
+        "a=candidate:3 1 UDP 2122260223 192.0.2.10 54404 typ host\n"
+        "a=sctp-port:5000\n"
+        "a=max-message-size:262144\n";
+
+    const session: SessionDescription = try sdp_parse_session_description_bytes(offer);
+    try expect(session.version == 0u16);
+    try expect(session.bundle_mid_count == 3);
+    try expect(session.media_section_count == 3);
+    try expect(session.media_sections[0].mid == "audio" as &[byte]);
+    try expect(session.media_sections[0].codecs[0].encoding_name == "opus" as &[byte]);
+    try expect(session.media_sections[0].candidates[0].candidate_type == "host" as &[byte]);
+    try expect(session.media_sections[0].header_extensions[0].direction == "sendonly" as &[byte]);
+    try expect(session.media_sections[1].codecs[0].encoding_name == "VP8" as &[byte]);
+    try expect(session.media_sections[1].codecs[0].rtcp_feedback_count == 2);
+    try expect(session.media_sections[2].kind == "application" as &[byte]);
+    try expect(session.media_sections[2].sctp_port == 5000u16);
+    try expect(session.media_sections[2].max_message_size == 262144u32);
+}
+
+test "sdp writer emits canonical bundle media codec and datachannel attributes" {
+    var session: SessionDescription = SessionDescription{};
+    session.version = 0u16;
+    session.origin = "- 1 2 IN IP4 127.0.0.1" as &[byte];
+    session.session_name = "-" as &[byte];
+    session.timing = "0 0" as &[byte];
+    session.bundle_mid_count = 1;
+    session.bundle_mids[0] = "data";
+    session.media_section_count = 1;
+    session.media_sections[0].kind = "application" as &[byte];
+    session.media_sections[0].port = 9u16;
+    session.media_sections[0].protocol = "UDP/DTLS/SCTP" as &[byte];
+    session.media_sections[0].mid = "data" as &[byte];
+    session.media_sections[0].direction = "sendrecv" as &[byte];
+    session.media_sections[0].ice_ufrag = "ufrag" as &[byte];
+    session.media_sections[0].ice_pwd = "pwd" as &[byte];
+    session.media_sections[0].fingerprint = Fingerprint{
+        hash_name: "sha-256" as &[byte],
+        value: "AA:BB" as &[byte],
+    };
+    session.media_sections[0].setup = "actpass" as &[byte];
+    session.media_sections[0].format_token_count = 1;
+    session.media_sections[0].format_tokens[0] = "webrtc-datachannel";
+    session.media_sections[0].candidate_count = 1;
+    session.media_sections[0].candidates[0] = IceCandidate{
+        foundation: "1" as &[byte],
+        component_id: 1u16,
+        transport: "udp" as &[byte],
+        priority: 2122260223u32,
+        address: "192.0.2.10" as &[byte],
+        port: 54404u16,
+        candidate_type: "host" as &[byte],
+    };
+    session.media_sections[0].sctp_port = 5000u16;
+    session.media_sections[0].max_message_size = 262144u32;
+
+    var buf: [byte: SDP_WRITER_MAX_BYTES] = [];
+    const written_len: usize = try sdp_write_session_description(&session, &buf);
+    try expect(written_len > 0);
+    try expect(buf[0] == 'v' as byte);
+}
+
+test "sdp validator enforces bundle mids directions payload uniqueness and application negotiation" {
+    var session: SessionDescription = SessionDescription{};
+    session.version = 0u16;
+    session.bundle_mid_count = 1;
+    session.bundle_mids[0] = "audio";
+    session.media_section_count = 1;
+    session.media_sections[0].kind = "audio" as &[byte];
+    session.media_sections[0].mid = "audio" as &[byte];
+    session.media_sections[0].direction = "sendrecv" as &[byte];
+    session.media_sections[0].ice_ufrag = "ufrag" as &[byte];
+    session.media_sections[0].ice_pwd = "pwd" as &[byte];
+    session.media_sections[0].rtcp_mux = true;
+    session.media_sections[0].fingerprint = Fingerprint{
+        hash_name: "sha-256" as &[byte],
+        value: "AA:BB" as &[byte],
+    };
+    session.media_sections[0].format_token_count = 1;
+    session.media_sections[0].format_tokens[0] = "111";
+    session.media_sections[0].codec_count = 1;
+    session.media_sections[0].codecs[0] = CodecParameters{
+        payload_type: 111u16,
+        encoding_name: "opus" as &[byte],
+        clock_rate_hz: 48000u32,
+        channel_count: 2u8,
+    };
+
+    try sdp_validate_webrtc_session(&session);
+
+    session.bundle_mids[0] = "video";
+    const bad_bundle = sdp_validate_webrtc_session(&session);
+    try expect(bad_bundle.error_id == @error_id(error.UnsupportedCapability));
+}

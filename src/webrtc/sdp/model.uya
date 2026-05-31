@@ -1,0 +1,93 @@
+// webrtc.sdp.model - SDP/JSEP 紧凑数据模型
+// 模块路径：src/webrtc/sdp/model.uya → use webrtc.sdp.model;
+
+export const SDP_MAX_MEDIA_SECTIONS: usize = 8;
+export const SDP_MAX_BUNDLE_MIDS: usize = 8;
+export const SDP_MAX_CODECS_PER_MEDIA: usize = 8;
+export const SDP_MAX_CODEC_FMTP_PARAMS: usize = 12;
+export const SDP_MAX_CODEC_FEEDBACKS: usize = 8;
+export const SDP_MAX_HEADER_EXTENSIONS: usize = 8;
+export const SDP_MAX_CANDIDATES_PER_MEDIA: usize = 8;
+export const SDP_MAX_CANDIDATE_EXTENSION_TOKENS: usize = 8;
+
+export struct FmtpParameter {
+    key: &[byte] = [],
+    value: &[byte] = [],
+}
+
+export struct CodecFeedback {
+    payload_type: u16 = 0u16,
+    value: &[byte] = [],
+}
+
+export struct CodecParameters {
+    payload_type: u16 = 0u16,
+    encoding_name: &[byte] = [],
+    clock_rate_hz: u32 = 0u32,
+    channel_count: u8 = 0u8,
+    fmtp_params: [FmtpParameter: SDP_MAX_CODEC_FMTP_PARAMS] = [],
+    fmtp_param_count: usize = 0,
+    rtcp_feedbacks: [CodecFeedback: SDP_MAX_CODEC_FEEDBACKS] = [],
+    rtcp_feedback_count: usize = 0,
+}
+
+export struct HeaderExtension {
+    id: u16 = 0u16,
+    direction: &[byte] = [],
+    uri: &[byte] = [],
+}
+
+export struct IceCandidate {
+    foundation: &[byte] = [],
+    component_id: u16 = 0u16,
+    transport: &[byte] = [],
+    priority: u32 = 0u32,
+    address: &[byte] = [],
+    port: u16 = 0u16,
+    candidate_type: &[byte] = [],
+    extension_tokens: [[byte: 32]: SDP_MAX_CANDIDATE_EXTENSION_TOKENS] = [],
+    extension_token_count: usize = 0,
+}
+
+export struct Fingerprint {
+    hash_name: &[byte] = [],
+    value: &[byte] = [],
+}
+
+export struct MediaSection {
+    kind: &[byte] = [],
+    port: u16 = 0u16,
+    protocol: &[byte] = [],
+    mid: &[byte] = [],
+    direction: &[byte] = [],
+    format_tokens: [[byte: 32]: SDP_MAX_CODECS_PER_MEDIA] = [],
+    format_token_count: usize = 0,
+    connection: &[byte] = [],
+    ice_ufrag: &[byte] = [],
+    ice_pwd: &[byte] = [],
+    fingerprint: Fingerprint = Fingerprint{},
+    setup: &[byte] = [],
+    rtcp_mux: bool = false,
+    candidates: [IceCandidate: SDP_MAX_CANDIDATES_PER_MEDIA] = [],
+    candidate_count: usize = 0,
+    codecs: [CodecParameters: SDP_MAX_CODECS_PER_MEDIA] = [],
+    codec_count: usize = 0,
+    header_extensions: [HeaderExtension: SDP_MAX_HEADER_EXTENSIONS] = [],
+    header_extension_count: usize = 0,
+    sctp_port: u16 = 0u16,
+    sctpmap_app: &[byte] = [],
+    sctpmap_streams: u16 = 0u16,
+    max_message_size: u32 = 0u32,
+}
+
+export struct SessionDescription {
+    version: u16 = 0u16,
+    origin: &[byte] = [],
+    session_name: &[byte] = [],
+    timing: &[byte] = [],
+    fingerprint: Fingerprint = Fingerprint{},
+    bundle_mids: [[byte: 32]: SDP_MAX_BUNDLE_MIDS] = [],
+    bundle_mid_count: usize = 0,
+    media_sections: [MediaSection: SDP_MAX_MEDIA_SECTIONS] = [],
+    media_section_count: usize = 0,
+}

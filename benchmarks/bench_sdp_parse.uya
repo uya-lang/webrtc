@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 3 SDP parser/writer microbench 基线占位：后续切到真实长行与大 SDP 输入。
+export fn benchmark_main_emit_sdp_parse_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_sdp_parse",
+        suite: "phase3",
+        unit: "ns/op",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

@@ -1,0 +1,80 @@
+// webrtc.stun.model - STUN message / attribute 类型与常量
+// 模块路径：src/webrtc/stun/model.uya → use webrtc.stun.model;
+
+export const STUN_HEADER_BYTES: usize = 20;
+export const STUN_ATTRIBUTE_HEADER_BYTES: usize = 4;
+export const STUN_TRANSACTION_ID_BYTES: usize = 12;
+export const STUN_MAGIC_COOKIE: u32 = 0x2112A442u32;
+
+export const STUN_METHOD_BINDING: u16 = 0x0001u16;
+
+export const STUN_MESSAGE_CLASS_REQUEST: u8 = 0u8;
+export const STUN_MESSAGE_CLASS_INDICATION: u8 = 1u8;
+export const STUN_MESSAGE_CLASS_SUCCESS_RESPONSE: u8 = 2u8;
+export const STUN_MESSAGE_CLASS_ERROR_RESPONSE: u8 = 3u8;
+
+export const STUN_ATTRIBUTE_USERNAME: u16 = 0x0006u16;
+export const STUN_ATTRIBUTE_MESSAGE_INTEGRITY: u16 = 0x0008u16;
+export const STUN_ATTRIBUTE_ERROR_CODE: u16 = 0x0009u16;
+export const STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256: u16 = 0x001Cu16;
+export const STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS: u16 = 0x0020u16;
+export const STUN_ATTRIBUTE_PRIORITY: u16 = 0x0024u16;
+export const STUN_ATTRIBUTE_USE_CANDIDATE: u16 = 0x0025u16;
+export const STUN_ATTRIBUTE_SOFTWARE: u16 = 0x8022u16;
+export const STUN_ATTRIBUTE_FINGERPRINT: u16 = 0x8028u16;
+export const STUN_ATTRIBUTE_ICE_CONTROLLED: u16 = 0x8029u16;
+export const STUN_ATTRIBUTE_ICE_CONTROLLING: u16 = 0x802Au16;
+
+export const STUN_ADDRESS_FAMILY_IPV4: u8 = 1u8;
+export const STUN_ADDRESS_FAMILY_IPV6: u8 = 2u8;
+
+export const STUN_MAX_USERNAME_BYTES: usize = 128;
+export const STUN_MAX_ERROR_REASON_BYTES: usize = 96;
+
+export struct StunMessageHeader {
+    raw_type: u16 = 0u16,
+    method: u16 = 0u16,
+    message_class: u8 = 0u8,
+    message_length: u16 = 0u16,
+    magic_cookie: u32 = STUN_MAGIC_COOKIE,
+    transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [],
+}
+
+export struct StunAttribute {
+    attr_type: u16 = 0u16,
+    value_len: u16 = 0u16,
+    padded_len: u16 = 0u16,
+    value: &[byte] = [],
+}
+
+export struct StunAttributeIterator {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+}
+
+export struct StunXorMappedAddress {
+    family: u8 = 0u8,
+    port: u16 = 0u16,
+    address_bytes: [byte: 16] = [],
+    address_len: usize = 0,
+}
+
+export struct StunErrorCodeAttribute {
+    code: u16 = 0u16,
+    reason: &[byte] = [],
+}
+
+export struct StunMessageBuilder {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+    message_type: u16 = 0u16,
+    transaction_id: [byte: STUN_TRANSACTION_ID_BYTES] = [],
+}
+
+export fn stun_message_type_encode(method: u16, message_class: u8) u16 {
+    return (method & 0x000Fu16)
+        | ((method & 0x0070u16) << 1u16)
+        | ((method & 0x0F80u16) << 2u16)
+        | (((message_class as u16) & 0x0001u16) << 4u16)
+        | (((message_class as u16) & 0x0002u16) << 7u16);
+}

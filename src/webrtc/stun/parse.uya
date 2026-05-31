@@ -1,0 +1,276 @@
+// webrtc.stun.parse - STUN header parser 与 TLV attribute iterator
+// 模块路径：src/webrtc/stun/parse.uya → use webrtc.stun.parse;
+
+use webrtc.binary;
+use webrtc.errors;
+use webrtc.stun.model;
+
+const STUN_BINDING_REQUEST_SEEN_USERNAME: u32 = 1u32;
+const STUN_BINDING_REQUEST_SEEN_PRIORITY: u32 = 2u32;
+const STUN_BINDING_REQUEST_SEEN_USE_CANDIDATE: u32 = 4u32;
+const STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLED: u32 = 8u32;
+const STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLING: u32 = 16u32;
+const STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY: u32 = 32u32;
+const STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 64u32;
+const STUN_BINDING_REQUEST_SEEN_FINGERPRINT: u32 = 128u32;
+
+fn stun_message_type_decode_method(raw_type: u16) u16 {
+    return (raw_type & 0x000Fu16)
+        | ((raw_type & 0x00E0u16) >> 1u16)
+        | ((raw_type & 0x3E00u16) >> 2u16);
+}
+
+fn stun_message_type_decode_class(raw_type: u16) u8 {
+    return ((((raw_type >> 4u16) & 0x0001u16) | ((raw_type >> 7u16) & 0x0002u16)) as u8);
+}
+
+fn stun_copy_transaction_id(dst: &[byte], src: &[byte]) void {
+    var i: usize = 0;
+    while i < STUN_TRANSACTION_ID_BYTES {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+fn stun_binding_request_seen_mask(attr_type: u16) u32 {
+    if attr_type == STUN_ATTRIBUTE_USERNAME {
+        return STUN_BINDING_REQUEST_SEEN_USERNAME;
+    }
+    if attr_type == STUN_ATTRIBUTE_PRIORITY {
+        return STUN_BINDING_REQUEST_SEEN_PRIORITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_USE_CANDIDATE {
+        return STUN_BINDING_REQUEST_SEEN_USE_CANDIDATE;
+    }
+    if attr_type == STUN_ATTRIBUTE_ICE_CONTROLLED {
+        return STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLED;
+    }
+    if attr_type == STUN_ATTRIBUTE_ICE_CONTROLLING {
+        return STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLING;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return STUN_BINDING_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return STUN_BINDING_REQUEST_SEEN_FINGERPRINT;
+    }
+    return 0u32;
+}
+
+fn stun_binding_request_attribute_known(attr_type: u16) bool {
+    return attr_type == STUN_ATTRIBUTE_USERNAME
+        || attr_type == STUN_ATTRIBUTE_PRIORITY
+        || attr_type == STUN_ATTRIBUTE_USE_CANDIDATE
+        || attr_type == STUN_ATTRIBUTE_ICE_CONTROLLED
+        || attr_type == STUN_ATTRIBUTE_ICE_CONTROLLING
+        || attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY
+        || attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256
+        || attr_type == STUN_ATTRIBUTE_FINGERPRINT
+        || attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn stun_xor_cookie_bytes(dst: &[byte]) !void {
+    try write_be_u32(dst, STUN_MAGIC_COOKIE);
+}
+
+export fn stun_header_parse(bytes: &[byte]) !StunMessageHeader {
+    if bytes.len < STUN_HEADER_BYTES {
+        return error.PacketTooShort;
+    }
+
+    const raw_type: u16 = try read_be_u16(bytes[0:2]);
+    const message_length: u16 = try read_be_u16(bytes[2:2]);
+    const magic_cookie: u32 = try read_be_u32(bytes[4:4]);
+
+    if (raw_type & 0xC000u16) != 0u16 {
+        return error.InvalidPacket;
+    }
+    if magic_cookie != STUN_MAGIC_COOKIE {
+        return error.InvalidPacket;
+    }
+    if (message_length & 0x0003u16) != 0u16 {
+        return error.InvalidPacket;
+    }
+    if bytes.len != STUN_HEADER_BYTES + (message_length as usize) {
+        return error.InvalidPacket;
+    }
+
+    var header: StunMessageHeader = StunMessageHeader{
+        raw_type: raw_type,
+        method: stun_message_type_decode_method(raw_type),
+        message_class: stun_message_type_decode_class(raw_type),
+        message_length: message_length,
+        magic_cookie: magic_cookie,
+    };
+    stun_copy_transaction_id(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], bytes[8:STUN_TRANSACTION_ID_BYTES]);
+    return header;
+}
+
+export fn stun_attribute_iterator_init(iter: &StunAttributeIterator, bytes: &[byte]) void {
+    if iter == null {
+        return;
+    }
+    iter.bytes = bytes;
+    iter.cursor = 0;
+}
+
+export fn stun_attribute_iterator_next(iter: &StunAttributeIterator) !StunAttribute {
+    if iter == null || iter.cursor >= iter.bytes.len {
+        return error.PacketTooShort;
+    }
+
+    const remaining: usize = iter.bytes.len - iter.cursor;
+    if remaining < STUN_ATTRIBUTE_HEADER_BYTES {
+        return error.PacketTooShort;
+    }
+
+    const attr_type: u16 = try read_be_u16(iter.bytes[iter.cursor:2]);
+    const value_len: u16 = try read_be_u16(iter.bytes[iter.cursor + 2:2]);
+    const attr_total_len: usize = try checked_add_usize(STUN_ATTRIBUTE_HEADER_BYTES, value_len as usize);
+    if attr_total_len > remaining {
+        return error.PacketTooShort;
+    }
+
+    const padded_total_len: usize = try checked_align_up_usize(attr_total_len, 4);
+    if padded_total_len > remaining {
+        return error.InvalidPacket;
+    }
+
+    const value_start: usize = iter.cursor + STUN_ATTRIBUTE_HEADER_BYTES;
+    const out: StunAttribute = StunAttribute{
+        attr_type: attr_type,
+        value_len: value_len,
+        padded_len: (padded_total_len - STUN_ATTRIBUTE_HEADER_BYTES) as u16,
+        value: iter.bytes[value_start:value_len as usize],
+    };
+    iter.cursor = iter.cursor + padded_total_len;
+    return out;
+}
+
+export fn stun_attribute_is_comprehension_required(attr_type: u16) bool {
+    return (attr_type & 0x8000u16) == 0u16;
+}
+
+export fn stun_binding_request_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !stun_binding_request_attribute_known(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = stun_binding_request_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    if attr.attr_type == STUN_ATTRIBUTE_ICE_CONTROLLED && (seen_mask & STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLING) != 0u32 {
+        return error.InvalidPacket;
+    }
+    if attr.attr_type == STUN_ATTRIBUTE_ICE_CONTROLLING && (seen_mask & STUN_BINDING_REQUEST_SEEN_ICE_CONTROLLED) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+export fn stun_parse_username(value: &[byte]) !&[byte] {
+    if value.len == 0 || value.len > STUN_MAX_USERNAME_BYTES {
+        return error.InvalidPacket;
+    }
+    return value;
+}
+
+export fn stun_parse_priority(value: &[byte]) !u32 {
+    if value.len != 4 {
+        return error.InvalidPacket;
+    }
+    return read_be_u32(value);
+}
+
+export fn stun_parse_use_candidate(value: &[byte]) !void {
+    if value.len != 0 {
+        return error.InvalidPacket;
+    }
+}
+
+export fn stun_parse_ice_role_tiebreaker(value: &[byte]) !u64 {
+    if value.len != 8 {
+        return error.InvalidPacket;
+    }
+    return read_be_u64(value);
+}
+
+export fn stun_parse_xor_mapped_address(value: &[byte], transaction_id: &[byte]) !StunXorMappedAddress {
+    if value.len < 4 {
+        return error.PacketTooShort;
+    }
+    if value[0] != 0 as byte {
+        return error.InvalidPacket;
+    }
+
+    const family: u8 = value[1] as u8;
+    const x_port: u16 = try read_be_u16(value[2:2]);
+    var out: StunXorMappedAddress = StunXorMappedAddress{
+        family: family,
+        port: x_port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16),
+    };
+
+    var cookie_bytes: [byte: 4] = [];
+    try stun_xor_cookie_bytes(cookie_bytes[0:4]);
+
+    if family == STUN_ADDRESS_FAMILY_IPV4 {
+        if value.len != 8 {
+            return error.InvalidPacket;
+        }
+        var i: usize = 0;
+        while i < 4 {
+            out.address_bytes[i] = value[4 + i] ^ cookie_bytes[i];
+            i = i + 1;
+        }
+        out.address_len = 4;
+        return out;
+    }
+
+    if family == STUN_ADDRESS_FAMILY_IPV6 {
+        if value.len != 20 || transaction_id.len != STUN_TRANSACTION_ID_BYTES {
+            return error.InvalidPacket;
+        }
+        var i: usize = 0;
+        while i < 4 {
+            out.address_bytes[i] = value[4 + i] ^ cookie_bytes[i];
+            i = i + 1;
+        }
+        while i < 16 {
+            out.address_bytes[i] = value[4 + i] ^ transaction_id[i - 4];
+            i = i + 1;
+        }
+        out.address_len = 16;
+        return out;
+    }
+
+    return error.UnsupportedCapability;
+}
+
+export fn stun_parse_error_code(value: &[byte]) !StunErrorCodeAttribute {
+    if value.len < 4 {
+        return error.PacketTooShort;
+    }
+    if value[0] != 0 as byte || value[1] != 0 as byte || (value[2] & 0xF8 as byte) != 0 as byte {
+        return error.InvalidPacket;
+    }
+
+    const class: u16 = (value[2] & 0x07 as byte) as u16;
+    const number: u16 = value[3] as u16;
+    const code: u16 = (class * 100u16) + number;
+    if class < 3u16 || class > 6u16 || number > 99u16 {
+        return error.InvalidPacket;
+    }
+
+    return StunErrorCodeAttribute{
+        code: code,
+        reason: value[4:value.len - 4],
+    };
+}

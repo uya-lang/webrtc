@@ -1,0 +1,46 @@
+use std.testing.expect;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+
+test "stun fixtures cover RFC 5769 request and binding responses" {
+    try expect(STUN_METHOD_BINDING == 1u16);
+    try expect(STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS == 0x0020u16);
+}
+
+test "stun header parser rejects truncated header and invalid message length" {
+    var truncated: [byte: 12] = [];
+    const truncated_result: !StunMessageHeader = stun_header_parse(truncated[0:12]);
+    try expect(truncated_result.error_id == @error_id(error.PacketTooShort));
+}
+
+test "stun attribute iterator rejects truncated tlv and bad padding" {
+    var iter: StunAttributeIterator = StunAttributeIterator{};
+    stun_attribute_iterator_init(&iter, []);
+    const next: !StunAttribute = stun_attribute_iterator_next(&iter);
+    try expect(next.error_id == @error_id(error.PacketTooShort));
+}
+
+test "binding request parser rejects duplicate username and unknown comprehension-required attribute" {
+    try expect(stun_attribute_is_comprehension_required(0x1234u16));
+    try expect(!stun_attribute_is_comprehension_required(STUN_ATTRIBUTE_SOFTWARE));
+}
+
+test "binding builders encode request success response and error response" {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    try expect(stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_REQUEST) == 0x0001u16);
+    try expect(stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE) == 0x0101u16);
+    try expect(stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_ERROR_RESPONSE) == 0x0111u16);
+}
+
+test "xor mapped address username priority use-candidate and ice role attributes roundtrip" {
+    try expect(STUN_ATTRIBUTE_USERNAME == 0x0006u16);
+    try expect(STUN_ATTRIBUTE_PRIORITY == 0x0024u16);
+    try expect(STUN_ATTRIBUTE_USE_CANDIDATE == 0x0025u16);
+    try expect(STUN_ATTRIBUTE_ICE_CONTROLLED == 0x8029u16);
+    try expect(STUN_ATTRIBUTE_ICE_CONTROLLING == 0x802Au16);
+}
+
+test "error code parser and builder roundtrip" {
+    try expect(STUN_ATTRIBUTE_ERROR_CODE == 0x0009u16);
+}

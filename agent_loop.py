@@ -451,8 +451,6 @@ def parse_todo(todo_file):
 
 
 def choose_runnable_tasks(tasks, state):
-    runnable = []
-
     for task in tasks:
         if task["done_in_file"]:
             continue
@@ -462,16 +460,14 @@ def choose_runnable_tasks(tasks, state):
 
         fails = state["failed"].get(task["id"], 0)
         if fails >= MAX_FAILS_PER_TASK:
-            continue
+            return []
 
-        runnable.append(task)
+        return [task]
 
-    return runnable
+    return []
 
 
 def choose_exhausted_tasks(tasks, state):
-    exhausted = []
-
     for task in tasks:
         if task["done_in_file"]:
             continue
@@ -481,9 +477,11 @@ def choose_exhausted_tasks(tasks, state):
 
         fails = state["failed"].get(task["id"], 0)
         if fails >= MAX_FAILS_PER_TASK:
-            exhausted.append(task)
+            return [task]
 
-    return exhausted
+        return []
+
+    return []
 
 
 def reconcile_state_with_todo(state, tasks):
@@ -582,8 +580,8 @@ def print_batch_preview(tasks, limit=5):
 def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug_dir, toolchain_bug_repro_dir):
     todo_path = todo_label(root, todo_file)
     project_root = path_label(root, root)
-    runnable_preview = summarize_tasks(runnable_tasks, limit=20)
-    exhausted_preview = summarize_tasks(exhausted_tasks, limit=10)
+    current_task = summarize_tasks(runnable_tasks, limit=1)
+    blocked_preview = summarize_tasks(exhausted_tasks, limit=1)
     toolchain_bug_dir_label = path_label(root, toolchain_bug_dir)
     toolchain_bug_repro_dir_label = path_label(root, toolchain_bug_repro_dir)
     git_repo_note = "是" if is_git_repo(root) else "否"
@@ -601,26 +599,26 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
 {git_repo_note}
 
 目标：
-在一次 Codex 运行里尽量多完成这个 todo 文件中的未勾选任务，而不是只做一个任务。
+严格按 todo 文件顺序执行；本次运行只处理当前排在最前面的 1 个未勾选任务。
 
-当前可处理任务数：{len(runnable_tasks)}
-当前因失败次数达到上限而跳过的任务数：{len(exhausted_tasks)}
+当前任务数：{len(runnable_tasks)}
+当前因失败次数达到上限而阻塞的前序任务数：{len(exhausted_tasks)}
 
-本轮优先关注的前 20 个任务：
-{runnable_preview}
+本轮唯一任务：
+{current_task}
 
-本轮先跳过这些达到失败上限的任务：
-{exhausted_preview}
+当前阻塞并停止后续推进的任务：
+{blocked_preview}
 
 要求：
 1. 直接读取并更新 `{todo_path}`，把它当作任务真实来源。
-2. 一次性尽量完成多个未勾选任务，不要只做一个。
-3. 默认按 todo 文件顺序推进；如果某个任务明确阻塞，但后续任务独立且能安全推进，继续处理后面的独立任务。
+2. 只处理上面列出的这个当前任务；不要顺手推进任何后续 todo 任务。
+3. 必须严格按 todo 文件顺序执行；如果当前任务阻塞、失败或暂时做不完，保持它为 `[ ]`，结束本轮，不得跳过到后续任务。
 4. 对代码实现类任务强制执行 TDD：先写或补最小 failing test，再运行它确认失败，然后实现最小改动让它通过，最后做必要的重构和回归。
 5. 优先复用项目里已有的测试、构建、lint、benchmark 入口；如果缺少测试基座而某个 todo 明确要求补齐，就先补最小可运行的项目级测试基座再继续。
-6. 只有在任务真正完成并且相关验证通过后，才把对应项改成 `[x]`，并且保留原任务文本，不要改写任务描述。
-7. 对暂时做不完的任务保持 `[ ]`，并在总结中说明阻塞原因。
-8. 修改代码后运行相关测试、构建或最小必要验证，并在输出里说明执行了哪些验证，以及 TDD 的 red/green 分别用了什么命令。
+6. 只有在当前任务真正完成并且相关验证通过后，才把对应项改成 `[x]`，并且保留原任务文本，不要改写任务描述。
+7. 对当前任务暂时做不完时保持 `[ ]`，并在总结中说明阻塞原因。
+8. 修改代码后必须运行相关测试、构建或最小必要验证，并且这些验证必须实际通过；只有验证通过后才允许创建提交。输出里要说明执行了哪些验证，以及 TDD 的 red/green 分别用了什么命令。
 9. 如果怀疑遇到了项目工具链 bug（例如编译器、解释器、构建系统、测试运行器、包管理器本身的问题），必须在继续前把 bug 记录下来：
    - 先把问题缩减成最小可复现代码或最小可复现输入。
    - 把复现文件写到 `{toolchain_bug_repro_dir_label}/` 下，文件名用时间戳加短描述，扩展名按项目实际类型决定。
@@ -636,24 +634,25 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
      `## Notes`
    - `## Repro File` 小节下一行只放 repro 文件路径，并用反引号包起来。
    - `## Repro Code` 小节必须包含一个 fenced code block，内容要和 repro 文件内容一致；语言标记可按文件类型填写，也可以留空。
-   - 被该工具链 bug 阻塞的 todo 任务必须留在 `[ ]`，并写进 `blocked`。
-10. 如果当前目录是 git 仓库，并且你在本轮完成了任务或新增了工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的 todo 留给下一轮。
+   - 被该工具链 bug 阻塞的当前 todo 任务必须留在 `[ ]`，并写进 `blocked`。
+10. 如果当前目录是 git 仓库，并且你在本轮完成了当前任务或新增了当前任务相关的工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的当前任务留给下一轮。
 11. 提交要求：
-   - 优先在本轮结束时创建一个清晰、可读的普通提交；只有在工作天然分成两块时才拆成多个提交。
-   - 提交消息要自然、简洁，能概括本轮真实改动，不要使用机械化模板。
-   - 只 stage 本轮相关文件；如果工作区里有无关脏改动，不要把它们一起提交。
+   - 当前任务最多创建一个普通提交；不要把多个 todo 任务合并到同一次提交。
+   - 提交消息要自然、简洁，能概括当前任务的真实改动，不要使用机械化模板。
+   - 只 stage 当前任务直接相关的文件；如果工作区里有无关脏改动，不要把它们一起提交。
    - 不要 amend 既有提交。
 12. 如果项目不是 git 仓库，也继续完成任务，并把 `commits` 留空数组。
 13. 不要回退用户已有改动，不要执行 destructive git 操作，也不要扩大到和这个 todo 无关的工作。
 14. 结束前必须输出一行严格单行 JSON，格式如下：
-{RESULT_PREFIX} {{"completed":["任务1"],"blocked":["任务2"],"deferred":["任务3"],"toolchain_bugs":[".agent/toolchain-bugs/bug-report.md"],"commits":["abc1234"],"summary":"一句话总结"}}
+{RESULT_PREFIX} {{"completed":["任务1"],"blocked":["任务2"],"deferred":["任务3"],"toolchain_bugs":[".agent/toolchain-bugs/bug-report.md"],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
-- completed：本次真正完成、并且已经在 todo 文件中勾选的任务文本
-- blocked：本次尝试过但暂时无法完成的任务文本
-- deferred：本次没有处理或主动留给下次的任务文本
-- toolchain_bugs：本次新增或更新的工具链 bug 报告 markdown 路径
-- commits：本次新创建的 git commit 哈希，短哈希或长哈希都可以；非 git 项目时用空数组
+- completed：只填写本次真正完成、并且已经在 todo 文件中勾选的当前任务文本
+- blocked：只填写本次尝试过但暂时无法完成的当前任务文本
+- deferred：默认使用空数组；不要把后续任务写进这里
+- toolchain_bugs：本次新增或更新的当前任务相关工具链 bug 报告 markdown 路径
+- commits：本次为当前任务新创建的 git commit 哈希，短哈希或长哈希都可以；非 git 项目时用空数组
+- verification：当前任务在提交前实际运行且通过的验证命令，按执行顺序填写；如果 `completed` 非空，这里必须至少有一条
 - 没有内容时使用空数组
 """
 
@@ -687,11 +686,11 @@ todo 文件：
 
 要求：
 1. 先检查当前 git 状态和最近提交，确认哪些未提交改动属于上述任务或 bug 报告。
-2. 只 stage 与上述任务或 bug 报告直接相关的文件，立即创建一个或多个清晰、自然的普通提交。
-3. 不要继续实现新的 todo 任务，不要扩大工作范围，也不要把无关脏改动一起提交。
+2. 先重新运行与列表中第一个待补提交任务直接相关的验证命令，确认它们通过后，再只 stage 相关文件并立即创建一个清晰、自然的普通提交。
+3. 不要继续实现新的 todo 任务，不要扩大工作范围，不要把多个 todo 任务合并进同一个补提交，也不要把无关脏改动一起提交。
 4. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[ ]` 或修正相关文件，再把这次修正提交掉。
 5. 结束前必须输出一行严格单行 JSON，格式如下：
-{RESULT_PREFIX} {{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"summary":"一句话总结"}}
+{RESULT_PREFIX} {{"completed":[],"blocked":[],"deferred":[],"toolchain_bugs":[],"commits":["abc1234"],"verification":["命令1"],"summary":"一句话总结"}}
 
 字段说明：
 - `completed`：默认使用空数组，除非这次顺手修正了 todo 状态并重新确认完成
@@ -699,6 +698,7 @@ todo 文件：
 - `deferred`：默认使用空数组
 - `toolchain_bugs`：默认使用空数组；只有这次新增或更新了 bug 报告时才填写
 - `commits`：这次新创建的 git commit 哈希，短哈希或长哈希都可以
+- `verification`：补提交前重新运行且通过的验证命令；如果 `commits` 非空且 `tasks` 非空，这里必须至少有一条
 """
 
 
@@ -862,6 +862,7 @@ def parse_agent_result(log_file):
                 result.get("toolchain_bugs", result.get("compiler_bugs", []))
             ),
             "commits": normalize_string_list(result.get("commits", [])),
+            "verification": normalize_string_list(result.get("verification", [])),
         }
 
         summary = result.get("summary", "")
@@ -869,6 +870,56 @@ def parse_agent_result(log_file):
         return normalized
 
     return {}
+
+
+def restore_tasks_to_unchecked(todo_file, tasks):
+    if not tasks:
+        return False
+
+    original_text = todo_file.read_text(encoding="utf-8")
+    lines = original_text.splitlines()
+    changed = False
+
+    for task in tasks:
+        line_index = task["line_no"] - 1
+        if line_index < 0 or line_index >= len(lines):
+            continue
+
+        current_line = lines[line_index]
+        updated_line = re.sub(r"^(\s*-\s+\[)(x|X)(\]\s+)", r"\1 \3", current_line, count=1)
+        if updated_line == current_line:
+            continue
+
+        lines[line_index] = updated_line
+        changed = True
+
+    if not changed:
+        return False
+
+    trailing_newline = "\n" if original_text.endswith("\n") else ""
+    todo_file.write_text("\n".join(lines) + trailing_newline, encoding="utf-8")
+    return True
+
+
+def run_verification_commands(root, commands):
+    if not commands:
+        return [], None
+
+    passed = []
+    for command in commands:
+        print(f"[agent] verify: {command}")
+        probe = subprocess.run(
+            ["/bin/bash", "-lc", command],
+            cwd=root,
+            text=True,
+        )
+        if probe.returncode != 0:
+            print(f"[agent] verification failed ({probe.returncode}): {command}")
+            return passed, command
+
+        passed.append(command)
+
+    return passed, None
 
 
 def is_path_within(path, parent):
@@ -1046,8 +1097,9 @@ def ensure_pending_commit(state):
 
 def queue_pending_commit(state, completed_tasks, toolchain_bug_reports):
     pending_commit = ensure_pending_commit(state)
-    merge_unique_strings(pending_commit["tasks"], [task["text"] for task in completed_tasks])
-    merge_unique_strings(pending_commit["toolchain_bug_reports"], toolchain_bug_reports)
+    pending_commit["tasks"] = [task["text"] for task in completed_tasks[:1]]
+    pending_commit["toolchain_bug_reports"] = list(toolchain_bug_reports)
+    pending_commit["attempts"] = 0
     pending_commit["updated_at"] = now()
     return pending_commit
 
@@ -1293,8 +1345,12 @@ def main():
         reconcile_state_with_todo(state, tasks_after)
         result = parse_agent_result(log_file)
         newly_completed = completed_tasks(tasks_before, tasks_after)
+        completed_candidates = list(newly_completed)
         blocked_tasks = match_tasks_by_text(result.get("blocked", []), runnable_tasks)
         blocked_tasks = exclude_tasks(blocked_tasks, newly_completed)
+        verification_commands = result.get("verification", [])
+        verification_failed_command = None
+        verification_invalid = False
         toolchain_bug_reports = collect_valid_toolchain_bug_reports(
             paths["root"],
             result.get("toolchain_bugs", []),
@@ -1302,11 +1358,36 @@ def main():
             paths["toolchain_bug_repro_dir"],
         )
         invalid_toolchain_bug_reports = len(result.get("toolchain_bugs", [])) - len(toolchain_bug_reports)
+
+        if completed_candidates:
+            if not verification_commands:
+                print("[agent] completed task missing verification commands; restore todo to unchecked")
+                verification_invalid = True
+            else:
+                _passed_verification, verification_failed_command = run_verification_commands(
+                    paths["root"],
+                    verification_commands,
+                )
+                if verification_failed_command is not None:
+                    print("[agent] completed task failed external verification replay; restore todo to unchecked")
+                    verification_invalid = True
+
+            if verification_invalid:
+                if restore_tasks_to_unchecked(paths["todo_file"], completed_candidates):
+                    tasks_after = parse_todo(paths["todo_file"])
+                    reconcile_state_with_todo(state, tasks_after)
+                newly_completed = []
+
         reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
         detected_commits = collect_new_commits(paths["root"], batch_head_before)
         commits = list(reported_commits)
         merge_unique_strings(commits, detected_commits)
         invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+
+        if verification_invalid and commits:
+            print("[agent] ignore commits from batch because task completion was not verification-backed")
+            commits = []
+
         commit_required = git_repo and (bool(newly_completed) or bool(toolchain_bug_reports))
 
         if commit_required and not commits:
@@ -1345,12 +1426,18 @@ def main():
         if invalid_commits > 0:
             print(f"[agent] ignored invalid commits: {invalid_commits}")
 
-        if not newly_completed and not blocked_tasks and not ok:
+        if verification_invalid:
+            first_task = runnable_tasks[0]
+            if verification_failed_command is None:
+                print(f"[agent] verification required before commit: {first_task['text']}")
+            bump_failures(state, [first_task])
+
+        if not newly_completed and not blocked_tasks and not ok and not verification_invalid:
             first_task = runnable_tasks[0]
             print(f"[agent] failed without progress: {first_task['text']}")
             bump_failures(state, [first_task])
 
-        if not newly_completed and not blocked_tasks and ok:
+        if not newly_completed and not blocked_tasks and ok and not verification_invalid:
             first_task = runnable_tasks[0]
             print(f"[agent] no explicit progress reported, mark failed once: {first_task['text']}")
             bump_failures(state, [first_task])

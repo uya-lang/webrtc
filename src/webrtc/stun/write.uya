@@ -1,0 +1,194 @@
+// webrtc.stun.write - STUN Binding request / response / error response builder
+// 模块路径：src/webrtc/stun/write.uya → use webrtc.stun.write;
+
+use webrtc.binary;
+use webrtc.stun.model;
+
+fn stun_builder_copy_transaction_id(dst: &[byte], src: &[byte]) !void {
+    if src.len != STUN_TRANSACTION_ID_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var i: usize = 0;
+    while i < STUN_TRANSACTION_ID_BYTES {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+fn stun_builder_reserve(builder: &StunMessageBuilder, len: usize) !usize {
+    if builder == null || builder.cursor > builder.bytes.len || len > builder.bytes.len - builder.cursor {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    const start: usize = builder.cursor;
+    builder.cursor = builder.cursor + len;
+    return start;
+}
+
+fn stun_builder_init_message(builder: &StunMessageBuilder, dst: &[byte], message_type: u16, transaction_id: &[byte]) !void {
+    if dst.len < STUN_HEADER_BYTES {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    builder.bytes = dst;
+    builder.cursor = 0;
+    builder.message_type = message_type;
+    try stun_builder_copy_transaction_id(builder.transaction_id[0:STUN_TRANSACTION_ID_BYTES], transaction_id);
+
+    try write_be_u16(dst[0:2], message_type);
+    try write_be_u16(dst[2:2], 0u16);
+    try write_be_u32(dst[4:4], STUN_MAGIC_COOKIE);
+    try stun_builder_copy_transaction_id(dst[8:STUN_TRANSACTION_ID_BYTES], transaction_id);
+    builder.cursor = STUN_HEADER_BYTES;
+}
+
+fn stun_builder_write_attribute(builder: &StunMessageBuilder, attr_type: u16, value: &[byte]) !void {
+    const padding_len: usize = ((4usize - (value.len & 3usize)) & 3usize);
+    const total_len: usize = try checked_add_usize(STUN_ATTRIBUTE_HEADER_BYTES, value.len);
+    const padded_total_len: usize = try checked_add_usize(total_len, padding_len);
+    const start: usize = try stun_builder_reserve(builder, padded_total_len);
+
+    try write_be_u16(builder.bytes[start:2], attr_type);
+    try write_be_u16(builder.bytes[start + 2:2], value.len as u16);
+
+    var i: usize = 0;
+    while i < value.len {
+        builder.bytes[start + STUN_ATTRIBUTE_HEADER_BYTES + i] = value[i];
+        i = i + 1;
+    }
+    while i < value.len + padding_len {
+        builder.bytes[start + STUN_ATTRIBUTE_HEADER_BYTES + i] = 0 as byte;
+        i = i + 1;
+    }
+}
+
+fn stun_builder_write_cookie_bytes(dst: &[byte]) !void {
+    try write_be_u32(dst, STUN_MAGIC_COOKIE);
+}
+
+export fn stun_builder_init_binding_request(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    return stun_builder_init_message(builder, dst, stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_REQUEST), transaction_id);
+}
+
+export fn stun_builder_init_binding_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    return stun_builder_init_message(builder, dst, stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE), transaction_id);
+}
+
+export fn stun_builder_init_binding_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    return stun_builder_init_message(builder, dst, stun_message_type_encode(STUN_METHOD_BINDING, STUN_MESSAGE_CLASS_ERROR_RESPONSE), transaction_id);
+}
+
+export fn stun_builder_append_username(builder: &StunMessageBuilder, username: &[byte]) !void {
+    if username.len == 0 || username.len > STUN_MAX_USERNAME_BYTES {
+        return error.InvalidPacket;
+    }
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_USERNAME, username);
+}
+
+export fn stun_builder_append_priority(builder: &StunMessageBuilder, priority: u32) !void {
+    var value: [byte: 4] = [];
+    try write_be_u32(value[0:4], priority);
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_PRIORITY, value[0:4]);
+}
+
+export fn stun_builder_append_use_candidate(builder: &StunMessageBuilder) !void {
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_USE_CANDIDATE, []);
+}
+
+export fn stun_builder_append_ice_controlled(builder: &StunMessageBuilder, tiebreaker: u64) !void {
+    var value: [byte: 8] = [];
+    try write_be_u64(value[0:8], tiebreaker);
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_ICE_CONTROLLED, value[0:8]);
+}
+
+export fn stun_builder_append_ice_controlling(builder: &StunMessageBuilder, tiebreaker: u64) !void {
+    var value: [byte: 8] = [];
+    try write_be_u64(value[0:8], tiebreaker);
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_ICE_CONTROLLING, value[0:8]);
+}
+
+export fn stun_builder_append_xor_mapped_address_ipv4(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    if address.len != 4 {
+        return error.InvalidPacket;
+    }
+
+    var value: [byte: 8] = [];
+    var cookie_bytes: [byte: 4] = [];
+    try stun_builder_write_cookie_bytes(cookie_bytes[0:4]);
+
+    value[0] = 0 as byte;
+    value[1] = STUN_ADDRESS_FAMILY_IPV4 as byte;
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16));
+
+    var i: usize = 0;
+    while i < 4 {
+        value[4 + i] = address[i] ^ cookie_bytes[i];
+        i = i + 1;
+    }
+
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS, value[0:8]);
+}
+
+export fn stun_builder_append_xor_mapped_address_ipv6(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    if address.len != 16 {
+        return error.InvalidPacket;
+    }
+
+    var value: [byte: 20] = [];
+    var cookie_bytes: [byte: 4] = [];
+    try stun_builder_write_cookie_bytes(cookie_bytes[0:4]);
+
+    value[0] = 0 as byte;
+    value[1] = STUN_ADDRESS_FAMILY_IPV6 as byte;
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16u32) as u16));
+
+    var i: usize = 0;
+    while i < 4 {
+        value[4 + i] = address[i] ^ cookie_bytes[i];
+        i = i + 1;
+    }
+    while i < 16 {
+        value[4 + i] = address[i] ^ builder.transaction_id[i - 4];
+        i = i + 1;
+    }
+
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS, value[0:20]);
+}
+
+export fn stun_builder_append_error_code(builder: &StunMessageBuilder, code: u16, reason: &[byte]) !void {
+    if code < 300u16 || code > 699u16 || reason.len > STUN_MAX_ERROR_REASON_BYTES {
+        return error.InvalidPacket;
+    }
+
+    const class: u16 = code / 100u16;
+    const number: u16 = code % 100u16;
+
+    var value: [byte: 100] = [];
+    value[0] = 0 as byte;
+    value[1] = 0 as byte;
+    value[2] = class as byte;
+    value[3] = number as byte;
+
+    var i: usize = 0;
+    while i < reason.len {
+        value[4 + i] = reason[i];
+        i = i + 1;
+    }
+
+    return stun_builder_write_attribute(builder, STUN_ATTRIBUTE_ERROR_CODE, value[0:4 + reason.len]);
+}
+
+export fn stun_builder_finish(builder: &StunMessageBuilder) !usize {
+    if builder == null || builder.cursor < STUN_HEADER_BYTES {
+        return error.InvalidPacket;
+    }
+
+    const body_len: usize = builder.cursor - STUN_HEADER_BYTES;
+    if (body_len & 3usize) != 0usize {
+        return error.InvalidPacket;
+    }
+
+    try write_be_u16(builder.bytes[2:2], body_len as u16);
+    return builder.cursor;
+}

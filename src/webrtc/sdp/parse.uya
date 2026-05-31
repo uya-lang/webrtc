@@ -1,0 +1,569 @@
+// webrtc.sdp.parse - SDP 行扫描与字段 parser
+// 模块路径：src/webrtc/sdp/parse.uya → use webrtc.sdp.parse;
+
+use webrtc.errors;
+use webrtc.sdp.model;
+
+export struct SdpLine {
+    kind: byte = 0 as byte,
+    value: &[byte] = [],
+    line_number: u32 = 0u32,
+}
+
+export struct SdpLineScanner {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+    line_number: u32 = 0u32,
+    current: SdpLine = SdpLine{},
+}
+
+struct SdpSplit {
+    left: &[byte] = [],
+    right: &[byte] = [],
+}
+
+struct SdpTokenCursor {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+}
+
+fn sdp_trim_lf(line: &[byte]) &[byte] {
+    if line.len > 0 && line[line.len - 1] == 13 as byte {
+        return line[0:line.len - 1];
+    }
+    return line;
+}
+
+fn sdp_trim_ascii_space(value: &[byte]) &[byte] {
+    var start: usize = 0;
+    var end: usize = value.len;
+
+    while start < end && value[start] == ' ' as byte {
+        start = start + 1;
+    }
+    while end > start && value[end - 1] == ' ' as byte {
+        end = end - 1;
+    }
+    return value[start:end - start];
+}
+
+fn sdp_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn sdp_bytes_starts_with(value: &[byte], prefix: &[byte]) bool {
+    if value.len < prefix.len {
+        return false;
+    }
+    return sdp_bytes_equal(value[0:prefix.len], prefix);
+}
+
+fn sdp_split_once(value: &[byte], needle: byte) !SdpSplit {
+    var i: usize = 0;
+    while i < value.len {
+        if value[i] == needle {
+            return SdpSplit{
+                left: value[0:i],
+                right: value[i + 1:value.len - (i + 1)],
+            };
+        }
+        i = i + 1;
+    }
+    return error.InvalidPacket;
+}
+
+fn sdp_token_cursor_init(cursor: &SdpTokenCursor, bytes: &[byte]) void {
+    cursor.bytes = bytes;
+    cursor.cursor = 0;
+}
+
+fn sdp_token_cursor_next(cursor: &SdpTokenCursor) !&[byte] {
+    while cursor.cursor < cursor.bytes.len && cursor.bytes[cursor.cursor] == ' ' as byte {
+        cursor.cursor = cursor.cursor + 1;
+    }
+    if cursor.cursor >= cursor.bytes.len {
+        return error.InvalidPacket;
+    }
+
+    const start: usize = cursor.cursor;
+    while cursor.cursor < cursor.bytes.len && cursor.bytes[cursor.cursor] != ' ' as byte {
+        cursor.cursor = cursor.cursor + 1;
+    }
+
+    return cursor.bytes[start:cursor.cursor - start];
+}
+
+fn sdp_parse_decimal_u16(value: &[byte]) !u16 {
+    if value.len == 0 {
+        return error.InvalidPacket;
+    }
+
+    var out: u32 = 0u32;
+    var i: usize = 0;
+    while i < value.len {
+        const digit: byte = value[i];
+        if digit < '0' as byte || digit > '9' as byte {
+            return error.InvalidPacket;
+        }
+        out = (out * 10u32) + ((digit - ('0' as byte)) as u32);
+        if out > 65535u32 {
+            return error.InvalidPacket;
+        }
+        i = i + 1;
+    }
+    return out as u16;
+}
+
+fn sdp_parse_decimal_u32(value: &[byte]) !u32 {
+    if value.len == 0 {
+        return error.InvalidPacket;
+    }
+
+    var out: u64 = 0u64;
+    var i: usize = 0;
+    while i < value.len {
+        const digit: byte = value[i];
+        if digit < '0' as byte || digit > '9' as byte {
+            return error.InvalidPacket;
+        }
+        out = (out * 10u64) + ((digit - ('0' as byte)) as u64);
+        if out > @max_value(u32) {
+            return error.InvalidPacket;
+        }
+        i = i + 1;
+    }
+    return out as u32;
+}
+
+fn sdp_append_bundle_mid(session: &SessionDescription, mid: &[byte]) !void {
+    if session.bundle_mid_count >= SDP_MAX_BUNDLE_MIDS {
+        return error.UnsupportedCapability;
+    }
+    session.bundle_mids[session.bundle_mid_count] = mid;
+    session.bundle_mid_count = session.bundle_mid_count + 1;
+}
+
+fn sdp_append_format_token(section: &MediaSection, token: &[byte]) !void {
+    if section.format_token_count >= SDP_MAX_CODECS_PER_MEDIA {
+        return error.UnsupportedCapability;
+    }
+    section.format_tokens[section.format_token_count] = token;
+    section.format_token_count = section.format_token_count + 1;
+}
+
+fn sdp_media_find_codec_index(section: &MediaSection, payload_type: u16) usize {
+    var i: usize = 0;
+    while i < section.codec_count {
+        if section.codecs[i].payload_type == payload_type {
+            return i;
+        }
+        i = i + 1;
+    }
+    return SDP_MAX_CODECS_PER_MEDIA;
+}
+
+fn sdp_media_ensure_codec(section: &MediaSection, payload_type: u16) !&CodecParameters {
+    const existing_index: usize = sdp_media_find_codec_index(section, payload_type);
+    if existing_index < section.codec_count {
+        return &section.codecs[existing_index];
+    }
+
+    if section.codec_count >= SDP_MAX_CODECS_PER_MEDIA {
+        return error.UnsupportedCapability;
+    }
+
+    section.codecs[section.codec_count] = CodecParameters{
+        payload_type: payload_type,
+    };
+    section.codec_count = section.codec_count + 1;
+    return &section.codecs[section.codec_count - 1];
+}
+
+fn sdp_parse_fingerprint_value(value: &[byte]) !Fingerprint {
+    const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
+    return Fingerprint{
+        hash_name: sdp_trim_ascii_space(split.left),
+        value: sdp_trim_ascii_space(split.right),
+    };
+}
+
+fn sdp_parse_group_bundle_attribute(session: &SessionDescription, value: &[byte]) !void {
+    var cursor: SdpTokenCursor = SdpTokenCursor{};
+    sdp_token_cursor_init(&cursor, value);
+    session.bundle_mid_count = 0;
+
+    while cursor.cursor < cursor.bytes.len {
+        const token: &[byte] = try sdp_token_cursor_next(&cursor);
+        try sdp_append_bundle_mid(session, token);
+    }
+}
+
+fn sdp_parse_media_line(section: &MediaSection, value: &[byte]) !void {
+    var cursor: SdpTokenCursor = SdpTokenCursor{};
+    sdp_token_cursor_init(&cursor, value);
+
+    section.kind = try sdp_token_cursor_next(&cursor);
+    section.port = try sdp_parse_decimal_u16(try sdp_token_cursor_next(&cursor));
+    section.protocol = try sdp_token_cursor_next(&cursor);
+    section.direction = "sendrecv" as &[byte];
+    section.format_token_count = 0;
+
+    while cursor.cursor < cursor.bytes.len {
+        const token: &[byte] = try sdp_token_cursor_next(&cursor);
+        try sdp_append_format_token(section, token);
+    }
+
+    if section.format_token_count == 0 {
+        return error.InvalidPacket;
+    }
+}
+
+fn sdp_parse_candidate_attribute(section: &MediaSection, value: &[byte]) !void {
+    if section.candidate_count >= SDP_MAX_CANDIDATES_PER_MEDIA {
+        return error.UnsupportedCapability;
+    }
+
+    var cursor: SdpTokenCursor = SdpTokenCursor{};
+    sdp_token_cursor_init(&cursor, value);
+
+    var candidate: IceCandidate = IceCandidate{};
+    candidate.foundation = try sdp_token_cursor_next(&cursor);
+    candidate.component_id = try sdp_parse_decimal_u16(try sdp_token_cursor_next(&cursor));
+    candidate.transport = try sdp_token_cursor_next(&cursor);
+    candidate.priority = try sdp_parse_decimal_u32(try sdp_token_cursor_next(&cursor));
+    candidate.address = try sdp_token_cursor_next(&cursor);
+    candidate.port = try sdp_parse_decimal_u16(try sdp_token_cursor_next(&cursor));
+
+    const typ_key: &[byte] = try sdp_token_cursor_next(&cursor);
+    if !sdp_bytes_equal(typ_key, "typ" as &[byte]) {
+        return error.InvalidPacket;
+    }
+    candidate.candidate_type = try sdp_token_cursor_next(&cursor);
+
+    while cursor.cursor < cursor.bytes.len {
+        if candidate.extension_token_count >= SDP_MAX_CANDIDATE_EXTENSION_TOKENS {
+            return error.UnsupportedCapability;
+        }
+        candidate.extension_tokens[candidate.extension_token_count] = try sdp_token_cursor_next(&cursor);
+        candidate.extension_token_count = candidate.extension_token_count + 1;
+    }
+
+    section.candidates[section.candidate_count] = candidate;
+    section.candidate_count = section.candidate_count + 1;
+}
+
+fn sdp_parse_rtpmap_attribute(section: &MediaSection, value: &[byte]) !void {
+    const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
+    const payload_type: u16 = try sdp_parse_decimal_u16(split.left);
+    const codec: &CodecParameters = try sdp_media_ensure_codec(section, payload_type);
+
+    const first_slash: SdpSplit = try sdp_split_once(split.right, '/' as byte);
+    codec.encoding_name = sdp_trim_ascii_space(first_slash.left);
+
+    var remainder: &[byte] = first_slash.right;
+    var second_slash_index: usize = remainder.len;
+    var i: usize = 0;
+    while i < remainder.len {
+        if remainder[i] == '/' as byte {
+            second_slash_index = i;
+            break;
+        }
+        i = i + 1;
+    }
+
+    if second_slash_index == remainder.len {
+        codec.clock_rate_hz = try sdp_parse_decimal_u32(remainder);
+        codec.channel_count = 1u8;
+        return;
+    }
+
+    codec.clock_rate_hz = try sdp_parse_decimal_u32(remainder[0:second_slash_index]);
+    codec.channel_count = (try sdp_parse_decimal_u16(remainder[second_slash_index + 1:remainder.len - (second_slash_index + 1)])) as u8;
+}
+
+fn sdp_parse_fmtp_attribute(section: &MediaSection, value: &[byte]) !void {
+    const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
+    const payload_type: u16 = try sdp_parse_decimal_u16(split.left);
+    const codec: &CodecParameters = try sdp_media_ensure_codec(section, payload_type);
+    codec.fmtp_param_count = 0;
+
+    var params: &[byte] = split.right;
+    while params.len > 0 {
+        var delimiter_index: usize = params.len;
+        var i: usize = 0;
+        while i < params.len {
+            if params[i] == ';' as byte {
+                delimiter_index = i;
+                break;
+            }
+            i = i + 1;
+        }
+
+        const raw_token: &[byte] =
+            if delimiter_index == params.len
+            { params }
+            else
+            { params[0:delimiter_index] };
+        const token: &[byte] = sdp_trim_ascii_space(raw_token);
+        if token.len > 0 {
+            if codec.fmtp_param_count >= SDP_MAX_CODEC_FMTP_PARAMS {
+                return error.UnsupportedCapability;
+            }
+
+            const pair: SdpSplit = try sdp_split_once(token, '=' as byte);
+            codec.fmtp_params[codec.fmtp_param_count] = FmtpParameter{
+                key: sdp_trim_ascii_space(pair.left),
+                value: sdp_trim_ascii_space(pair.right),
+            };
+            codec.fmtp_param_count = codec.fmtp_param_count + 1;
+        }
+
+        if delimiter_index == params.len {
+            break;
+        }
+        params = params[delimiter_index + 1:params.len - (delimiter_index + 1)];
+    }
+}
+
+fn sdp_parse_rtcp_fb_attribute(section: &MediaSection, value: &[byte]) !void {
+    const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
+    const payload_type: u16 = try sdp_parse_decimal_u16(split.left);
+    const codec: &CodecParameters = try sdp_media_ensure_codec(section, payload_type);
+    if codec.rtcp_feedback_count >= SDP_MAX_CODEC_FEEDBACKS {
+        return error.UnsupportedCapability;
+    }
+
+    codec.rtcp_feedbacks[codec.rtcp_feedback_count] = CodecFeedback{
+        payload_type: payload_type,
+        value: sdp_trim_ascii_space(split.right),
+    };
+    codec.rtcp_feedback_count = codec.rtcp_feedback_count + 1;
+}
+
+fn sdp_parse_extmap_attribute(section: &MediaSection, value: &[byte]) !void {
+    if section.header_extension_count >= SDP_MAX_HEADER_EXTENSIONS {
+        return error.UnsupportedCapability;
+    }
+
+    const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
+    const ext_slot: &HeaderExtension = &section.header_extensions[section.header_extension_count];
+    ext_slot.uri = sdp_trim_ascii_space(split.right);
+
+    var id_and_direction: &[byte] = split.left;
+    var slash_index: usize = id_and_direction.len;
+    var i: usize = 0;
+    while i < id_and_direction.len {
+        if id_and_direction[i] == '/' as byte {
+            slash_index = i;
+            break;
+        }
+        i = i + 1;
+    }
+
+    if slash_index == id_and_direction.len {
+        ext_slot.id = try sdp_parse_decimal_u16(id_and_direction);
+        ext_slot.direction = [];
+    } else {
+        ext_slot.id = try sdp_parse_decimal_u16(id_and_direction[0:slash_index]);
+        ext_slot.direction = id_and_direction[slash_index + 1:id_and_direction.len - (slash_index + 1)];
+    }
+
+    section.header_extension_count = section.header_extension_count + 1;
+}
+
+fn sdp_parse_application_attribute(section: &MediaSection, value: &[byte]) !bool {
+    if sdp_bytes_starts_with(value, "sctp-port:" as &[byte]) {
+        section.sctp_port = try sdp_parse_decimal_u16(value[10:value.len - 10]);
+        return true;
+    }
+    if sdp_bytes_starts_with(value, "sctpmap:" as &[byte]) {
+        var cursor: SdpTokenCursor = SdpTokenCursor{};
+        sdp_token_cursor_init(&cursor, value[8:value.len - 8]);
+        section.sctp_port = try sdp_parse_decimal_u16(try sdp_token_cursor_next(&cursor));
+        section.sctpmap_app = try sdp_token_cursor_next(&cursor);
+        if cursor.cursor < cursor.bytes.len {
+            section.sctpmap_streams = try sdp_parse_decimal_u16(try sdp_token_cursor_next(&cursor));
+        }
+        return true;
+    }
+    if sdp_bytes_starts_with(value, "max-message-size:" as &[byte]) {
+        section.max_message_size = try sdp_parse_decimal_u32(value[17:value.len - 17]);
+        return true;
+    }
+    return false;
+}
+
+fn sdp_parse_attribute_line(session: &SessionDescription, section: &MediaSection, value: &[byte]) !void {
+    if sdp_bytes_starts_with(value, "group:BUNDLE " as &[byte]) {
+        try sdp_parse_group_bundle_attribute(session, value[13:value.len - 13]);
+        return;
+    }
+    if sdp_bytes_starts_with(value, "fingerprint:" as &[byte]) {
+        const fingerprint: Fingerprint = try sdp_parse_fingerprint_value(value[12:value.len - 12]);
+        if section == null {
+            session.fingerprint = fingerprint;
+        } else {
+            section.fingerprint = fingerprint;
+        }
+        return;
+    }
+    if section == null {
+        return error.UnsupportedCapability;
+    }
+
+    if sdp_bytes_starts_with(value, "mid:" as &[byte]) {
+        section.mid = value[4:value.len - 4];
+        return;
+    }
+    if sdp_bytes_equal(value, "sendrecv" as &[byte])
+        || sdp_bytes_equal(value, "sendonly" as &[byte])
+        || sdp_bytes_equal(value, "recvonly" as &[byte])
+        || sdp_bytes_equal(value, "inactive" as &[byte]) {
+        section.direction = value;
+        return;
+    }
+    if sdp_bytes_starts_with(value, "ice-ufrag:" as &[byte]) {
+        section.ice_ufrag = value[10:value.len - 10];
+        return;
+    }
+    if sdp_bytes_starts_with(value, "ice-pwd:" as &[byte]) {
+        section.ice_pwd = value[8:value.len - 8];
+        return;
+    }
+    if sdp_bytes_starts_with(value, "setup:" as &[byte]) {
+        section.setup = value[6:value.len - 6];
+        return;
+    }
+    if sdp_bytes_equal(value, "rtcp-mux" as &[byte]) {
+        section.rtcp_mux = true;
+        return;
+    }
+    if sdp_bytes_starts_with(value, "candidate:" as &[byte]) {
+        try sdp_parse_candidate_attribute(section, value[10:value.len - 10]);
+        return;
+    }
+    if sdp_bytes_starts_with(value, "rtpmap:" as &[byte]) {
+        try sdp_parse_rtpmap_attribute(section, value[7:value.len - 7]);
+        return;
+    }
+    if sdp_bytes_starts_with(value, "fmtp:" as &[byte]) {
+        try sdp_parse_fmtp_attribute(section, value[5:value.len - 5]);
+        return;
+    }
+    if sdp_bytes_starts_with(value, "rtcp-fb:" as &[byte]) {
+        try sdp_parse_rtcp_fb_attribute(section, value[8:value.len - 8]);
+        return;
+    }
+    if sdp_bytes_starts_with(value, "extmap:" as &[byte]) {
+        try sdp_parse_extmap_attribute(section, value[7:value.len - 7]);
+        return;
+    }
+    if try sdp_parse_application_attribute(section, value) {
+        return;
+    }
+    return error.UnsupportedCapability;
+}
+
+fn sdp_parse_session_line(out: &SessionDescription, line: SdpLine) !void {
+    if line.kind == 'v' as byte {
+        out.version = try sdp_parse_decimal_u16(line.value);
+        return;
+    }
+    if line.kind == 'o' as byte {
+        out.origin = line.value;
+        return;
+    }
+    if line.kind == 's' as byte {
+        out.session_name = line.value;
+        return;
+    }
+    if line.kind == 't' as byte {
+        out.timing = line.value;
+        return;
+    }
+    return error.UnsupportedCapability;
+}
+
+export fn sdp_line_scanner_next(scanner: &SdpLineScanner) !bool {
+    while scanner.cursor < scanner.bytes.len {
+        const start: usize = scanner.cursor;
+        var end: usize = start;
+        while end < scanner.bytes.len && scanner.bytes[end] != 10 as byte {
+            end = end + 1;
+        }
+
+        const raw_line: &[byte] = sdp_trim_lf(scanner.bytes[start:end]);
+        scanner.cursor = if end < scanner.bytes.len { end + 1 } else { end };
+        scanner.line_number = scanner.line_number + 1u32;
+
+        if raw_line.len == 0 {
+            continue;
+        }
+        if raw_line.len < 2 || raw_line[1] != '=' as byte {
+            return error.InvalidPacket;
+        }
+
+        scanner.current = SdpLine{
+            kind: raw_line[0],
+            value: raw_line[2:raw_line.len - 2],
+            line_number: scanner.line_number,
+        };
+        return true;
+    }
+
+    return false;
+}
+
+export fn sdp_parse_session_description_bytes(bytes: &[byte]) !SessionDescription {
+    var scanner: SdpLineScanner = SdpLineScanner{
+        bytes: bytes,
+        cursor: 0,
+        line_number: 0u32,
+        current: SdpLine{},
+    };
+    var session: SessionDescription = SessionDescription{};
+    var current_media_index: i32 = -1;
+
+    while try sdp_line_scanner_next(&scanner) {
+        if scanner.current.kind == 'm' as byte {
+            current_media_index = current_media_index + 1;
+            if current_media_index as usize >= SDP_MAX_MEDIA_SECTIONS {
+                return error.UnsupportedCapability;
+            }
+            session.media_section_count = current_media_index as usize + 1;
+            try sdp_parse_media_line(&session.media_sections[current_media_index as usize], scanner.current.value);
+            continue;
+        }
+
+        if scanner.current.kind == 'c' as byte {
+            if current_media_index < 0 {
+                return error.UnsupportedCapability;
+            }
+            session.media_sections[current_media_index as usize].connection = scanner.current.value;
+            continue;
+        }
+
+        if scanner.current.kind == 'a' as byte {
+            if current_media_index >= 0 {
+                try sdp_parse_attribute_line(&session, &session.media_sections[current_media_index as usize], scanner.current.value);
+            } else {
+                try sdp_parse_attribute_line(&session, null, scanner.current.value);
+            }
+            continue;
+        }
+
+        try sdp_parse_session_line(&session, scanner.current);
+    }
+
+    return session;
+}

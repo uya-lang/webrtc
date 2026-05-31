@@ -1,0 +1,243 @@
+// webrtc.sdp.jsep - JSEP validator
+// 模块路径：src/webrtc/sdp/jsep.uya → use webrtc.sdp.jsep;
+
+use webrtc.errors;
+use webrtc.sdp.model;
+
+fn sdp_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn sdp_media_has_fingerprint(session: &SessionDescription, media: &MediaSection) bool {
+    if media.fingerprint.value.len > 0 {
+        return true;
+    }
+    return session.fingerprint.value.len > 0;
+}
+
+fn sdp_media_has_ice_pwd(media: &MediaSection) bool {
+    return media.ice_pwd.len > 0;
+}
+
+fn sdp_media_has_ice_ufrag(media: &MediaSection) bool {
+    return media.ice_ufrag.len > 0;
+}
+
+fn sdp_media_direction_is_supported(media: &MediaSection) bool {
+    return media.direction.len == 0
+        || sdp_bytes_equal(media.direction, "sendrecv" as &[byte])
+        || sdp_bytes_equal(media.direction, "sendonly" as &[byte])
+        || sdp_bytes_equal(media.direction, "recvonly" as &[byte])
+        || sdp_bytes_equal(media.direction, "inactive" as &[byte]);
+}
+
+fn sdp_validate_bundle_mids(session: &SessionDescription) !void {
+    if session.bundle_mid_count == 0 {
+        return error.UnsupportedCapability;
+    }
+    if session.bundle_mid_count != session.media_section_count {
+        return error.UnsupportedCapability;
+    }
+
+    var media_index: usize = 0;
+    while media_index < session.media_section_count {
+        const media: &MediaSection = &session.media_sections[media_index];
+        if media.mid.len == 0 {
+            return error.UnsupportedCapability;
+        }
+        if !sdp_bytes_equal(session.bundle_mids[media_index], media.mid) {
+            return error.UnsupportedCapability;
+        }
+        media_index = media_index + 1;
+    }
+}
+
+fn sdp_media_payload_types_are_unique(media: &MediaSection) bool {
+    var left: usize = 0;
+    while left < media.format_token_count {
+        var right: usize = left + 1;
+        while right < media.format_token_count {
+            if sdp_bytes_equal(media.format_tokens[left], media.format_tokens[right]) {
+                return false;
+            }
+            right = right + 1;
+        }
+        left = left + 1;
+    }
+    return true;
+}
+
+fn sdp_codec_name_is_supported(media: &MediaSection, codec: &CodecParameters) bool {
+    if sdp_bytes_equal(media.kind, "audio" as &[byte]) {
+        return sdp_bytes_equal(codec.encoding_name, "opus" as &[byte]);
+    }
+    if sdp_bytes_equal(media.kind, "video" as &[byte]) {
+        return sdp_bytes_equal(codec.encoding_name, "VP8" as &[byte]);
+    }
+    return true;
+}
+
+fn sdp_codec_fmtp_is_supported(media: &MediaSection, param: &FmtpParameter) bool {
+    if sdp_bytes_equal(media.kind, "audio" as &[byte]) {
+        return sdp_bytes_equal(param.key, "minptime" as &[byte])
+            || sdp_bytes_equal(param.key, "maxptime" as &[byte])
+            || sdp_bytes_equal(param.key, "useinbandfec" as &[byte])
+            || sdp_bytes_equal(param.key, "stereo" as &[byte])
+            || sdp_bytes_equal(param.key, "sprop-stereo" as &[byte])
+            || sdp_bytes_equal(param.key, "usedtx" as &[byte]);
+    }
+    if sdp_bytes_equal(media.kind, "video" as &[byte]) {
+        return sdp_bytes_equal(param.key, "max-fs" as &[byte])
+            || sdp_bytes_equal(param.key, "max-fr" as &[byte]);
+    }
+    return true;
+}
+
+fn sdp_codec_feedback_is_supported(media: &MediaSection, feedback: &CodecFeedback) bool {
+    if sdp_bytes_equal(media.kind, "video" as &[byte]) {
+        return sdp_bytes_equal(feedback.value, "nack" as &[byte])
+            || sdp_bytes_equal(feedback.value, "nack pli" as &[byte])
+            || sdp_bytes_equal(feedback.value, "ccm fir" as &[byte])
+            || sdp_bytes_equal(feedback.value, "transport-cc" as &[byte]);
+    }
+    return true;
+}
+
+fn sdp_validate_media_codecs(media: &MediaSection) !void {
+    if sdp_bytes_equal(media.kind, "application" as &[byte]) {
+        return;
+    }
+    if media.format_token_count == 0 {
+        return error.UnsupportedCapability;
+    }
+
+    var format_index: usize = 0;
+    while format_index < media.format_token_count {
+        const payload_token: &[byte] = media.format_tokens[format_index];
+        var found_codec: bool = false;
+
+        var codec_index: usize = 0;
+        while codec_index < media.codec_count {
+            const codec: &CodecParameters = &media.codecs[codec_index];
+            var payload_buf: [byte: 16] = [];
+            var payload_cursor: usize = 0;
+            var payload_value: u32 = codec.payload_type as u32;
+            if payload_value == 0u32 {
+                payload_buf[0] = '0' as byte;
+                payload_cursor = 1;
+            } else {
+                var reversed: [byte: 16] = [];
+                var reversed_count: usize = 0;
+                while payload_value > 0u32 {
+                    reversed[reversed_count] = ('0' as byte) + ((payload_value % 10u32) as byte);
+                    reversed_count = reversed_count + 1;
+                    payload_value = payload_value / 10u32;
+                }
+                while reversed_count > 0 {
+                    reversed_count = reversed_count - 1;
+                    payload_buf[payload_cursor] = reversed[reversed_count];
+                    payload_cursor = payload_cursor + 1;
+                }
+            }
+
+            if sdp_bytes_equal(payload_token, payload_buf[0:payload_cursor]) {
+                found_codec = true;
+                if !sdp_codec_name_is_supported(media, codec) {
+                    return error.UnsupportedCapability;
+                }
+
+                var fmtp_index: usize = 0;
+                while fmtp_index < codec.fmtp_param_count {
+                    if !sdp_codec_fmtp_is_supported(media, &codec.fmtp_params[fmtp_index]) {
+                        return error.UnsupportedCapability;
+                    }
+                    fmtp_index = fmtp_index + 1;
+                }
+
+                var feedback_index: usize = 0;
+                while feedback_index < codec.rtcp_feedback_count {
+                    if !sdp_codec_feedback_is_supported(media, &codec.rtcp_feedbacks[feedback_index]) {
+                        return error.UnsupportedCapability;
+                    }
+                    feedback_index = feedback_index + 1;
+                }
+            }
+
+            codec_index = codec_index + 1;
+        }
+
+        if !found_codec {
+            return error.UnsupportedCapability;
+        }
+        format_index = format_index + 1;
+    }
+}
+
+fn sdp_validate_application_media(media: &MediaSection) !void {
+    if !sdp_bytes_equal(media.protocol, "UDP/DTLS/SCTP" as &[byte])
+        && !sdp_bytes_equal(media.protocol, "DTLS/SCTP" as &[byte]) {
+        return error.UnsupportedCapability;
+    }
+
+    const has_datachannel_format: bool = media.format_token_count > 0
+        && sdp_bytes_equal(media.format_tokens[0], "webrtc-datachannel" as &[byte]);
+    const has_sctpmap_datachannel: bool = media.sctpmap_app.len > 0
+        && sdp_bytes_equal(media.sctpmap_app, "webrtc-datachannel" as &[byte]);
+
+    if !has_datachannel_format && !has_sctpmap_datachannel {
+        return error.UnsupportedCapability;
+    }
+    if media.sctp_port == 0u16 && media.sctpmap_app.len == 0 {
+        return error.UnsupportedCapability;
+    }
+}
+
+export fn sdp_validate_webrtc_session(session: &SessionDescription) !void {
+    if session.version != 0u16 {
+        return error.UnsupportedCapability;
+    }
+
+    try sdp_validate_bundle_mids(session);
+
+    var media_index: usize = 0;
+    while media_index < session.media_section_count {
+        const media: &MediaSection = &session.media_sections[media_index];
+
+        if !sdp_media_has_fingerprint(session, media) {
+            return error.MissingFingerprint;
+        }
+        if !sdp_media_has_ice_ufrag(media) {
+            return error.MissingIceUfrag;
+        }
+        if !sdp_media_has_ice_pwd(media) {
+            return error.MissingIcePwd;
+        }
+        if !sdp_media_direction_is_supported(media) {
+            return error.UnsupportedCapability;
+        }
+        if !sdp_media_payload_types_are_unique(media) {
+            return error.UnsupportedCapability;
+        }
+        if !sdp_bytes_equal(media.kind, "application" as &[byte]) && !media.rtcp_mux {
+            return error.MissingRtcpMux;
+        }
+
+        if sdp_bytes_equal(media.kind, "application" as &[byte]) {
+            try sdp_validate_application_media(media);
+        } else {
+            try sdp_validate_media_codecs(media);
+        }
+
+        media_index = media_index + 1;
+    }
+}

@@ -121,22 +121,22 @@
 
 ## Phase 4：STUN
 
-- [ ] 先增加 RFC test vectors。
-- [ ] 先增加截断 header、坏 length、坏 padding、重复/未知 attribute failing tests。
-- [ ] 先建立 STUN parser fuzz corpus 和 `bench_stun_parse` 基线。
-- [ ] 定义 STUN message / attribute 类型。
-- [ ] 实现 STUN header parser。
-- [ ] 实现 TLV attribute iterator。
-- [ ] 实现 Binding request/response/error response builder。
-- [ ] 实现 XOR-MAPPED-ADDRESS。
-- [ ] 实现 USERNAME。
-- [ ] 实现 PRIORITY。
-- [ ] 实现 USE-CANDIDATE。
-- [ ] 实现 ICE-CONTROLLING / ICE-CONTROLLED。
+- [x] 先增加 RFC test vectors。
+- [x] 先增加截断 header、坏 length、坏 padding、重复/未知 attribute failing tests。
+- [x] 先建立 STUN parser fuzz corpus 和 `bench_stun_parse` 基线。
+- [x] 定义 STUN message / attribute 类型。
+- [x] 实现 STUN header parser。
+- [x] 实现 TLV attribute iterator。
+- [x] 实现 Binding request/response/error response builder。
+- [x] 实现 XOR-MAPPED-ADDRESS。
+- [x] 实现 USERNAME。
+- [x] 实现 PRIORITY。
+- [x] 实现 USE-CANDIDATE。
+- [x] 实现 ICE-CONTROLLING / ICE-CONTROLLED。
 - [ ] 实现 MESSAGE-INTEGRITY。
 - [ ] 实现 MESSAGE-INTEGRITY-SHA256。
 - [ ] 实现 FINGERPRINT。
-- [ ] 实现 ERROR-CODE。
+- [x] 实现 ERROR-CODE。
 
 验收标准：
 
