@@ -37,6 +37,10 @@ TOOLCHAIN_BUG_SECTIONS = (
     "## Repro Code",
     "## Notes",
 )
+SESSION_ID_PATTERN = re.compile(
+    r"session id:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
+    re.IGNORECASE,
+)
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
 # agent_loop expects child codex runs to be able to stage and commit work.
@@ -783,6 +787,7 @@ def empty_state(root, todo_file):
         "commits": [],
         "pending_commit": None,
         "current": None,
+        "last_session": None,
         "todo_summary": {
             "total": 0,
             "checked": 0,
@@ -812,6 +817,7 @@ def load_state(state_file, root, todo_file):
     state.setdefault("commits", [])
     state.setdefault("pending_commit", None)
     state.setdefault("current", None)
+    state.setdefault("last_session", None)
     state.setdefault(
         "todo_summary",
         {
@@ -850,6 +856,159 @@ def latest_log_file(log_dir):
         return None
 
     return log_files[0]
+
+
+def normalize_session_id(value):
+    if not isinstance(value, str):
+        return None
+
+    match = SESSION_ID_PATTERN.search(value.strip())
+    if match is not None:
+        return match.group(1).lower()
+
+    candidate = value.strip().lower()
+    if SESSION_ID_PATTERN.fullmatch(f"session id: {candidate}") is None:
+        return None
+
+    return candidate
+
+
+def parse_session_id_from_log(log_file):
+    if not isinstance(log_file, Path) or not log_file.exists():
+        return None
+
+    for line in reversed(log_file.read_text(encoding="utf-8").splitlines()):
+        session_id = normalize_session_id(line)
+        if session_id is not None:
+            return session_id
+
+    return None
+
+
+def normalize_task_texts(task_texts):
+    if task_texts is None:
+        return []
+
+    return normalize_string_list(task_texts)
+
+
+def session_record_matches_tasks(record, task_texts):
+    if not isinstance(record, dict):
+        return False
+
+    desired = set(normalize_task_texts(task_texts))
+    if not desired:
+        return True
+
+    current_task = record.get("current_task")
+    if isinstance(current_task, str) and current_task.strip() in desired:
+        return True
+
+    return bool(desired.intersection(normalize_string_list(record.get("tasks", []))))
+
+
+def update_record_from_session_source(record, source):
+    if not isinstance(source, dict):
+        return
+
+    current_task = source.get("current_task")
+    if isinstance(current_task, str) and current_task.strip():
+        record["current_task"] = current_task.strip()
+
+    tasks = normalize_string_list(source.get("tasks", []))
+    if tasks:
+        record["tasks"] = tasks[:20]
+
+    task_ids = normalize_string_list(source.get("task_ids", []))
+    if task_ids:
+        record["task_ids"] = task_ids[:20]
+
+    log_file = source.get("log_file")
+    if isinstance(log_file, str) and log_file.strip():
+        record["log_file"] = log_file.strip()
+
+
+def build_last_session_record(state, session_id, log_file=None):
+    normalized_session_id = normalize_session_id(session_id)
+    if normalized_session_id is None:
+        return None
+
+    record = {
+        "session_id": normalized_session_id,
+        "updated_at": now(),
+    }
+
+    current = state.get("current")
+    if isinstance(current, dict):
+        update_record_from_session_source(record, current)
+
+    existing = state.get("last_session")
+    if isinstance(existing, dict) and existing.get("session_id") == normalized_session_id:
+        update_record_from_session_source(record, existing)
+
+    if isinstance(log_file, str) and log_file.strip():
+        record["log_file"] = log_file.strip()
+
+    return record
+
+
+def remember_session_id(state, session_id, log_file=None):
+    record = build_last_session_record(state, session_id, log_file=log_file)
+    if record is None:
+        return False
+
+    changed = False
+    current = state.get("current")
+    if isinstance(current, dict) and current.get("session_id") != record["session_id"]:
+        current["session_id"] = record["session_id"]
+        changed = True
+
+    if state.get("last_session") != record:
+        state["last_session"] = record
+        changed = True
+
+    return changed
+
+
+def resolve_resume_session_id(root, state, log_dir, task_texts=None):
+    desired_task_texts = normalize_task_texts(task_texts)
+    current = state.get("current")
+    last_session = state.get("last_session")
+
+    for record in (current, last_session):
+        session_id = normalize_session_id(record.get("session_id")) if isinstance(record, dict) else None
+        if session_id is None:
+            continue
+        if session_record_matches_tasks(record, desired_task_texts):
+            return session_id
+
+    seen_logs = set()
+    for record in (current, last_session):
+        if not session_record_matches_tasks(record, desired_task_texts):
+            continue
+
+        log_file = record.get("log_file")
+        if not isinstance(log_file, str) or not log_file.strip():
+            continue
+
+        resolved_log = resolve_path(root, log_file.strip())
+        resolved_text = str(resolved_log.resolve())
+        if resolved_text in seen_logs:
+            continue
+
+        seen_logs.add(resolved_text)
+        session_id = parse_session_id_from_log(resolved_log)
+        if session_id is not None:
+            return session_id
+
+    if isinstance(current, dict) or isinstance(last_session, dict):
+        return None
+
+    latest_log = latest_log_file(log_dir)
+    if latest_log is None:
+        return None
+
+    return parse_session_id_from_log(latest_log)
 
 
 def print_status(paths, state, status_lines):
@@ -1210,13 +1369,26 @@ def clear_stale_runner_state(state):
     return True
 
 
-def clear_stale_current_state(state):
+def clear_stale_current_state(state, root=None):
     current = state.get("current")
     if not isinstance(current, dict):
         return False
 
     if process_is_alive(current.get("pid")):
         return False
+
+    session_id = normalize_session_id(current.get("session_id"))
+    log_file = current.get("log_file")
+    if (
+        session_id is None
+        and root is not None
+        and isinstance(log_file, str)
+        and log_file.strip()
+    ):
+        session_id = parse_session_id_from_log(resolve_path(root, log_file.strip()))
+
+    if session_id is not None:
+        remember_session_id(state, session_id, log_file=log_file)
 
     state["current"] = None
     return True
@@ -1607,6 +1779,7 @@ def run_codex(
     state=None,
     log_file=None,
     prompt_override=None,
+    resume_session_id=None,
 ):
     prompt = prompt_override or build_prompt(
         root,
@@ -1619,7 +1792,8 @@ def run_codex(
     if log_file is None:
         log_file = make_log_file(log_dir, runnable_tasks)
 
-    cmd = build_codex_exec_command(root, prompt)
+    normalized_resume_session_id = normalize_session_id(resume_session_id)
+    cmd = build_codex_exec_command(root, prompt, resume_session_id=normalized_resume_session_id)
 
     current_task = runnable_tasks[0]["text"] if runnable_tasks else "无"
     display = LiveOutputDisplay(sys.stdout)
@@ -1647,6 +1821,8 @@ def run_codex(
         log_size += write_log_text(f"TOOLCHAIN_BUG_REPRO_DIR: {path_label(root, toolchain_bug_repro_dir)}\n\n")
         log_size += write_log_text(summarize_tasks(runnable_tasks, limit=50) + "\n\n")
         log_size += write_log_text("CMD: " + shlex.join(cmd[:-1]) + " <prompt>\n\n")
+        if normalized_resume_session_id is not None:
+            log_size += write_log_text(f"RESUME_SESSION_ID: {normalized_resume_session_id}\n\n")
 
         display.start(current_task)
 
@@ -1692,17 +1868,25 @@ def run_codex(
                     f"(grace={RESULT_EXIT_GRACE_SECONDS}s)"
                 )
 
-            def scan_result_text(text):
+            def scan_stream_text(text):
                 nonlocal scan_buffer
-                if not text or result_seen_monotonic is not None:
+                if not text:
                     return
 
                 scan_buffer += text
                 while "\n" in scan_buffer:
                     line, scan_buffer = scan_buffer.split("\n", 1)
+                    session_id = normalize_session_id(line.rstrip("\r"))
+                    if (
+                        session_id is not None
+                        and state is not None
+                        and state_file is not None
+                        and remember_session_id(state, session_id, log_file=log_path_text)
+                    ):
+                        save_state(state_file, state)
+
                     if line.rstrip("\r").startswith(RESULT_PREFIX):
                         note_result_detected()
-                        return
 
             def flush_decoder_tail():
                 nonlocal scan_buffer, decoder_flushed
@@ -1713,9 +1897,18 @@ def run_codex(
                 decoder_flushed = True
                 if tail_text:
                     display.write(tail_text)
-                    scan_result_text(tail_text)
-                if scan_buffer.rstrip("\r").startswith(RESULT_PREFIX):
-                    note_result_detected()
+                    scan_stream_text(tail_text)
+                if scan_buffer:
+                    session_id = normalize_session_id(scan_buffer.rstrip("\r"))
+                    if (
+                        session_id is not None
+                        and state is not None
+                        and state_file is not None
+                        and remember_session_id(state, session_id, log_file=log_path_text)
+                    ):
+                        save_state(state_file, state)
+                    if scan_buffer.rstrip("\r").startswith(RESULT_PREFIX):
+                        note_result_detected()
                 scan_buffer = ""
 
             start_monotonic = time.monotonic()
@@ -1757,7 +1950,7 @@ def run_codex(
                         text_chunk = decoder.decode(chunk)
                         if text_chunk:
                             display.write(text_chunk)
-                            scan_result_text(text_chunk)
+                            scan_stream_text(text_chunk)
                 elif timeout > 0:
                     time.sleep(timeout)
 
@@ -1840,16 +2033,23 @@ def run_codex(
     return returncode == 0, log_file
 
 
-def build_codex_exec_command(root, prompt):
-    return [
+def build_codex_exec_command(root, prompt, resume_session_id=None):
+    cmd = [
         CODEX_CMD,
         "exec",
         "--sandbox",
         CODEX_SANDBOX,
         "--cd",
         str(root),
-        prompt,
     ]
+
+    normalized_session_id = normalize_session_id(resume_session_id)
+    if normalized_session_id is not None:
+        cmd.extend(["resume", normalized_session_id, prompt])
+        return cmd
+
+    cmd.append(prompt)
+    return cmd
 
 
 def normalize_string_list(value):
@@ -2155,6 +2355,12 @@ def run_pending_commit_recovery(paths, state):
     recovery_tasks = recovery_task_list(pending_commit)
     recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
     batch_head_before = git_head_commit(paths["root"])
+    resume_session_id = resolve_resume_session_id(
+        paths["root"],
+        state,
+        paths["log_dir"],
+        task_texts=pending_commit.get("tasks", []) or pending_commit.get("toolchain_bug_reports", []),
+    )
     state["current"] = {
         "project_root": path_label(paths["root"], paths["root"]),
         "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -2162,10 +2368,12 @@ def run_pending_commit_recovery(paths, state):
         "task_count": len(pending_commit.get("tasks", [])),
         "current_task": recovery_tasks[0]["text"],
         "tasks": pending_commit.get("tasks", [])[:20] or pending_commit.get("toolchain_bug_reports", [])[:20],
+        "task_ids": [],
         "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
         "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
         "git_repo": True,
         "log_file": path_label(paths["root"], recovery_log_file),
+        "session_id": resume_session_id,
         "pid": None,
         "heartbeat_at": None,
         "elapsed_seconds": 0,
@@ -2177,6 +2385,8 @@ def run_pending_commit_recovery(paths, state):
     print("[agent] run recovery: missing commit from previous batch")
     print(f"[agent] recovery attempt: {pending_commit['attempts']}")
     print(f"[agent] current task: {recovery_tasks[0]['text']}")
+    if resume_session_id is not None:
+        print(f"[agent] resuming session: {resume_session_id}")
     if pending_commit.get("tasks"):
         print("[agent] recovery targets:")
         for index, task in enumerate(pending_commit["tasks"][:5], start=1):
@@ -2194,6 +2404,7 @@ def run_pending_commit_recovery(paths, state):
         state=state,
         log_file=recovery_log_file,
         prompt_override=build_commit_recovery_prompt(paths["root"], paths["todo_file"], pending_commit),
+        resume_session_id=resume_session_id,
     )
 
     result = parse_agent_result(log_file)
@@ -2239,6 +2450,12 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
     recovery_tasks = list(runnable_tasks)
     recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
     batch_head_before = git_head_commit(paths["root"])
+    resume_session_id = resolve_resume_session_id(
+        paths["root"],
+        state,
+        paths["log_dir"],
+        task_texts=[task["text"] for task in recovery_tasks],
+    )
     state["current"] = {
         "project_root": path_label(paths["root"], paths["root"]),
         "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -2246,10 +2463,12 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
         "task_count": len(recovery_tasks),
         "current_task": recovery_tasks[0]["text"],
         "tasks": [task["text"] for task in recovery_tasks[:20]],
+        "task_ids": [task["id"] for task in recovery_tasks[:20]],
         "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
         "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
         "git_repo": True,
         "log_file": path_label(paths["root"], recovery_log_file),
+        "session_id": resume_session_id,
         "pid": None,
         "heartbeat_at": None,
         "elapsed_seconds": 0,
@@ -2260,6 +2479,8 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
 
     print("[agent] continue current task iteration from existing uncommitted changes")
     print(f"[agent] current task: {recovery_tasks[0]['text']}")
+    if resume_session_id is not None:
+        print(f"[agent] resuming session: {resume_session_id}")
     print(f"[agent] recovery batch: {len(recovery_tasks)} task(s)")
     print_batch_preview(recovery_tasks)
     print(f"[agent] dirty entries: {len(dirty_lines)}")
@@ -2285,6 +2506,7 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
             exhausted_tasks,
             dirty_lines,
         ),
+        resume_session_id=resume_session_id,
     )
     result = parse_agent_result(log_file)
     verification_commands = result.get("verification", [])
@@ -2451,7 +2673,7 @@ def main():
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
         if clear_stale_runner_state(state):
             save_state(paths["state_file"], state)
-        if clear_stale_current_state(state):
+        if clear_stale_current_state(state, paths["root"]):
             save_state(paths["state_file"], state)
         tasks = parse_todo(paths["todo_file"])
         if reconcile_state_with_todo(state, tasks):
@@ -2470,7 +2692,7 @@ def main():
             if clear_stale_runner_state(state):
                 state["runner"] = runner_state()
                 save_state(paths["state_file"], state)
-            if clear_stale_current_state(state):
+            if clear_stale_current_state(state, paths["root"]):
                 save_state(paths["state_file"], state)
             tasks_before = parse_todo(paths["todo_file"])
             if reconcile_state_with_todo(state, tasks_before):
@@ -2506,6 +2728,14 @@ def main():
 
             batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
             batch_head_before = git_head_commit(paths["root"])
+            resume_session_id = None
+            if runnable_tasks and runnable_tasks[0].get("in_progress_in_file"):
+                resume_session_id = resolve_resume_session_id(
+                    paths["root"],
+                    state,
+                    paths["log_dir"],
+                    task_texts=[task["text"] for task in runnable_tasks],
+                )
             state["current"] = {
                 "project_root": path_label(paths["root"], paths["root"]),
                 "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -2513,10 +2743,12 @@ def main():
                 "task_count": len(runnable_tasks),
                 "current_task": runnable_tasks[0]["text"],
                 "tasks": [task["text"] for task in runnable_tasks[:20]],
+                "task_ids": [task["id"] for task in runnable_tasks[:20]],
                 "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
                 "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
                 "git_repo": git_repo,
                 "log_file": path_label(paths["root"], batch_log_file),
+                "session_id": resume_session_id,
                 "pid": None,
                 "heartbeat_at": None,
                 "elapsed_seconds": 0,
@@ -2527,6 +2759,8 @@ def main():
 
             print(f"[agent] run batch: {len(runnable_tasks)} runnable tasks")
             print(f"[agent] current task: {runnable_tasks[0]['text']}")
+            if resume_session_id is not None:
+                print(f"[agent] resuming session: {resume_session_id}")
             print_batch_preview(runnable_tasks)
             set_tasks_marker(paths["todo_file"], runnable_tasks[:1], "~")
             ok, log_file = run_codex(
@@ -2540,6 +2774,7 @@ def main():
                 state_file=paths["state_file"],
                 state=state,
                 log_file=batch_log_file,
+                resume_session_id=resume_session_id,
             )
             tasks_after = parse_todo(paths["todo_file"])
             reconcile_state_with_todo(state, tasks_after)

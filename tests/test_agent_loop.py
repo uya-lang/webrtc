@@ -52,6 +52,31 @@ class AgentLoopSandboxTests(unittest.TestCase):
             ["codex", "exec", "--sandbox", "workspace-write"],
         )
 
+    def test_resume_command_reuses_previous_session(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        cmd = module.build_codex_exec_command(
+            Path("/tmp/repo"),
+            "prompt",
+            resume_session_id=session_id,
+        )
+
+        self.assertEqual(
+            cmd,
+            [
+                "codex",
+                "exec",
+                "--sandbox",
+                "danger-full-access",
+                "--cd",
+                "/tmp/repo",
+                "resume",
+                session_id,
+                "prompt",
+            ],
+        )
+
     def test_invalid_sandbox_still_fails_fast(self):
         with self.assertRaises(SystemExit) as excinfo:
             load_agent_loop_module({"CODEX_SANDBOX": "nope"})
@@ -405,6 +430,64 @@ class AgentLoopKillTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertEqual(todo_file.read_text(encoding="utf-8"), "- [~] still running\n")
 
+    def test_clear_stale_current_state_preserves_last_session(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        state = module.empty_state(Path("/tmp/project"), Path("/tmp/project/docs/todo.md"))
+        state["current"] = {
+            "pid": 222,
+            "current_task": "still running",
+            "tasks": ["still running", "next task"],
+            "task_ids": ["task-1", "task-2"],
+            "log_file": ".agent/logs/current.log",
+            "session_id": session_id,
+        }
+
+        with patch.object(module, "process_is_alive", return_value=False):
+            cleared = module.clear_stale_current_state(state, Path("/tmp/project"))
+
+        self.assertTrue(cleared)
+        self.assertIsNone(state["current"])
+        self.assertEqual(state["last_session"]["session_id"], session_id)
+        self.assertEqual(state["last_session"]["current_task"], "still running")
+        self.assertEqual(state["last_session"]["tasks"], ["still running", "next task"])
+        self.assertEqual(state["last_session"]["task_ids"], ["task-1", "task-2"])
+        self.assertEqual(state["last_session"]["log_file"], ".agent/logs/current.log")
+
+    def test_resolve_resume_session_id_falls_back_to_latest_log(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [~] still running\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            log_file = paths["log_dir"] / "batch-20260531-000000-stale.log"
+            log_file.write_text(
+                "\n".join(
+                    [
+                        "[2026-05-31 17:16:16] START BATCH",
+                        f"session id: {session_id}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            state = module.empty_state(root, todo_file)
+            resolved = module.resolve_resume_session_id(
+                root,
+                state,
+                paths["log_dir"],
+                task_texts=["still running"],
+            )
+
+        self.assertEqual(resolved, session_id)
+
     def test_queue_pending_commit_keeps_all_completed_tasks(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
 
@@ -452,6 +535,48 @@ class AgentLoopKillTests(unittest.TestCase):
             self.assertFalse(recovered)
             self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
             self.assertIn("abc123", state["commits"])
+
+    def test_dirty_recovery_resumes_matching_last_session(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [~] still running\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            state = module.empty_state(root, todo_file)
+            state["last_session"] = {
+                "session_id": session_id,
+                "current_task": "still running",
+                "tasks": ["still running"],
+                "log_file": ".agent/logs/previous.log",
+                "updated_at": "2026-05-31 17:16:16",
+            }
+            runnable_tasks = module.parse_todo(todo_file)
+            captured = {}
+
+            def fake_run_codex(*args, **kwargs):
+                captured["resume_session_id"] = kwargs.get("resume_session_id")
+                return True, root / "fake.log"
+
+            with patch.object(module, "git_status_lines", side_effect=[[" M src/example.uya"], []]):
+                with patch.object(module, "git_head_commit", return_value="before"):
+                    with patch.object(module, "run_codex", side_effect=fake_run_codex):
+                        with patch.object(module, "parse_agent_result", return_value={}):
+                            with patch.object(module, "collect_valid_commits", return_value=[]):
+                                with patch.object(module, "collect_new_commits", return_value=[]):
+                                    recovered = module.run_dirty_worktree_recovery(
+                                        paths,
+                                        state,
+                                        runnable_tasks,
+                                        [],
+                                    )
+
+        self.assertTrue(recovered)
+        self.assertEqual(captured["resume_session_id"], session_id)
 
     def test_kill_stops_runner_and_codex_and_clears_state(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
