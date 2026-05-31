@@ -41,6 +41,9 @@ rg -Fq "dtls_test_check_ecdhe_generated_key_share" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_finished_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_finished_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_finished_verify_data_vectors" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_use_srtp_roundtrip" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_use_srtp_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_use_srtp_negotiation" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
@@ -53,6 +56,7 @@ rg -Fq "export struct DtlsServerKeyExchange" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsClientKeyExchange" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsEcdheKeyShare" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsFinished" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsUseSrtpExtension" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_fragment_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_absorb" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_take_message" src/webrtc/dtls/handshake.uya
@@ -72,6 +76,9 @@ rg -Fq "export fn dtls_finished_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_finished_write" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_finished_verify_data_compute" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_finished_verify" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_use_srtp_extension_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_use_srtp_extension_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_use_srtp_negotiate" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 

@@ -697,6 +697,93 @@ fn dtls_test_check_finished_verify_data_vectors() i32 {
     return 0;
 }
 
+fn dtls_test_check_use_srtp_roundtrip() i32 {
+    var body: [byte: 11] = [
+        0x00 as byte, 0x06 as byte,
+        0x00 as byte, 0x07 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x02 as byte,
+        0x02 as byte, 0xaa as byte, 0xbb as byte,
+    ];
+    const parsed: !DtlsUseSrtpExtension = dtls_use_srtp_extension_parse(body[0:11]);
+    if parsed.error_id != 0 {
+        return 138;
+    }
+    if parsed.value.profile_count != 3usize {
+        return 139;
+    }
+    if parsed.value.profiles[0] != DTLS_SRTP_PROFILE_AEAD_AES_128_GCM
+        || parsed.value.profiles[1] != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || parsed.value.profiles[2] != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
+        return 140;
+    }
+    const mki: &[byte] = parsed.value.mki;
+    if mki.len != 2usize || mki[0] != 0xaa as byte || mki[1] != 0xbb as byte {
+        return 141;
+    }
+    var out: [byte: 16] = [];
+    const written: !usize = dtls_use_srtp_extension_write(&parsed.value, out[0:16]);
+    if written.error_id != 0 || written.value != 11usize {
+        return 142;
+    }
+    var index: usize = 0usize;
+    while index < 11usize {
+        if out[index] != body[index] {
+            return 143;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_use_srtp_invalid_cases() i32 {
+    var odd_profiles: [byte: 6] = [
+        0x00 as byte, 0x03 as byte,
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    if dtls_use_srtp_extension_parse(odd_profiles[0:6]).error_id == 0 {
+        return 144;
+    }
+
+    var unsupported: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    unsupported.profile_count = 1usize;
+    unsupported.profiles[0] = 0x9999u16;
+    var out: [byte: 8] = [];
+    if dtls_use_srtp_extension_write(&unsupported, out[0:8]).error_id == 0 {
+        return 145;
+    }
+    return 0;
+}
+
+fn dtls_test_check_use_srtp_negotiation() i32 {
+    var offer: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    offer.profile_count = 2usize;
+    offer.profiles[0] = DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
+    offer.profiles[1] = DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+
+    var supported: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    supported.profile_count = 2usize;
+    supported.profiles[0] = DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+    supported.profiles[1] = DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
+
+    const selected: !DtlsUseSrtpExtension = dtls_use_srtp_negotiate(&offer, &supported);
+    if selected.error_id != 0 {
+        return 146;
+    }
+    if selected.value.profile_count != 1usize || selected.value.profiles[0] != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 147;
+    }
+    if selected.value.mki.len != 0usize {
+        return 148;
+    }
+
+    var no_match: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    no_match.profile_count = 1usize;
+    no_match.profiles[0] = DTLS_SRTP_PROFILE_AEAD_AES_256_GCM;
+    if dtls_use_srtp_negotiate(&offer, &no_match).error_id == 0 {
+        return 149;
+    }
+    return 0;
+}
+
 fn dtls_test_check_exporter_reference_cases() i32 {
     return 0;
 }
@@ -808,6 +895,24 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_finished_verify_data_vectors();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_use_srtp_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_use_srtp_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_use_srtp_negotiation();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;

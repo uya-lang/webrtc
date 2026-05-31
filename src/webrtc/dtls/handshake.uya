@@ -21,6 +21,12 @@ export const DTLS_ECDHE_KEY_SHARE_GENERATION_ATTEMPTS: usize = 16usize;
 export const DTLS_FINISHED_VERIFY_DATA_BYTES: usize = 12usize;
 export const DTLS_MASTER_SECRET_BYTES: usize = 48usize;
 export const DTLS_FINISHED_TRANSCRIPT_HASH_BYTES: usize = 32usize;
+export const DTLS_EXTENSION_USE_SRTP: u16 = 14u16;
+export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80: u16 = 0x0001u16;
+export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32: u16 = 0x0002u16;
+export const DTLS_SRTP_PROFILE_AEAD_AES_128_GCM: u16 = 0x0007u16;
+export const DTLS_SRTP_PROFILE_AEAD_AES_256_GCM: u16 = 0x0008u16;
+export const DTLS_USE_SRTP_MAX_PROFILES: usize = 8usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -88,6 +94,22 @@ export fn dtls_ecdhe_key_share_make() DtlsEcdheKeyShare {
 
 export struct DtlsFinished {
     verify_data: &[byte] = [],
+}
+
+export struct DtlsUseSrtpExtension {
+    profile_count: usize = 0usize,
+    profiles: [u16: DTLS_USE_SRTP_MAX_PROFILES] = [],
+    mki: &[byte] = [],
+}
+
+export fn dtls_use_srtp_extension_make() DtlsUseSrtpExtension {
+    var profiles: [u16: DTLS_USE_SRTP_MAX_PROFILES] = [];
+    var empty_bytes: [byte: 1] = [];
+    return DtlsUseSrtpExtension{
+        profile_count: 0usize,
+        profiles: profiles,
+        mki: empty_bytes[0:0],
+    };
 }
 
 export struct DtlsHandshakeFragment {
@@ -291,6 +313,48 @@ fn dtls_finished_validate(message: &DtlsFinished) !void {
     if message == null || message.verify_data.len != DTLS_FINISHED_VERIFY_DATA_BYTES {
         return error.InvalidPacket;
     }
+}
+
+fn dtls_use_srtp_profile_supported(profile: u16) bool {
+    return profile == DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || profile == DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32
+        || profile == DTLS_SRTP_PROFILE_AEAD_AES_128_GCM
+        || profile == DTLS_SRTP_PROFILE_AEAD_AES_256_GCM;
+}
+
+fn dtls_use_srtp_extension_validate(message: &DtlsUseSrtpExtension) !usize {
+    if message == null {
+        return error.InvalidPacket;
+    }
+    if message.profile_count == 0usize || message.profile_count > DTLS_USE_SRTP_MAX_PROFILES {
+        return error.InvalidPacket;
+    }
+
+    var index: usize = 0usize;
+    while index < message.profile_count {
+        if !dtls_use_srtp_profile_supported(message.profiles[index]) {
+            return error.UnsupportedProfile;
+        }
+        index = index + 1usize;
+    }
+    var total_length: usize = 2usize + (message.profile_count * 2usize);
+    total_length = total_length + 1usize;
+    total_length = total_length + message.mki.len;
+    return total_length;
+}
+
+fn dtls_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
 }
 
 fn dtls_tls12_p_hash_sha256(secret: &[byte], seed: &[byte], out: &[byte]) !void {
@@ -853,6 +917,98 @@ export fn dtls_finished_verify(message: &DtlsFinished, master_secret: &[byte], t
     if !constant_time_bytes_equal(message.verify_data, expected[0:DTLS_FINISHED_VERIFY_DATA_BYTES]) {
         return error.IntegrityCheckFailed;
     }
+}
+
+export fn dtls_use_srtp_extension_parse(body: &[byte]) !DtlsUseSrtpExtension {
+    if body.len < 3usize {
+        return error.PacketTooShort;
+    }
+
+    const profiles_length: usize = (try read_be_u16(body[0:2])) as usize;
+    if profiles_length == 0usize || (profiles_length & 1usize) != 0usize {
+        return error.InvalidPacket;
+    }
+    if 2usize + profiles_length + 1usize > body.len {
+        return error.InvalidPacket;
+    }
+
+    const profile_count: usize = profiles_length / 2usize;
+    if profile_count > DTLS_USE_SRTP_MAX_PROFILES {
+        return error.UnsupportedCapability;
+    }
+
+    var message: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    message.profile_count = profile_count;
+
+    var cursor: usize = 2usize;
+    var index: usize = 0usize;
+    while index < profile_count {
+        const profile: u16 = try read_be_u16(body[cursor:2]);
+        if !dtls_use_srtp_profile_supported(profile) {
+            return error.UnsupportedProfile;
+        }
+        message.profiles[index] = profile;
+        cursor = cursor + 2usize;
+        index = index + 1usize;
+    }
+
+    const mki_length: usize = body[cursor] as usize;
+    cursor = cursor + 1usize;
+    if cursor + mki_length != body.len {
+        return error.InvalidPacket;
+    }
+    message.mki = body[cursor:mki_length];
+    return message;
+}
+
+export fn dtls_use_srtp_extension_write(message: &DtlsUseSrtpExtension, out: &[byte]) !usize {
+    const total_length: usize = try dtls_use_srtp_extension_validate(message);
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    try write_be_u16(out[0:2], (message.profile_count * 2usize) as u16);
+    var cursor: usize = 2usize;
+    var index: usize = 0usize;
+    while index < message.profile_count {
+        try write_be_u16(out[cursor:2], message.profiles[index]);
+        cursor = cursor + 2usize;
+        index = index + 1usize;
+    }
+    out[cursor] = message.mki.len as byte;
+    cursor = cursor + 1usize;
+    index = 0usize;
+    while index < message.mki.len {
+        out[cursor + index] = message.mki[index];
+        index = index + 1usize;
+    }
+    return total_length;
+}
+
+export fn dtls_use_srtp_negotiate(offer: &DtlsUseSrtpExtension, supported: &DtlsUseSrtpExtension) !DtlsUseSrtpExtension {
+    _ = try dtls_use_srtp_extension_validate(offer);
+    _ = try dtls_use_srtp_extension_validate(supported);
+    if !dtls_bytes_equal(offer.mki, supported.mki) {
+        return error.UnsupportedProfile;
+    }
+
+    var supported_index: usize = 0usize;
+    while supported_index < supported.profile_count {
+        const supported_profile: u16 = supported.profiles[supported_index];
+        var offer_index: usize = 0usize;
+        while offer_index < offer.profile_count {
+            if offer.profiles[offer_index] == supported_profile {
+                var selected: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+                selected.profile_count = 1usize;
+                selected.profiles[0] = supported_profile;
+                selected.mki = offer.mki;
+                return selected;
+            }
+            offer_index = offer_index + 1usize;
+        }
+        supported_index = supported_index + 1usize;
+    }
+    return error.UnsupportedProfile;
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {
