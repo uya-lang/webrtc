@@ -1,0 +1,10 @@
+export struct Holder {
+    bytes: &[byte] = [],
+    payload: [byte: 4] = [],
+}
+
+export fn main() i32 {
+    var holder: Holder = Holder{};
+    holder.bytes = [];
+    return holder.payload[0] as i32;
+}

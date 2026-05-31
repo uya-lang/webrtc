@@ -1,0 +1,6 @@
+use moda;
+use modb;
+
+export fn main() i32 {
+    return moda_value() + modb_value();
+}
