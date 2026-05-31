@@ -155,13 +155,36 @@ def supports_live_output(stream):
     return bool(is_tty and term and term != "dumb")
 
 
+def parse_non_negative_int_env(name):
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return None
+
+    try:
+        return max(0, int(raw_value.strip() or "0"))
+    except ValueError:
+        return 0
+
+
 def detect_live_header_top_padding():
-    raw_value = os.environ.get("AGENT_LIVE_HEADER_TOP_PADDING")
-    if raw_value is not None:
-        try:
-            return max(0, int(raw_value.strip() or "0"))
-        except ValueError:
-            return 0
+    configured = parse_non_negative_int_env("AGENT_LIVE_HEADER_TOP_PADDING")
+    if configured is not None:
+        return configured
+
+    term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
+    if term_program == "vscode":
+        return 1
+
+    if os.environ.get("VSCODE_INJECTION") or os.environ.get("VSCODE_SHELL_INTEGRATION"):
+        return 1
+
+    return 0
+
+
+def detect_live_footer_bottom_padding():
+    configured = parse_non_negative_int_env("AGENT_LIVE_FOOTER_BOTTOM_PADDING")
+    if configured is not None:
+        return configured
 
     term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
     if term_program == "vscode":
@@ -419,12 +442,14 @@ class LiveOutputDisplay:
         self.enabled = supports_live_output(stream) if enabled is None else enabled
         self.active = False
         self.rows = 24
+        self.scroll_bottom = 24
         self.cols = 80
         self.current_task = "无"
         self.last_header = None
         self.pending_escape = ""
         self.header_rows = 4
         self.header_top = 1 + (detect_live_header_top_padding() if self.enabled else 0)
+        self.footer_bottom_padding = detect_live_footer_bottom_padding() if self.enabled else 0
         self.task_row = self.header_top + 1
         self.meta_row = self.header_top + 2
         self.border_bottom_row = self.header_top + 3
@@ -442,17 +467,31 @@ class LiveOutputDisplay:
 
     def _refresh_size(self):
         size = shutil.get_terminal_size(fallback=(80, 24))
-        self.cols = max(20, int(size.columns or 80))
-        self.rows = max(self.scroll_top, int(size.lines or 24))
+        cols = max(20, int(size.columns or 80))
+        rows = max(self.scroll_top, int(size.lines or 24))
+        max_bottom_padding = max(0, rows - self.scroll_top)
+        footer_bottom_padding = min(self.footer_bottom_padding, max_bottom_padding)
+        scroll_bottom = max(self.scroll_top, rows - footer_bottom_padding)
+        size_changed = cols != self.cols or rows != self.rows or scroll_bottom != self.scroll_bottom
+        self.cols = cols
+        self.rows = rows
+        self.scroll_bottom = scroll_bottom
+        return size_changed
+
+    def _apply_scroll_region(self):
+        self._write(f"\x1b[{self.scroll_top};{self.scroll_bottom}r")
+        for row in range(self.scroll_bottom + 1, self.rows + 1):
+            self._write(f"\x1b[{row};1H")
+            self._write("\x1b[2K")
 
     def _clamp_cursor(self):
-        self.cursor_row = min(max(self.scroll_top, self.cursor_row), self.rows)
+        self.cursor_row = min(max(self.scroll_top, self.cursor_row), self.scroll_bottom)
         self.cursor_col = min(max(1, self.cursor_col), self.cols)
 
     def _track_cursor(self, text):
         for char in text:
             if char == "\n":
-                self.cursor_row = min(self.rows, self.cursor_row + 1)
+                self.cursor_row = min(self.scroll_bottom, self.cursor_row + 1)
                 self.cursor_col = 1
                 continue
             if char == "\r":
@@ -469,12 +508,12 @@ class LiveOutputDisplay:
 
             current_offset = self.cursor_col - 1
             if current_offset + char_width > self.cols:
-                if self.cursor_row < self.rows:
+                if self.cursor_row < self.scroll_bottom:
                     self.cursor_row += 1
                 current_offset = 0
 
             if current_offset + char_width >= self.cols:
-                if self.cursor_row < self.rows:
+                if self.cursor_row < self.scroll_bottom:
                     self.cursor_row += 1
                     self.cursor_col = 1
                 else:
@@ -488,7 +527,7 @@ class LiveOutputDisplay:
         if not self.enabled:
             return
 
-        self._refresh_size()
+        size_changed = self._refresh_size()
         plain_header = render_live_header_lines(
             self.current_task,
             elapsed_seconds=elapsed_seconds,
@@ -497,7 +536,7 @@ class LiveOutputDisplay:
             width=self.cols,
             color=False,
         )
-        if plain_header == self.last_header and not force:
+        if plain_header == self.last_header and not force and not size_changed:
             return
 
         rendered_border_top, rendered_task, rendered_meta, rendered_border_bottom = render_live_header_lines(
@@ -510,6 +549,7 @@ class LiveOutputDisplay:
         )
 
         self._clamp_cursor()
+        self._apply_scroll_region()
         self._write(f"\x1b[{self.header_top};1H")
         self._write("\x1b[2K")
         self._write(rendered_border_top)
@@ -541,7 +581,7 @@ class LiveOutputDisplay:
 
         self._refresh_size()
         self._write("\x1b[2J\x1b[H")
-        self._write(f"\x1b[{self.scroll_top};{self.rows}r")
+        self._apply_scroll_region()
         self._write(f"\x1b[{self.scroll_top};1H")
         self._draw_header(force=True)
 

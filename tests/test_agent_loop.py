@@ -223,12 +223,36 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
                 display.finish()
 
         rendered = stream.getvalue()
-        self.assertIn("\x1b[6;12r", rendered)
+        self.assertIn("\x1b[6;11r", rendered)
         self.assertIn("\x1b[2;1H", rendered)
         self.assertIn("\x1b[3;1H", rendered)
         self.assertIn("\x1b[4;1H", rendered)
         self.assertIn("\x1b[5;1H", rendered)
         self.assertIn("\x1b[6;1Hline one\n", rendered)
+
+    def test_live_display_reserves_footer_padding_for_busy_terminal_ui(self):
+        module = load_agent_loop_module(
+            {
+                "CODEX_SANDBOX": None,
+                "TERM": "xterm-256color",
+                "AGENT_LIVE_FOOTER_BOTTOM_PADDING": "2",
+            }
+        )
+        stream = FakeTTY()
+        with patch.dict(os.environ, {"AGENT_LIVE_FOOTER_BOTTOM_PADDING": "2"}, clear=False):
+            display = module.LiveOutputDisplay(stream, enabled=True)
+
+            with patch.object(module.shutil, "get_terminal_size", return_value=os.terminal_size((60, 12))):
+                display.start("实现实时输出")
+                display.write("line one\n")
+                display.finish()
+
+        rendered = stream.getvalue()
+        self.assertEqual(display.scroll_bottom, 10)
+        self.assertIn("\x1b[5;10r", rendered)
+        self.assertIn("\x1b[11;1H", rendered)
+        self.assertIn("\x1b[12;1H", rendered)
+        self.assertIn("\x1b[5;1Hline one\n", rendered)
 
     def test_live_display_restores_cursor_correctly_after_wide_output(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
@@ -250,6 +274,31 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
 
         rendered = stream.getvalue()
         self.assertIn("\x1b[6;2Htail\n", rendered)
+
+    def test_live_display_reapplies_scroll_region_after_terminal_resize(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
+        stream = FakeTTY()
+        display = module.LiveOutputDisplay(stream, enabled=True)
+
+        sizes = [
+            os.terminal_size((60, 12)),
+            os.terminal_size((60, 12)),
+            os.terminal_size((60, 9)),
+        ]
+        with patch.object(module.shutil, "get_terminal_size", side_effect=sizes):
+            display.start("实现实时输出")
+            display.update(
+                current_task="实现实时输出",
+                elapsed_seconds=65,
+                log_path=".agent/logs/current.log",
+                log_note="+1.0KB output",
+                force=True,
+            )
+
+        rendered = stream.getvalue()
+        self.assertIn("\x1b[5;12r", rendered)
+        self.assertIn("\x1b[5;9r", rendered)
+        self.assertEqual(display.scroll_bottom, 9)
 
     def test_clip_display_text_uses_terminal_column_width(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
