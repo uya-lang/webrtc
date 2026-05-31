@@ -29,6 +29,7 @@ export const TURN_REQUESTED_ADDRESS_FAMILY_IPV4: u8 = STUN_ADDRESS_FAMILY_IPV4;
 export const TURN_REQUESTED_ADDRESS_FAMILY_IPV6: u8 = STUN_ADDRESS_FAMILY_IPV6;
 export const TURN_RESERVATION_TOKEN_BYTES: usize = 8usize;
 export const TURN_MAX_RELAYED_ADDRESSES: usize = 2usize;
+export const TURN_MAX_PERMISSION_PEERS: usize = 8usize;
 export const TURN_MAX_REALM_BYTES: usize = 509usize;
 export const TURN_MAX_NONCE_BYTES: usize = 509usize;
 export const TURN_MAX_AUTH_KEY_BYTES: usize = 32usize;
@@ -72,6 +73,20 @@ export struct TurnRefreshRequest {
     fingerprint_present: bool = false,
 }
 
+export struct TurnCreatePermissionRequest {
+    peer_addresses: [StunXorMappedAddress: TURN_MAX_PERMISSION_PEERS] = [],
+    peer_address_count: usize = 0usize,
+    username: &[byte] = [],
+    username_present: bool = false,
+    realm: &[byte] = [],
+    realm_present: bool = false,
+    nonce: &[byte] = [],
+    nonce_present: bool = false,
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
+}
+
 export struct TurnAllocateSuccessResponse {
     relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [],
     relayed_address_count: usize = 0usize,
@@ -86,6 +101,12 @@ export struct TurnAllocateSuccessResponse {
 export struct TurnRefreshSuccessResponse {
     lifetime_seconds: u32 = 0u32,
     lifetime_present: bool = false,
+}
+
+export struct TurnCreatePermissionSuccessResponse {
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
 }
 
 export struct TurnAuthenticationChallenge {
@@ -169,10 +190,42 @@ export fn turn_refresh_request_make() TurnRefreshRequest {
     };
 }
 
+export fn turn_create_permission_request_make() TurnCreatePermissionRequest {
+    var peer_addresses: [StunXorMappedAddress: TURN_MAX_PERMISSION_PEERS] = [];
+    var index: usize = 0usize;
+    while index < TURN_MAX_PERMISSION_PEERS {
+        peer_addresses[index] = stun_xor_mapped_address_make();
+        index = index + 1usize;
+    }
+
+    var empty_bytes: [byte: 1] = [];
+    return TurnCreatePermissionRequest{
+        peer_addresses: peer_addresses,
+        peer_address_count: 0usize,
+        username: empty_bytes[0:0],
+        username_present: false,
+        realm: empty_bytes[0:0],
+        realm_present: false,
+        nonce: empty_bytes[0:0],
+        nonce_present: false,
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
+    };
+}
+
 export fn turn_refresh_success_response_make() TurnRefreshSuccessResponse {
     return TurnRefreshSuccessResponse{
         lifetime_seconds: 0u32,
         lifetime_present: false,
+    };
+}
+
+export fn turn_create_permission_success_response_make() TurnCreatePermissionSuccessResponse {
+    return TurnCreatePermissionSuccessResponse{
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
     };
 }
 

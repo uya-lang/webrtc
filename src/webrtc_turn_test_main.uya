@@ -735,6 +735,134 @@ fn turn_test_check_refresh_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_check_create_permission_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "permission-nonce" as &[byte]) {
+        return 171;
+    }
+
+    var peer_ipv4: [byte: 4] = [192 as byte, 0 as byte, 2 as byte, 10 as byte];
+    var peer_ipv6: [byte: 16] = [
+        0x20 as byte, 0x01 as byte, 0x0d as byte, 0xb8 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0x05 as byte,
+    ];
+
+    var request_packet: [byte: 320] = [];
+    var request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_create_permission_request(&request_builder, request_packet[0:320], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 172;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&request_builder, 40000u16, peer_ipv4[0:4]).error_id != 0 {
+        return 173;
+    }
+    if turn_builder_append_xor_peer_address_ipv6(&request_builder, 40001u16, peer_ipv6[0:16]).error_id != 0 {
+        return 174;
+    }
+    if turn_builder_append_long_term_credentials(&request_builder, &credentials).error_id != 0 {
+        return 175;
+    }
+    const request_finish_result: !usize = turn_builder_finish(&request_builder);
+    if request_finish_result.error_id != 0 {
+        return 176;
+    }
+
+    const request_result: !TurnCreatePermissionRequest =
+        turn_create_permission_request_parse(request_packet[0:request_finish_result.value]);
+    if request_result.error_id != 0 {
+        return 177;
+    }
+    const request: TurnCreatePermissionRequest = request_result.value;
+    if request.peer_address_count != 2usize {
+        return 178;
+    }
+    if request.peer_addresses[0].family != STUN_ADDRESS_FAMILY_IPV4 || request.peer_addresses[0].port != 40000u16 {
+        return 179;
+    }
+    if !turn_test_bytes_equal(request.peer_addresses[0].address_bytes[0:4], peer_ipv4[0:4]) {
+        return 180;
+    }
+    if request.peer_addresses[1].family != STUN_ADDRESS_FAMILY_IPV6 || request.peer_addresses[1].port != 40001u16 {
+        return 181;
+    }
+    if !turn_test_bytes_equal(request.peer_addresses[1].address_bytes[0:16], peer_ipv6[0:16]) {
+        return 182;
+    }
+    if !request.username_present || !request.realm_present || !request.nonce_present || !request.message_integrity_present {
+        return 183;
+    }
+    if stun_verify_message_integrity(
+        request_packet[0:request_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 184;
+    }
+
+    var response_packet: [byte: 192] = [];
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_create_permission_success_response(&response_builder, response_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 185;
+    }
+    if stun_builder_append_message_integrity(&response_builder, credentials.key[0:credentials.key_len]).error_id != 0 {
+        return 186;
+    }
+    const response_finish_result: !usize = turn_builder_finish(&response_builder);
+    if response_finish_result.error_id != 0 {
+        return 187;
+    }
+    const response_result: !TurnCreatePermissionSuccessResponse =
+        turn_create_permission_success_response_parse(response_packet[0:response_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if response_result.error_id != 0 {
+        return 188;
+    }
+    const response: TurnCreatePermissionSuccessResponse = response_result.value;
+    if !response.message_integrity_present {
+        return 189;
+    }
+    if stun_verify_message_integrity(
+        response_packet[0:response_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 190;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_create_permission_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "permission-nonce" as &[byte]) {
+        return 191;
+    }
+
+    var bad_request_packet: [byte: 192] = [];
+    var bad_request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_create_permission_request(&bad_request_builder, bad_request_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 192;
+    }
+    if turn_builder_append_long_term_credentials(&bad_request_builder, &credentials).error_id != 0 {
+        return 193;
+    }
+    const bad_request_finish_result: !usize = turn_builder_finish(&bad_request_builder);
+    if bad_request_finish_result.error_id != 0 {
+        return 194;
+    }
+    const bad_request_result: !TurnCreatePermissionRequest =
+        turn_create_permission_request_parse(bad_request_packet[0:bad_request_finish_result.value]);
+    if !turn_test_expect_error(bad_request_result.error_id) {
+        return 195;
+    }
+
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     var result: i32 = turn_test_check_allocate_request_roundtrip();
     if result != 0 {
@@ -773,6 +901,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_refresh_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_create_permission_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_create_permission_invalid_paths();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;

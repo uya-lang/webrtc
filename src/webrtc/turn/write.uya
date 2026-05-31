@@ -114,6 +114,11 @@ export fn turn_builder_init_refresh_request(builder: &StunMessageBuilder, dst: &
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_REFRESH, STUN_MESSAGE_CLASS_REQUEST));
 }
 
+export fn turn_builder_init_create_permission_request(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_request(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_REQUEST));
+}
+
 export fn turn_builder_init_allocate_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_success_response(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
@@ -124,6 +129,11 @@ export fn turn_builder_init_refresh_success_response(builder: &StunMessageBuilde
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_REFRESH, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
 }
 
+export fn turn_builder_init_create_permission_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_success_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
+}
+
 export fn turn_builder_init_allocate_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_error_response(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
@@ -132,6 +142,11 @@ export fn turn_builder_init_allocate_error_response(builder: &StunMessageBuilder
 export fn turn_builder_init_refresh_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_error_response(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_REFRESH, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
+}
+
+export fn turn_builder_init_create_permission_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_error_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
 }
 
 export fn turn_builder_append_requested_transport(builder: &StunMessageBuilder, protocol: u8) !void {
@@ -217,6 +232,14 @@ export fn turn_builder_append_xor_relayed_address_ipv4(builder: &StunMessageBuil
 
 export fn turn_builder_append_xor_relayed_address_ipv6(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
     return turn_builder_append_xor_address_ipv6(builder, TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS, port, address);
+}
+
+export fn turn_builder_append_xor_peer_address_ipv4(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    return turn_builder_append_xor_address_ipv4(builder, TURN_ATTRIBUTE_XOR_PEER_ADDRESS, port, address);
+}
+
+export fn turn_builder_append_xor_peer_address_ipv6(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    return turn_builder_append_xor_address_ipv6(builder, TURN_ATTRIBUTE_XOR_PEER_ADDRESS, port, address);
 }
 
 export fn turn_builder_finish(builder: &StunMessageBuilder) !usize {
