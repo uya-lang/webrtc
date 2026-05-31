@@ -101,6 +101,55 @@ class AgentLoopResumeTests(unittest.TestCase):
             self.assertEqual([task["text"] for task in exhausted], ["blocked resume task"])
 
 
+class AgentLoopPromptTests(unittest.TestCase):
+    def test_main_prompt_requires_no_shortcuts_performance_and_full_implementation(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [~] prompt task\n", encoding="utf-8")
+            paths = module.build_runtime_paths(root, todo_file)
+            task = module.parse_todo(todo_file)[0]
+
+            prompt = module.build_prompt(
+                root,
+                todo_file,
+                [task],
+                [],
+                paths["toolchain_bug_dir"],
+                paths["toolchain_bug_repro_dir"],
+            )
+
+            self.assertIn("不允许作弊或偷工减料", prompt)
+            self.assertIn("必须考虑代码性能和资源开销", prompt)
+            self.assertIn("宁可拆分复杂任务也不要提交半成品", prompt)
+            self.assertIn("它不足以证明任务完成", prompt)
+
+    def test_dirty_recovery_prompt_requires_full_fix_not_surface_cleanup(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [~] prompt task\n", encoding="utf-8")
+            task = module.parse_todo(todo_file)[0]
+
+            prompt = module.build_dirty_worktree_recovery_prompt(
+                root,
+                todo_file,
+                [task],
+                [],
+                [" M src/example.uya"],
+            )
+
+            self.assertIn("不允许作弊或表面修补", prompt)
+            self.assertIn("完整实现而不是“刚好能过”的半成品", prompt)
+            self.assertIn("必须考虑代码性能和资源开销", prompt)
+
+
 class AgentLoopKillTests(unittest.TestCase):
     def test_process_is_alive_treats_zombie_as_stopped(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
