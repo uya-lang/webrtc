@@ -1,0 +1,100 @@
+// webrtc.ice.transport - selected pair snapshot helpers for upper transport integration
+// 模块路径：src/webrtc/ice/transport.uya → use webrtc.ice.transport;
+
+use webrtc.errors;
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+
+export struct IceSelectedPairTransport {
+    active: bool = false,
+    component_id: u16 = ICE_COMPONENT_RTP,
+    local_address: IceTransportAddress = IceTransportAddress{},
+    remote_address: IceTransportAddress = IceTransportAddress{},
+}
+
+fn ice_selected_pair_transport_copy_address(dst: &IceTransportAddress, src: &IceTransportAddress) !void {
+    if dst == null || src == null || !ice_transport_address_is_set(src) {
+        return error.InvalidPacket;
+    }
+    return ice_transport_address_set(dst, src.family, src.host[0:src.host_len], src.port);
+}
+
+export fn ice_selected_pair_transport_make() IceSelectedPairTransport {
+    const local_address: IceTransportAddress = ice_transport_address_make();
+    const remote_address: IceTransportAddress = ice_transport_address_make();
+    return IceSelectedPairTransport{
+        active: false,
+        component_id: ICE_COMPONENT_RTP,
+        local_address: local_address,
+        remote_address: remote_address,
+    };
+}
+
+export fn ice_selected_pair_transport_clear(binding: &IceSelectedPairTransport) void {
+    if binding == null {
+        return;
+    }
+    binding.active = false;
+    binding.component_id = ICE_COMPONENT_RTP;
+    ice_transport_address_init(&binding.local_address);
+    ice_transport_address_init(&binding.remote_address);
+}
+
+export fn ice_selected_pair_transport_bind_selected_pair(binding: &IceSelectedPairTransport, agent: &IceAgent) !void {
+    if binding == null || agent == null || !ice_agent_has_selected_pair(agent) {
+        return error.InvalidPacket;
+    }
+
+    const pair_slot: usize = agent.selected_pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
+    if pair.local_candidate_index == ICE_CANDIDATE_INDEX_NONE || pair.remote_candidate_index == ICE_CANDIDATE_INDEX_NONE {
+        return error.InvalidPacket;
+    }
+
+    const local_slot: usize = pair.local_candidate_index as usize;
+    const remote_slot: usize = pair.remote_candidate_index as usize;
+    if local_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if remote_slot >= ICE_MAX_REMOTE_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if local_slot >= agent.local_candidate_count {
+        return error.InvalidPacket;
+    }
+    if remote_slot >= agent.remote_candidate_count {
+        return error.InvalidPacket;
+    }
+
+    const local_candidate: &IceCandidate = &agent.local_candidates[local_slot];
+    const remote_candidate: &IceCandidate = &agent.remote_candidates[remote_slot];
+    if local_candidate.component_id != remote_candidate.component_id {
+        return error.InvalidPacket;
+    }
+
+    ice_selected_pair_transport_clear(binding);
+    try ice_selected_pair_transport_copy_address(&binding.local_address, &local_candidate.address);
+    try ice_selected_pair_transport_copy_address(&binding.remote_address, &remote_candidate.address);
+    binding.active = true;
+    binding.component_id = local_candidate.component_id;
+}
+
+export fn ice_selected_pair_transport_matches(
+    binding: &IceSelectedPairTransport,
+    component_id: u16,
+    local_address: &IceTransportAddress,
+    remote_address: &IceTransportAddress,
+) bool {
+    if binding == null || !binding.active || binding.component_id != component_id {
+        return false;
+    }
+    return ice_transport_address_equal(&binding.local_address, local_address)
+        && ice_transport_address_equal(&binding.remote_address, remote_address);
+}

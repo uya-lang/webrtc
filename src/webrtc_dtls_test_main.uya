@@ -3,6 +3,10 @@ use webrtc.crypto.p256;
 use webrtc.dtls.handshake;
 use webrtc.dtls.model;
 use webrtc.dtls.record;
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+use webrtc.ice.checklist;
+use webrtc.ice.transport;
 
 fn dtls_test_check_record_parser_truncation_cases() i32 {
     var truncated: [byte: 12] = [
@@ -1006,6 +1010,96 @@ fn dtls_test_check_certificate_fingerprint_invalid_cases() i32 {
     return 0;
 }
 
+fn dtls_test_check_selected_pair_transport_binding() i32 {
+    var agent: IceAgent = ice_agent_make();
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
+
+    agent.local_candidate_count = 1usize;
+    agent.remote_candidate_count = 1usize;
+    if ice_candidate_set_foundation(&agent.local_candidates[0], "lf0" as &[byte]).error_id != 0 {
+        return 185;
+    }
+    if ice_transport_address_set(&agent.local_candidates[0].address, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte], 5000u16).error_id != 0 {
+        return 186;
+    }
+    agent.local_candidates[0].component_id = ICE_COMPONENT_RTP;
+    agent.local_candidates[0].transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    agent.local_candidates[0].candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    agent.local_candidates[0].priority = 100u32;
+
+    if ice_candidate_set_foundation(&agent.remote_candidates[0], "rf0" as &[byte]).error_id != 0 {
+        return 187;
+    }
+    if ice_transport_address_set(&agent.remote_candidates[0].address, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.20" as &[byte], 6000u16).error_id != 0 {
+        return 188;
+    }
+    agent.remote_candidates[0].component_id = ICE_COMPONENT_RTP;
+    agent.remote_candidates[0].transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    agent.remote_candidates[0].candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    agent.remote_candidates[0].priority = 90u32;
+
+    agent.checklist_count = 1usize;
+    candidate_pair_init(&agent.checklist[0], 0u16, 0u16);
+    agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    agent.checklist[0].valid = true;
+    agent.checklist[0].selected = true;
+    agent.selected_pair_index = 0u16;
+
+    var binding: IceSelectedPairTransport = ice_selected_pair_transport_make();
+    if ice_selected_pair_transport_bind_selected_pair(&binding, &agent).error_id != 0 {
+        return 189;
+    }
+    if !binding.active || binding.component_id != ICE_COMPONENT_RTP {
+        return 190;
+    }
+    if !ice_selected_pair_transport_matches(&binding, ICE_COMPONENT_RTP, &agent.local_candidates[0].address, &agent.remote_candidates[0].address) {
+        return 191;
+    }
+
+    var wrong_remote: IceTransportAddress = ice_transport_address_make();
+    if ice_transport_address_set(&wrong_remote, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.21" as &[byte], 6000u16).error_id != 0 {
+        return 192;
+    }
+    if ice_selected_pair_transport_matches(&binding, ICE_COMPONENT_RTP, &agent.local_candidates[0].address, &wrong_remote) {
+        return 193;
+    }
+    return 0;
+}
+
+fn dtls_test_check_selected_pair_transport_invalid_cases() i32 {
+    var binding: IceSelectedPairTransport = ice_selected_pair_transport_make();
+    var agent: IceAgent = ice_agent_make();
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 9u64);
+    if ice_selected_pair_transport_bind_selected_pair(&binding, &agent).error_id == 0 {
+        return 194;
+    }
+
+    agent.local_candidate_count = 1usize;
+    agent.remote_candidate_count = 1usize;
+    if ice_transport_address_set(&agent.local_candidates[0].address, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.30" as &[byte], 7000u16).error_id != 0 {
+        return 195;
+    }
+    if ice_transport_address_set(&agent.remote_candidates[0].address, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.30" as &[byte], 8000u16).error_id != 0 {
+        return 196;
+    }
+    agent.local_candidates[0].component_id = ICE_COMPONENT_RTP;
+    agent.remote_candidates[0].component_id = ICE_COMPONENT_RTP;
+    agent.checklist_count = 1usize;
+    candidate_pair_init(&agent.checklist[0], 0u16, 0u16);
+    agent.checklist[0].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
+    agent.checklist[0].valid = true;
+    agent.checklist[0].selected = true;
+    agent.selected_pair_index = 0u16;
+
+    if ice_selected_pair_transport_bind_selected_pair(&binding, &agent).error_id != 0 {
+        return 197;
+    }
+    if ice_selected_pair_transport_matches(&binding, ICE_COMPONENT_RTCP, &agent.local_candidates[0].address, &agent.remote_candidates[0].address) {
+        return 198;
+    }
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -1179,6 +1273,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_certificate_fingerprint_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_selected_pair_transport_binding();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_selected_pair_transport_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;
