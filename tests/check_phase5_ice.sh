@@ -15,6 +15,10 @@ rg -Fq 'test "ice candidate model owns transport address and related address met
 rg -Fq 'test "candidate pair model tracks checklist state nomination and timing fields"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice agent model keeps owned credentials candidate pools and selected pair slot"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice helpers expose stable default state for future gathering and checklist work"' src/webrtc_ice_test.uya
+rg -Fq 'test "remote candidate addition upserts transport tuple and copies related metadata"' src/webrtc_ice_test.uya
+rg -Fq 'test "remote candidate addition keeps distinct component and transport tuples"' src/webrtc_ice_test.uya
+rg -Fq 'test "remote candidate addition rejects invalid candidates and clears stale entries"' src/webrtc_ice_test.uya
+rg -Fq 'test "remote candidate addition enforces fixed pool capacity"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate helpers copy bounded address foundation and equality state"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate gathering from descriptors deduplicates per component and prunes stale host entries"' src/webrtc_ice_test.uya
 rg -Fq 'test "host candidate gathering skips unspecified addresses and zero-port bindings"' src/webrtc_ice_test.uya
@@ -47,6 +51,8 @@ rg -Fq "export const ICE_AGENT_STATE_NEW" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceCredentials" src/webrtc/ice/agent.uya
 rg -Fq "export struct IceAgent" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_init" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_clear_remote_candidates" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_add_remote_candidate" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_has_selected_pair" src/webrtc/ice/agent.uya
 
 rg -Fq "export const ICE_MAX_INTERFACE_NAME_BYTES" src/webrtc/ice/gather.uya

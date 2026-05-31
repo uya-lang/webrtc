@@ -22,6 +22,30 @@ fn ice_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     return true;
 }
 
+fn ice_test_init_remote_candidate(
+    candidate: &IceCandidate,
+    foundation: &[byte],
+    component_id: u16,
+    transport: u8,
+    candidate_type: u8,
+    priority: u32,
+    family: u8,
+    host: &[byte],
+    port: u16,
+) !void {
+    ice_candidate_init(candidate);
+    try ice_candidate_set_foundation(candidate, foundation);
+    candidate.component_id = component_id;
+    candidate.transport = transport;
+    candidate.candidate_type = candidate_type;
+    candidate.priority = priority;
+    try ice_transport_address_set(&candidate.address, family, host, port);
+}
+
+fn ice_test_set_related_address(candidate: &IceCandidate, family: u8, host: &[byte], port: u16) !void {
+    try ice_transport_address_set(&candidate.related_address, family, host, port);
+}
+
 test "ice candidate model owns transport address and related address metadata" {
     try expect(ICE_MAX_FOUNDATION_BYTES >= 16);
     try expect(ICE_MAX_ADDRESS_BYTES >= 16);
@@ -60,6 +84,220 @@ test "ice helpers expose stable default state for future gathering and checklist
     try expect(agent.state == ICE_AGENT_STATE_NEW);
     try expect(agent.role == ICE_AGENT_ROLE_CONTROLLING);
     try expect(!ice_agent_has_selected_pair(&agent));
+}
+
+test "remote candidate addition upserts transport tuple and copies related metadata" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 13u64);
+
+    var first: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &first,
+        "rhost0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        1001u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.10" as &[byte],
+        6000u16,
+    );
+    first.network_id = 7u16;
+    first.network_cost = 90u16;
+    first.generation = 2u32;
+
+    const first_index: u16 = try ice_agent_add_remote_candidate(&agent, &first);
+    try expect(first_index == 0u16);
+    try expect(agent.remote_candidate_count == 1usize);
+    try expect(agent.remote_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_HOST);
+    try expect(agent.remote_candidates[0].priority == 1001u32);
+    try expect(agent.remote_candidates[0].generation == 2u32);
+    try expect(!ice_candidate_has_related_address(&agent.remote_candidates[0]));
+
+    var updated: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &updated,
+        "rsrflx1" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_SRFLX,
+        2002u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.10" as &[byte],
+        6000u16,
+    );
+    try ice_test_set_related_address(&updated, ICE_ADDRESS_FAMILY_IPV4, "10.0.0.4" as &[byte], 5000u16);
+    updated.base_candidate_index = 3u16;
+    updated.network_id = 11u16;
+    updated.network_cost = 33u16;
+    updated.generation = 5u32;
+
+    const updated_index: u16 = try ice_agent_add_remote_candidate(&agent, &updated);
+    try expect(updated_index == 0u16);
+    try expect(agent.remote_candidate_count == 1usize);
+    try expect(agent.remote_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
+    try expect(agent.remote_candidates[0].priority == 2002u32);
+    try expect(agent.remote_candidates[0].base_candidate_index == ICE_CANDIDATE_INDEX_NONE);
+    try expect(agent.remote_candidates[0].network_id == 11u16);
+    try expect(agent.remote_candidates[0].network_cost == 33u16);
+    try expect(agent.remote_candidates[0].generation == 5u32);
+    try expect(ice_candidate_has_related_address(&agent.remote_candidates[0]));
+    try expect(ice_test_bytes_equal(
+        agent.remote_candidates[0].foundation[0:agent.remote_candidates[0].foundation_len],
+        "rsrflx1" as &[byte],
+    ));
+    try expect(ice_transport_address_equal(&agent.remote_candidates[0].related_address, &updated.related_address));
+}
+
+test "remote candidate addition keeps distinct component and transport tuples" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 17u64);
+
+    var rtp_udp: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &rtp_udp,
+        "r0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        1u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.20" as &[byte],
+        6100u16,
+    );
+    var rtcp_udp: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &rtcp_udp,
+        "r1" as &[byte],
+        ICE_COMPONENT_RTCP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        2u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.20" as &[byte],
+        6100u16,
+    );
+    var rtp_tcp: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &rtp_tcp,
+        "r2" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE,
+        ICE_CANDIDATE_TYPE_HOST,
+        3u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.20" as &[byte],
+        6100u16,
+    );
+
+    try expect((try ice_agent_add_remote_candidate(&agent, &rtp_udp)) == 0u16);
+    try expect((try ice_agent_add_remote_candidate(&agent, &rtcp_udp)) == 1u16);
+    try expect((try ice_agent_add_remote_candidate(&agent, &rtp_tcp)) == 2u16);
+    try expect(agent.remote_candidate_count == 3usize);
+    try expect(agent.remote_candidates[1].component_id == ICE_COMPONENT_RTCP);
+    try expect(agent.remote_candidates[2].transport == ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE);
+}
+
+test "remote candidate addition rejects invalid candidates and clears stale entries" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 29u64);
+
+    var valid: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &valid,
+        "valid0" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        77u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.40" as &[byte],
+        6200u16,
+    );
+    try expect((try ice_agent_add_remote_candidate(&agent, &valid)) == 0u16);
+    try expect(agent.remote_candidate_count == 1usize);
+
+    var missing_foundation: IceCandidate = IceCandidate{};
+    ice_candidate_init(&missing_foundation);
+    missing_foundation.component_id = ICE_COMPONENT_RTP;
+    missing_foundation.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    missing_foundation.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    try ice_transport_address_set(&missing_foundation.address, ICE_ADDRESS_FAMILY_IPV4, "203.0.113.41" as &[byte], 6201u16);
+    const missing_foundation_result: !u16 = ice_agent_add_remote_candidate(&agent, &missing_foundation);
+    try expect(missing_foundation_result.error_id == @error_id(error.InvalidPacket));
+
+    var unsupported_type: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &unsupported_type,
+        "badtype" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_UNKNOWN,
+        78u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.42" as &[byte],
+        6202u16,
+    );
+    const unsupported_type_result: !u16 = ice_agent_add_remote_candidate(&agent, &unsupported_type);
+    try expect(unsupported_type_result.error_id == @error_id(error.UnsupportedCapability));
+
+    var unsupported_component: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &unsupported_component,
+        "badcomp" as &[byte],
+        3u16,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        79u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "203.0.113.43" as &[byte],
+        6203u16,
+    );
+    const unsupported_component_result: !u16 = ice_agent_add_remote_candidate(&agent, &unsupported_component);
+    try expect(unsupported_component_result.error_id == @error_id(error.InvalidPacket));
+
+    ice_agent_clear_remote_candidates(&agent);
+    try expect(agent.remote_candidate_count == 0usize);
+    try expect((try ice_agent_add_remote_candidate(&agent, &valid)) == 0u16);
+}
+
+test "remote candidate addition enforces fixed pool capacity" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 37u64);
+
+    var index: usize = 0;
+    while index < ICE_MAX_REMOTE_CANDIDATES {
+        var remote_candidate: IceCandidate = IceCandidate{};
+        try ice_test_init_remote_candidate(
+            &remote_candidate,
+            "pool" as &[byte],
+            ICE_COMPONENT_RTP,
+            ICE_CANDIDATE_TRANSPORT_UDP,
+            ICE_CANDIDATE_TYPE_HOST,
+            index as u32,
+            ICE_ADDRESS_FAMILY_IPV4,
+            "198.51.100.77" as &[byte],
+            6300u16 + (index as u16),
+        );
+        try expect((try ice_agent_add_remote_candidate(&agent, &remote_candidate)) == (index as u16));
+        index = index + 1;
+    }
+    try expect(agent.remote_candidate_count == ICE_MAX_REMOTE_CANDIDATES);
+
+    var overflow_candidate: IceCandidate = IceCandidate{};
+    try ice_test_init_remote_candidate(
+        &overflow_candidate,
+        "overflow" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        999u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.77" as &[byte],
+        7000u16,
+    );
+    const overflow_result: !u16 = ice_agent_add_remote_candidate(&agent, &overflow_candidate);
+    try expect(overflow_result.error_id == @error_id(error.UnsupportedCapability));
 }
 
 test "host candidate helpers copy bounded address foundation and equality state" {

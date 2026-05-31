@@ -1,6 +1,7 @@
 // webrtc.ice.agent - ICE agent、凭据与候选池运行期模型
 // 模块路径：src/webrtc/ice/agent.uya → use webrtc.ice.agent;
 
+use webrtc.errors;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
 
@@ -57,6 +58,99 @@ export struct IceAgent {
     disconnected_timeout_ms: u32 = 5000u32,
 }
 
+fn ice_remote_candidate_transport_is_supported(transport: u8) bool {
+    return transport == ICE_CANDIDATE_TRANSPORT_UDP
+        || transport == ICE_CANDIDATE_TRANSPORT_TCP_ACTIVE
+        || transport == ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE
+        || transport == ICE_CANDIDATE_TRANSPORT_TCP_SO;
+}
+
+fn ice_remote_candidate_type_is_supported(candidate_type: u8) bool {
+    return candidate_type == ICE_CANDIDATE_TYPE_HOST
+        || candidate_type == ICE_CANDIDATE_TYPE_SRFLX
+        || candidate_type == ICE_CANDIDATE_TYPE_PRFLX
+        || candidate_type == ICE_CANDIDATE_TYPE_RELAY;
+}
+
+fn ice_remote_candidate_component_is_supported(component_id: u16) bool {
+    return component_id == ICE_COMPONENT_RTP || component_id == ICE_COMPONENT_RTCP;
+}
+
+fn ice_transport_address_has_valid_bounds(address: &IceTransportAddress) bool {
+    if address == null {
+        return false;
+    }
+    if address.family != ICE_ADDRESS_FAMILY_IPV4 && address.family != ICE_ADDRESS_FAMILY_IPV6 {
+        return false;
+    }
+    if address.host_len == 0 || address.host_len > ICE_MAX_ADDRESS_BYTES {
+        return false;
+    }
+    return address.port != 0u16;
+}
+
+fn ice_transport_address_copy(dst: &IceTransportAddress, src: &IceTransportAddress) !void {
+    if dst == null || src == null || !ice_transport_address_has_valid_bounds(src) {
+        return error.InvalidPacket;
+    }
+    try ice_transport_address_set(dst, src.family, src.host[0:src.host_len], src.port);
+}
+
+fn ice_remote_candidate_validate(candidate: &IceCandidate) !void {
+    if candidate == null {
+        return error.InvalidPacket;
+    }
+    if candidate.foundation_len == 0 || candidate.foundation_len > ICE_MAX_FOUNDATION_BYTES {
+        return error.InvalidPacket;
+    }
+    if !ice_remote_candidate_component_is_supported(candidate.component_id) {
+        return error.InvalidPacket;
+    }
+    if !ice_remote_candidate_transport_is_supported(candidate.transport) {
+        return error.UnsupportedCapability;
+    }
+    if !ice_remote_candidate_type_is_supported(candidate.candidate_type) {
+        return error.UnsupportedCapability;
+    }
+    if !ice_transport_address_has_valid_bounds(&candidate.address) {
+        return error.InvalidPacket;
+    }
+    if ice_candidate_has_related_address(candidate) && !ice_transport_address_has_valid_bounds(&candidate.related_address) {
+        return error.InvalidPacket;
+    }
+}
+
+fn ice_remote_candidate_matches_transport(existing: &IceCandidate, candidate: &IceCandidate) bool {
+    if existing == null || candidate == null {
+        return false;
+    }
+    if existing.component_id != candidate.component_id || existing.transport != candidate.transport {
+        return false;
+    }
+    return ice_transport_address_equal(&existing.address, &candidate.address);
+}
+
+fn ice_remote_candidate_copy(dst: &IceCandidate, src: &IceCandidate) !void {
+    if dst == null || src == null {
+        return error.InvalidPacket;
+    }
+
+    ice_candidate_init(dst);
+    try ice_candidate_set_foundation(dst, src.foundation[0:src.foundation_len]);
+    dst.component_id = src.component_id;
+    dst.transport = src.transport;
+    dst.candidate_type = src.candidate_type;
+    dst.priority = src.priority;
+    try ice_transport_address_copy(&dst.address, &src.address);
+    if ice_candidate_has_related_address(src) {
+        try ice_transport_address_copy(&dst.related_address, &src.related_address);
+    }
+    dst.base_candidate_index = ICE_CANDIDATE_INDEX_NONE;
+    dst.network_id = src.network_id;
+    dst.network_cost = src.network_cost;
+    dst.generation = src.generation;
+}
+
 export fn ice_credentials_init(credentials: &IceCredentials) void {
     if credentials == null {
         return;
@@ -83,6 +177,44 @@ export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
     agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
     agent.consent_interval_ms = 15000u32;
     agent.disconnected_timeout_ms = 5000u32;
+}
+
+export fn ice_agent_clear_remote_candidates(agent: &IceAgent) void {
+    if agent == null {
+        return;
+    }
+
+    var index: usize = 0;
+    while index < agent.remote_candidate_count {
+        ice_candidate_init(&agent.remote_candidates[index]);
+        index = index + 1;
+    }
+    agent.remote_candidate_count = 0;
+}
+
+export fn ice_agent_add_remote_candidate(agent: &IceAgent, candidate: &IceCandidate) !u16 {
+    if agent == null || candidate == null {
+        return error.InvalidPacket;
+    }
+
+    try ice_remote_candidate_validate(candidate);
+
+    var existing_index: usize = 0;
+    while existing_index < agent.remote_candidate_count {
+        if ice_remote_candidate_matches_transport(&agent.remote_candidates[existing_index], candidate) {
+            try ice_remote_candidate_copy(&agent.remote_candidates[existing_index], candidate);
+            return existing_index as u16;
+        }
+        existing_index = existing_index + 1;
+    }
+
+    if agent.remote_candidate_count >= ICE_MAX_REMOTE_CANDIDATES {
+        return error.UnsupportedCapability;
+    }
+
+    try ice_remote_candidate_copy(&agent.remote_candidates[agent.remote_candidate_count], candidate);
+    agent.remote_candidate_count = agent.remote_candidate_count + 1;
+    return (agent.remote_candidate_count - 1) as u16;
 }
 
 export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {
