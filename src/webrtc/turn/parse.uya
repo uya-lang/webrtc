@@ -45,6 +45,19 @@ const TURN_CREATE_PERMISSION_SUCCESS_SEEN_MESSAGE_INTEGRITY: u32 = 1u32;
 const TURN_CREATE_PERMISSION_SUCCESS_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 2u32;
 const TURN_CREATE_PERMISSION_SUCCESS_SEEN_FINGERPRINT: u32 = 4u32;
 
+const TURN_CHANNEL_BIND_REQUEST_SEEN_CHANNEL_NUMBER: u32 = 1u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_PEER_ADDRESS: u32 = 2u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_USERNAME: u32 = 4u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_REALM: u32 = 8u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_NONCE: u32 = 16u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_MESSAGE_INTEGRITY: u32 = 32u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 64u32;
+const TURN_CHANNEL_BIND_REQUEST_SEEN_FINGERPRINT: u32 = 128u32;
+
+const TURN_CHANNEL_BIND_SUCCESS_SEEN_MESSAGE_INTEGRITY: u32 = 1u32;
+const TURN_CHANNEL_BIND_SUCCESS_SEEN_MESSAGE_INTEGRITY_SHA256: u32 = 2u32;
+const TURN_CHANNEL_BIND_SUCCESS_SEEN_FINGERPRINT: u32 = 4u32;
+
 const TURN_SEND_INDICATION_SEEN_PEER_ADDRESS: u32 = 1u32;
 const TURN_SEND_INDICATION_SEEN_DATA: u32 = 2u32;
 const TURN_SEND_INDICATION_SEEN_DONT_FRAGMENT: u32 = 4u32;
@@ -193,6 +206,47 @@ fn turn_parse_known_create_permission_request_attribute(attr_type: u16) bool {
 }
 
 fn turn_parse_known_create_permission_success_attribute(attr_type: u16) bool {
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_known_channel_bind_request_attribute(attr_type: u16) bool {
+    if attr_type == TURN_ATTRIBUTE_CHANNEL_NUMBER {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_USERNAME {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_known_channel_bind_success_attribute(attr_type: u16) bool {
     if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
         return true;
     }
@@ -399,6 +453,47 @@ fn turn_create_permission_success_seen_mask(attr_type: u16) u32 {
     return 0u32;
 }
 
+fn turn_channel_bind_request_seen_mask(attr_type: u16) u32 {
+    if attr_type == TURN_ATTRIBUTE_CHANNEL_NUMBER {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_CHANNEL_NUMBER;
+    }
+    if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_PEER_ADDRESS;
+    }
+    if attr_type == STUN_ATTRIBUTE_USERNAME {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_USERNAME;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_REALM;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_NONCE;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_MESSAGE_INTEGRITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_MESSAGE_INTEGRITY_SHA256;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_CHANNEL_BIND_REQUEST_SEEN_FINGERPRINT;
+    }
+    return 0u32;
+}
+
+fn turn_channel_bind_success_seen_mask(attr_type: u16) u32 {
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return TURN_CHANNEL_BIND_SUCCESS_SEEN_MESSAGE_INTEGRITY;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return TURN_CHANNEL_BIND_SUCCESS_SEEN_MESSAGE_INTEGRITY_SHA256;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return TURN_CHANNEL_BIND_SUCCESS_SEEN_FINGERPRINT;
+    }
+    return 0u32;
+}
+
 fn turn_send_indication_seen_mask(attr_type: u16) u32 {
     if attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
         return TURN_SEND_INDICATION_SEEN_PEER_ADDRESS;
@@ -540,6 +635,36 @@ fn turn_create_permission_validate_success_attribute(attr: &StunAttribute, seen_
     return seen_mask | mask;
 }
 
+fn turn_channel_bind_validate_request_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_channel_bind_request_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_channel_bind_request_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+fn turn_channel_bind_validate_success_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_channel_bind_success_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_channel_bind_success_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
 fn turn_send_indication_validate_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
     if attr == null {
         return error.InvalidPacket;
@@ -600,6 +725,18 @@ export fn turn_parse_lifetime(value: &[byte]) !u32 {
         return error.InvalidPacket;
     }
     return read_be_u32(value[0:4]);
+}
+
+export fn turn_parse_channel_number(value: &[byte]) !u16 {
+    if value.len != 4usize {
+        return error.InvalidPacket;
+    }
+
+    const channel_number: u16 = try read_be_u16(value[0:2]);
+    if channel_number < TURN_CHANNEL_NUMBER_MIN || channel_number > TURN_CHANNEL_NUMBER_MAX {
+        return error.InvalidPacket;
+    }
+    return channel_number;
 }
 
 export fn turn_parse_requested_address_family(value: &[byte]) !u8 {
@@ -841,6 +978,67 @@ export fn turn_create_permission_request_parse(packet: &[byte]) !TurnCreatePermi
     return request;
 }
 
+export fn turn_channel_bind_request_parse(packet: &[byte]) !TurnChannelBindRequest {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_CHANNEL_BIND || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+        return error.InvalidPacket;
+    }
+
+    var request: TurnChannelBindRequest = turn_channel_bind_request_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_channel_bind_validate_request_attribute(&attr, seen_mask);
+
+        if attr.attr_type == TURN_ATTRIBUTE_CHANNEL_NUMBER {
+            request.channel_number = try turn_parse_channel_number(attr.value);
+            request.channel_number_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_XOR_PEER_ADDRESS {
+            request.peer_address = try stun_parse_xor_mapped_address(attr.value, header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+            request.peer_address_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_USERNAME {
+            request.username = try stun_parse_username(attr.value);
+            request.username_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_REALM {
+            request.realm = try turn_parse_realm(attr.value);
+            request.realm_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_NONCE {
+            request.nonce = try turn_parse_nonce(attr.value);
+            request.nonce_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+            _ = try stun_parse_message_integrity(attr.value);
+            request.message_integrity_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+            _ = try stun_parse_message_integrity_sha256(attr.value);
+            request.message_integrity_sha256_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+            request.fingerprint_present = true;
+        }
+    }
+
+    if !request.channel_number_present || !request.peer_address_present {
+        return error.InvalidPacket;
+    }
+    if request.message_integrity_present && request.message_integrity_sha256_present {
+        return error.InvalidPacket;
+    }
+
+    const has_long_term_attributes: bool = request.username_present || request.realm_present || request.nonce_present;
+    if has_long_term_attributes {
+        if !request.username_present || !request.realm_present || !request.nonce_present {
+            return error.InvalidPacket;
+        }
+        if !request.message_integrity_present && !request.message_integrity_sha256_present {
+            return error.InvalidPacket;
+        }
+    }
+    return request;
+}
+
 export fn turn_allocate_request_parse(packet: &[byte]) !TurnAllocateRequest {
     const header: StunMessageHeader = try stun_header_parse(packet);
     if header.method != TURN_METHOD_ALLOCATE || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
@@ -984,6 +1182,49 @@ export fn turn_create_permission_success_response_parse(
     while iter.cursor < iter.bytes.len {
         const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
         seen_mask = try turn_create_permission_validate_success_attribute(&attr, seen_mask);
+
+        if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+            _ = try stun_parse_message_integrity(attr.value);
+            response.message_integrity_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+            _ = try stun_parse_message_integrity_sha256(attr.value);
+            response.message_integrity_sha256_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+            _ = try stun_parse_fingerprint(attr.value);
+            response.fingerprint_present = true;
+        }
+    }
+
+    if response.message_integrity_present && response.message_integrity_sha256_present {
+        return error.InvalidPacket;
+    }
+    return response;
+}
+
+export fn turn_channel_bind_success_response_parse(
+    packet: &[byte],
+    expected_transaction_id: &[byte],
+) !TurnChannelBindSuccessResponse {
+    if expected_transaction_id.len != STUN_TRANSACTION_ID_BYTES {
+        return error.InvalidPacket;
+    }
+
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_CHANNEL_BIND || header.message_class != STUN_MESSAGE_CLASS_SUCCESS_RESPONSE {
+        return error.InvalidPacket;
+    }
+    if !turn_parse_transaction_id_equal(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], expected_transaction_id) {
+        return error.InvalidPacket;
+    }
+
+    var response: TurnChannelBindSuccessResponse = turn_channel_bind_success_response_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_channel_bind_validate_success_attribute(&attr, seen_mask);
 
         if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
             _ = try stun_parse_message_integrity(attr.value);

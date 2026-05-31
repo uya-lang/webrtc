@@ -177,7 +177,7 @@
 - [x] 实现 Refresh。
 - [x] 实现 CreatePermission。
 - [x] 实现 Send/Data indication。
-- [ ] 实现 ChannelBind。
+- [x] 实现 ChannelBind。
 - [ ] 实现 relay candidate 注入 ICE。
 - [ ] 实现 allocation refresh timer。
 - [ ] 增加 coturn interop 测试。

@@ -30,6 +30,8 @@ export const TURN_REQUESTED_ADDRESS_FAMILY_IPV6: u8 = STUN_ADDRESS_FAMILY_IPV6;
 export const TURN_RESERVATION_TOKEN_BYTES: usize = 8usize;
 export const TURN_MAX_RELAYED_ADDRESSES: usize = 2usize;
 export const TURN_MAX_PERMISSION_PEERS: usize = 8usize;
+export const TURN_CHANNEL_NUMBER_MIN: u16 = 0x4000u16;
+export const TURN_CHANNEL_NUMBER_MAX: u16 = 0x7FFFu16;
 export const TURN_MAX_REALM_BYTES: usize = 509usize;
 export const TURN_MAX_NONCE_BYTES: usize = 509usize;
 export const TURN_MAX_AUTH_KEY_BYTES: usize = 32usize;
@@ -87,6 +89,22 @@ export struct TurnCreatePermissionRequest {
     fingerprint_present: bool = false,
 }
 
+export struct TurnChannelBindRequest {
+    channel_number: u16 = 0u16,
+    channel_number_present: bool = false,
+    peer_address: StunXorMappedAddress = StunXorMappedAddress{},
+    peer_address_present: bool = false,
+    username: &[byte] = [],
+    username_present: bool = false,
+    realm: &[byte] = [],
+    realm_present: bool = false,
+    nonce: &[byte] = [],
+    nonce_present: bool = false,
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
+}
+
 export struct TurnSendIndication {
     peer_address: StunXorMappedAddress = StunXorMappedAddress{},
     peer_address_present: bool = false,
@@ -121,6 +139,12 @@ export struct TurnRefreshSuccessResponse {
 }
 
 export struct TurnCreatePermissionSuccessResponse {
+    message_integrity_present: bool = false,
+    message_integrity_sha256_present: bool = false,
+    fingerprint_present: bool = false,
+}
+
+export struct TurnChannelBindSuccessResponse {
     message_integrity_present: bool = false,
     message_integrity_sha256_present: bool = false,
     fingerprint_present: bool = false,
@@ -231,6 +255,25 @@ export fn turn_create_permission_request_make() TurnCreatePermissionRequest {
     };
 }
 
+export fn turn_channel_bind_request_make() TurnChannelBindRequest {
+    var empty_bytes: [byte: 1] = [];
+    return TurnChannelBindRequest{
+        channel_number: 0u16,
+        channel_number_present: false,
+        peer_address: stun_xor_mapped_address_make(),
+        peer_address_present: false,
+        username: empty_bytes[0:0],
+        username_present: false,
+        realm: empty_bytes[0:0],
+        realm_present: false,
+        nonce: empty_bytes[0:0],
+        nonce_present: false,
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
+    };
+}
+
 export fn turn_send_indication_make() TurnSendIndication {
     var empty_bytes: [byte: 1] = [];
     return TurnSendIndication{
@@ -263,6 +306,14 @@ export fn turn_refresh_success_response_make() TurnRefreshSuccessResponse {
 
 export fn turn_create_permission_success_response_make() TurnCreatePermissionSuccessResponse {
     return TurnCreatePermissionSuccessResponse{
+        message_integrity_present: false,
+        message_integrity_sha256_present: false,
+        fingerprint_present: false,
+    };
+}
+
+export fn turn_channel_bind_success_response_make() TurnChannelBindSuccessResponse {
+    return TurnChannelBindSuccessResponse{
         message_integrity_present: false,
         message_integrity_sha256_present: false,
         fingerprint_present: false,

@@ -863,6 +863,192 @@ fn turn_test_check_create_permission_invalid_paths() i32 {
     return 0;
 }
 
+fn turn_test_check_channel_bind_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "channelbind-nonce" as &[byte]) {
+        return 226;
+    }
+
+    var peer_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 55 as byte];
+
+    var request_packet: [byte: 256] = [];
+    var request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_request(&request_builder, request_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 227;
+    }
+    if turn_builder_append_channel_number(&request_builder, 0x4001u16).error_id != 0 {
+        return 228;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&request_builder, 45000u16, peer_ipv4[0:4]).error_id != 0 {
+        return 229;
+    }
+    if turn_builder_append_long_term_credentials(&request_builder, &credentials).error_id != 0 {
+        return 230;
+    }
+    const request_finish_result: !usize = turn_builder_finish(&request_builder);
+    if request_finish_result.error_id != 0 {
+        return 231;
+    }
+
+    const request_header_result: !StunMessageHeader = stun_header_parse(request_packet[0:request_finish_result.value]);
+    if request_header_result.error_id != 0 {
+        return 232;
+    }
+    const request_header: StunMessageHeader = request_header_result.value;
+    if request_header.method != TURN_METHOD_CHANNEL_BIND || request_header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+        return 233;
+    }
+
+    const request_result: !TurnChannelBindRequest =
+        turn_channel_bind_request_parse(request_packet[0:request_finish_result.value]);
+    if request_result.error_id != 0 {
+        return 234;
+    }
+    const request: TurnChannelBindRequest = request_result.value;
+    if !request.channel_number_present || request.channel_number != 0x4001u16 {
+        return 235;
+    }
+    if !request.peer_address_present || request.peer_address.port != 45000u16 {
+        return 236;
+    }
+    if !turn_test_bytes_equal(request.peer_address.address_bytes[0:4], peer_ipv4[0:4]) {
+        return 237;
+    }
+    if !request.username_present || !request.realm_present || !request.nonce_present || !request.message_integrity_present {
+        return 238;
+    }
+    if stun_verify_message_integrity(
+        request_packet[0:request_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 239;
+    }
+
+    var response_packet: [byte: 192] = [];
+    var response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_success_response(&response_builder, response_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 240;
+    }
+    if stun_builder_append_message_integrity(&response_builder, credentials.key[0:credentials.key_len]).error_id != 0 {
+        return 241;
+    }
+    const response_finish_result: !usize = turn_builder_finish(&response_builder);
+    if response_finish_result.error_id != 0 {
+        return 242;
+    }
+    const response_result: !TurnChannelBindSuccessResponse =
+        turn_channel_bind_success_response_parse(response_packet[0:response_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if response_result.error_id != 0 {
+        return 243;
+    }
+    const response: TurnChannelBindSuccessResponse = response_result.value;
+    if !response.message_integrity_present {
+        return 244;
+    }
+    if stun_verify_message_integrity(
+        response_packet[0:response_finish_result.value],
+        credentials.key[0:credentials.key_len],
+    ).error_id != 0 {
+        return 245;
+    }
+
+    return 0;
+}
+
+fn turn_test_check_channel_bind_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var credentials: TurnLongTermCredentials = turn_long_term_credentials_make();
+    if !turn_test_make_sample_credentials(&credentials, "channelbind-nonce" as &[byte]) {
+        return 246;
+    }
+
+    var peer_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 56 as byte];
+
+    var missing_peer_packet: [byte: 192] = [];
+    var missing_peer_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_request(&missing_peer_builder, missing_peer_packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 247;
+    }
+    if turn_builder_append_channel_number(&missing_peer_builder, 0x4001u16).error_id != 0 {
+        return 248;
+    }
+    if turn_builder_append_long_term_credentials(&missing_peer_builder, &credentials).error_id != 0 {
+        return 249;
+    }
+    const missing_peer_finish_result: !usize = turn_builder_finish(&missing_peer_builder);
+    if missing_peer_finish_result.error_id != 0 {
+        return 250;
+    }
+    const missing_peer_result: !TurnChannelBindRequest =
+        turn_channel_bind_request_parse(missing_peer_packet[0:missing_peer_finish_result.value]);
+    if !turn_test_expect_error(missing_peer_result.error_id) {
+        return 251;
+    }
+
+    var invalid_channel_packet: [byte: 256] = [];
+    var invalid_channel_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_request(&invalid_channel_builder, invalid_channel_packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 252;
+    }
+    if turn_builder_append_channel_number(&invalid_channel_builder, 0x4002u16).error_id != 0 {
+        return 253;
+    }
+    if turn_builder_append_xor_peer_address_ipv4(&invalid_channel_builder, 45001u16, peer_ipv4[0:4]).error_id != 0 {
+        return 254;
+    }
+    if turn_builder_append_long_term_credentials(&invalid_channel_builder, &credentials).error_id != 0 {
+        return 255;
+    }
+    const invalid_channel_finish_result: !usize = turn_builder_finish(&invalid_channel_builder);
+    if invalid_channel_finish_result.error_id != 0 {
+        return 256;
+    }
+    invalid_channel_packet[STUN_HEADER_BYTES + STUN_ATTRIBUTE_HEADER_BYTES] = 0x3f as byte;
+    invalid_channel_packet[STUN_HEADER_BYTES + STUN_ATTRIBUTE_HEADER_BYTES + 1usize] = 0xff as byte;
+    const invalid_channel_result: !TurnChannelBindRequest =
+        turn_channel_bind_request_parse(invalid_channel_packet[0:invalid_channel_finish_result.value]);
+    if !turn_test_expect_error(invalid_channel_result.error_id) {
+        return 257;
+    }
+
+    var invalid_number_builder: StunMessageBuilder = stun_message_builder_make();
+    var invalid_number_packet: [byte: 64] = [];
+    if turn_builder_init_channel_bind_request(&invalid_number_builder, invalid_number_packet[0:64], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 258;
+    }
+    if !turn_test_expect_error(turn_builder_append_channel_number(&invalid_number_builder, 0x3fffu16).error_id) {
+        return 259;
+    }
+
+    var mismatched_response_packet: [byte: 96] = [];
+    var mismatched_response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_channel_bind_success_response(&mismatched_response_builder, mismatched_response_packet[0:96], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 260;
+    }
+    const mismatched_response_finish_result: !usize = turn_builder_finish(&mismatched_response_builder);
+    if mismatched_response_finish_result.error_id != 0 {
+        return 261;
+    }
+    var wrong_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(wrong_txid[0:STUN_TRANSACTION_ID_BYTES]);
+    wrong_txid[0] = 99 as byte;
+    const mismatched_response_result: !TurnChannelBindSuccessResponse =
+        turn_channel_bind_success_response_parse(
+            mismatched_response_packet[0:mismatched_response_finish_result.value],
+            wrong_txid[0:STUN_TRANSACTION_ID_BYTES],
+        );
+    if !turn_test_expect_error(mismatched_response_result.error_id) {
+        return 262;
+    }
+
+    return 0;
+}
+
 fn turn_test_check_send_data_indication_roundtrip() i32 {
     var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
     turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
@@ -1060,6 +1246,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = turn_test_check_create_permission_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_channel_bind_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_channel_bind_invalid_paths();
     if result != 0 {
         _ = printf("TURN_TEST_FAIL %d\n", result);
         return result;

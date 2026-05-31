@@ -129,6 +129,11 @@ export fn turn_builder_init_create_permission_request(builder: &StunMessageBuild
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_REQUEST));
 }
 
+export fn turn_builder_init_channel_bind_request(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_request(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CHANNEL_BIND, STUN_MESSAGE_CLASS_REQUEST));
+}
+
 export fn turn_builder_init_allocate_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_success_response(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
@@ -142,6 +147,11 @@ export fn turn_builder_init_refresh_success_response(builder: &StunMessageBuilde
 export fn turn_builder_init_create_permission_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
     try stun_builder_init_binding_success_response(builder, dst, transaction_id);
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
+}
+
+export fn turn_builder_init_channel_bind_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_success_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CHANNEL_BIND, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
 }
 
 export fn turn_builder_init_allocate_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
@@ -159,6 +169,11 @@ export fn turn_builder_init_create_permission_error_response(builder: &StunMessa
     return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CREATE_PERMISSION, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
 }
 
+export fn turn_builder_init_channel_bind_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_error_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_CHANNEL_BIND, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
+}
+
 export fn turn_builder_append_requested_transport(builder: &StunMessageBuilder, protocol: u8) !void {
     var value: [byte: 4] = [];
     value[0] = protocol as byte;
@@ -170,6 +185,18 @@ export fn turn_builder_append_requested_transport(builder: &StunMessageBuilder, 
 
 export fn turn_builder_append_requested_transport_udp(builder: &StunMessageBuilder) !void {
     return turn_builder_append_requested_transport(builder, TURN_PROTOCOL_UDP);
+}
+
+export fn turn_builder_append_channel_number(builder: &StunMessageBuilder, channel_number: u16) !void {
+    if channel_number < TURN_CHANNEL_NUMBER_MIN || channel_number > TURN_CHANNEL_NUMBER_MAX {
+        return error.InvalidPacket;
+    }
+
+    var value: [byte: 4] = [];
+    try write_be_u16(value[0:2], channel_number);
+    value[2] = 0 as byte;
+    value[3] = 0 as byte;
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_CHANNEL_NUMBER, value[0:4]);
 }
 
 export fn turn_builder_append_lifetime(builder: &StunMessageBuilder, lifetime_seconds: u32) !void {
