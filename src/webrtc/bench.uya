@@ -1,0 +1,57 @@
+// webrtc.bench - benchmark JSON lines 输出 helper
+// 模块路径：src/webrtc/bench.uya → use webrtc.bench;
+
+export const BENCHMARK_JSONL_MAX_LINE_BYTES: usize = 256;
+
+export error BenchmarkLineBufferTooSmall;
+
+export struct BenchmarkSample {
+    name: &[byte] = [],
+    suite: &[byte] = [],
+    unit: &[byte] = [],
+    value: u64 = 0u64,
+    allocations: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+fn benchmark_copy_bytes(dst: &byte, cursor: usize, src: &[byte]) usize {
+    var i: usize = 0;
+    while i < src.len {
+        dst[cursor + i] = src[i];
+        i = i + 1;
+    }
+    return cursor + src.len;
+}
+
+fn benchmark_write_ascii_u64(dst: &byte, cursor: usize, value: u64) usize {
+    if value < 10u64 {
+        dst[cursor] = (48u64 + value) as byte;
+        return cursor + 1;
+    }
+
+    const next: usize = benchmark_write_ascii_u64(dst, cursor, value / 10u64);
+    dst[next] = (48u64 + (value % 10u64)) as byte;
+    return next + 1;
+}
+
+export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !usize {
+    if dst.len < BENCHMARK_JSONL_MAX_LINE_BYTES {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var cursor: usize = 0;
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "{\"name\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, sample.name);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"suite\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, sample.suite);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"unit\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, sample.unit);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"value\":");
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.value);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"allocations\":");
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.allocations);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"high_watermark\":");
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.high_watermark);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "}\n");
+    return cursor;
+}

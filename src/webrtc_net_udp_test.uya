@@ -1,0 +1,32 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use webrtc.net.udp;
+
+test "udp socket config enables bind connect optional and nonblocking" {
+    var config: UdpSocketConfig = UdpSocketConfig{
+        bind_port: 3478u16,
+        connect_port: 3479u16,
+        nonblocking: true,
+        reuse_port: true,
+    };
+
+    try expect(config.nonblocking);
+    try expect(config.reuse_port);
+    try assert_eq_i32(config.bind_port as i32, 3478);
+    try assert_eq_i32(config.connect_port as i32, 3479);
+}
+
+test "udp batch io exposes recvmmsg sendmmsg and fallback entrypoints" {
+    var socket_local: UdpSocket = UdpSocket{};
+    var recv_batch: [UdpRecvSlot: UDP_IO_BATCH_MAX] = [];
+    var send_batch: [UdpSendSlot: UDP_IO_BATCH_MAX] = [];
+
+    try expect(@size_of(UdpRecvSlot) > 0);
+    try expect(@size_of(UdpSendSlot) > 0);
+    try expect(@size_of(UdpIoBatchResult) > 0);
+
+    _ = udp_socket_recvmmsg(&socket_local, &recv_batch[0], UDP_IO_BATCH_MAX) catch {};
+    _ = udp_socket_sendmmsg(&socket_local, &send_batch[0], UDP_IO_BATCH_MAX) catch {};
+    _ = udp_socket_recv_fallback(&socket_local, &recv_batch[0]) catch {};
+    _ = udp_socket_send_fallback(&socket_local, &send_batch[0]) catch {};
+}

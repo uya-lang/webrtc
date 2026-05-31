@@ -1,0 +1,71 @@
+use std.testing.expect;
+use std.testing.assert_eq_u64;
+use webrtc.binary;
+
+test "byte reader rejects truncated reads and slice overruns" {
+    var buf: [byte: 3] = [1 as byte, 2 as byte, 3 as byte];
+    var reader: ByteReader = ByteReader{};
+    byte_reader_init(&reader, buf[0:3]);
+
+    const truncated: !u32 = byte_reader_read_u32(&reader);
+    try expect(truncated.error_id == @error_id(error.ByteReaderTruncated));
+
+    byte_reader_reset(&reader, buf[0:3]);
+    const overrun: !&[byte] = byte_reader_read_slice(&reader, 4);
+    try expect(overrun.error_id == @error_id(error.ByteReaderTruncated));
+}
+
+test "byte writer rejects fixed buffer overflow and backfill overruns" {
+    var buf: [byte: 4] = [];
+    var writer: ByteWriter = ByteWriter{};
+    byte_writer_init(&writer, buf[0:4]);
+
+    try byte_writer_write_u16(&writer, 7u16);
+    try byte_writer_write_u16(&writer, 9u16);
+
+    const overflow: !void = byte_writer_write_u8(&writer, 1 as u8);
+    try expect(overflow.error_id == @error_id(error.ByteWriterOutOfBounds));
+
+    const backfill_overrun: !void = byte_writer_backfill_u16(&writer, 3, 12u16);
+    try expect(backfill_overrun.error_id == @error_id(error.ByteWriterOutOfBounds));
+}
+
+test "checked integer helpers reject overflow and invalid alignment" {
+    const add_overflow: !usize = checked_add_usize(@max_value(usize), 1);
+    try expect(add_overflow.error_id == @error_id(error.IntegerOverflow));
+
+    const mul_overflow: !usize = checked_mul_usize(@max_value(usize), 2);
+    try expect(mul_overflow.error_id == @error_id(error.IntegerOverflow));
+
+    const align_overflow: !usize = checked_align_up_usize(@max_value(usize), 8);
+    try expect(align_overflow.error_id == @error_id(error.IntegerOverflow));
+
+    const invalid_alignment: !usize = checked_align_up_usize(7, 3);
+    try expect(invalid_alignment.error_id == @error_id(error.InvalidAlignment));
+}
+
+test "byte writer backfills length and endian helpers roundtrip" {
+    var buf: [byte: 8] = [];
+    var writer: ByteWriter = ByteWriter{};
+    byte_writer_init(&writer, buf[0:8]);
+
+    const len_offset: usize = try byte_writer_reserve_u16(&writer);
+    var payload: [byte: 3] = [9 as byte, 8 as byte, 7 as byte];
+    try byte_writer_write_slice(&writer, payload[0:3]);
+    try byte_writer_backfill_u16(&writer, len_offset, 3u16);
+
+    try assert_eq_u64(byte_writer_cursor(&writer) as u64, 5u64);
+    try expect((try read_be_u16(buf[0:2])) == 3u16);
+
+    try write_le_u32(buf[4:8], 0x44332211u32);
+    try expect((try read_le_u32(buf[4:8])) == 0x44332211u32);
+}
+
+test "constant time compare avoids early success on mismatched data" {
+    var a: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 4 as byte];
+    var b: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 4 as byte];
+    var c: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 9 as byte];
+
+    try expect(constant_time_bytes_equal(a[0:4], b[0:4]));
+    try expect(!constant_time_bytes_equal(a[0:4], c[0:4]));
+}

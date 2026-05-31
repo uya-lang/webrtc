@@ -1,0 +1,87 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use webrtc.udp;
+
+test "udp classifier maps RFC 7983 first byte matrix" {
+    try assert_eq_i32(udp_classifier_first_byte_kind(0 as byte) as i32, UDP_FIRST_BYTE_CLASS_STUN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(3 as byte) as i32, UDP_FIRST_BYTE_CLASS_STUN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(4 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(15 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(16 as byte) as i32, UDP_FIRST_BYTE_CLASS_RESERVED as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(19 as byte) as i32, UDP_FIRST_BYTE_CLASS_RESERVED as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(20 as byte) as i32, UDP_FIRST_BYTE_CLASS_DTLS as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(63 as byte) as i32, UDP_FIRST_BYTE_CLASS_DTLS as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(64 as byte) as i32, UDP_FIRST_BYTE_CLASS_TURN_CHANNEL_DATA as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(79 as byte) as i32, UDP_FIRST_BYTE_CLASS_TURN_CHANNEL_DATA as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(80 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(127 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(128 as byte) as i32, UDP_FIRST_BYTE_CLASS_RTP_RTCP as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(191 as byte) as i32, UDP_FIRST_BYTE_CLASS_RTP_RTCP as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(192 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+    try assert_eq_i32(udp_classifier_first_byte_kind(255 as byte) as i32, UDP_FIRST_BYTE_CLASS_UNKNOWN as i32);
+}
+
+test "udp classifier rejects truncated protocol headers" {
+    const empty_packet: !u8 = udp_classify_packet([]);
+    try expect(empty_packet.error_id == @error_id(error.PacketTooShort));
+
+    var stun_short: [byte: 19] = [];
+    stun_short[0] = 0 as byte;
+    const stun_result: !u8 = udp_classify_packet(stun_short[0:19]);
+    try expect(stun_result.error_id == @error_id(error.PacketTooShort));
+
+    var dtls_short: [byte: 12] = [];
+    dtls_short[0] = 20 as byte;
+    const dtls_result: !u8 = udp_classify_packet(dtls_short[0:12]);
+    try expect(dtls_result.error_id == @error_id(error.PacketTooShort));
+
+    var rtp_short: [byte: 11] = [];
+    rtp_short[0] = 128 as byte;
+    rtp_short[1] = 111 as byte;
+    const rtp_result: !u8 = udp_classify_packet(rtp_short[0:11]);
+    try expect(rtp_result.error_id == @error_id(error.PacketTooShort));
+
+    var rtcp_short: [byte: 3] = [];
+    rtcp_short[0] = 128 as byte;
+    rtcp_short[1] = 200 as byte;
+    const rtcp_result: !u8 = udp_classify_packet(rtcp_short[0:3]);
+    try expect(rtcp_result.error_id == @error_id(error.PacketTooShort));
+}
+
+test "udp classifier handles unknown reserved and turn channel data boundaries" {
+    var unknown_packet: [byte: 1] = [5 as byte];
+    try assert_eq_i32((try udp_classify_packet(unknown_packet[0:1])) as i32, UDP_PACKET_KIND_UNKNOWN as i32);
+
+    var reserved_packet: [byte: 1] = [16 as byte];
+    try assert_eq_i32((try udp_classify_packet(reserved_packet[0:1])) as i32, UDP_PACKET_KIND_RESERVED as i32);
+
+    var turn_short: [byte: 3] = [64 as byte, 0 as byte, 0 as byte];
+    const turn_short_result: !u8 = udp_classify_packet(turn_short[0:3]);
+    try expect(turn_short_result.error_id == @error_id(error.PacketTooShort));
+
+    var turn_packet: [byte: 4] = [64 as byte, 0 as byte, 0 as byte, 0 as byte];
+    try assert_eq_i32((try udp_classify_packet(turn_packet[0:4])) as i32, UDP_PACKET_KIND_TURN_CHANNEL_DATA as i32);
+}
+
+test "udp classifier differentiates rtp from rtcp" {
+    var rtp_packet: [byte: 12] = [];
+    rtp_packet[0] = 128 as byte;
+    rtp_packet[1] = 111 as byte;
+    try assert_eq_i32((try udp_classify_packet(rtp_packet[0:12])) as i32, UDP_PACKET_KIND_RTP as i32);
+
+    var rtcp_packet: [byte: 4] = [];
+    rtcp_packet[0] = 128 as byte;
+    rtcp_packet[1] = 200 as byte;
+    try assert_eq_i32((try udp_classify_packet(rtcp_packet[0:4])) as i32, UDP_PACKET_KIND_RTCP as i32);
+}
+
+test "udp io helpers surface EAGAIN EINTR and short write" {
+    try expect(udp_retryable_errno(UDP_ERRNO_EAGAIN));
+    try expect(udp_retryable_errno(UDP_ERRNO_EINTR));
+    try expect(!udp_retryable_errno(32u32));
+
+    try udp_send_validate_full_datagram(120, 120);
+
+    const short_write: !void = udp_send_validate_full_datagram(120, 64);
+    try expect(short_write.error_id == @error_id(error.UdpShortWrite));
+}

@@ -1,0 +1,336 @@
+// webrtc.binary - 基础字节序、整数边界和 reader/writer helper
+// 模块路径：src/webrtc/binary.uya → use webrtc.binary;
+
+export error ByteReaderTruncated;
+export error ByteWriterOutOfBounds;
+export error IntegerOverflow;
+export error InvalidAlignment;
+
+export struct ByteReader {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+}
+
+export struct ByteWriter {
+    bytes: &[byte] = [],
+    cursor: usize = 0,
+}
+
+fn binary_is_power_of_two(value: usize) bool {
+    if value == 0 {
+        return false;
+    }
+    return (value & (value - 1)) == 0;
+}
+
+fn byte_reader_take(reader: &ByteReader, len: usize) !usize {
+    if reader == null {
+        return error.ByteReaderTruncated;
+    }
+    if len > byte_reader_remaining(reader) {
+        return error.ByteReaderTruncated;
+    }
+
+    const start: usize = reader.cursor;
+    reader.cursor = reader.cursor + len;
+    return start;
+}
+
+fn byte_writer_reserve(writer: &ByteWriter, len: usize) !usize {
+    if writer == null {
+        return error.ByteWriterOutOfBounds;
+    }
+    if len > byte_writer_remaining(writer) {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    const start: usize = writer.cursor;
+    writer.cursor = writer.cursor + len;
+    return start;
+}
+
+export fn checked_add_usize(lhs: usize, rhs: usize) !usize {
+    if rhs > @max_value(usize) - lhs {
+        return error.IntegerOverflow;
+    }
+    return lhs + rhs;
+}
+
+export fn checked_mul_usize(lhs: usize, rhs: usize) !usize {
+    if lhs != 0 && rhs > @max_value(usize) / lhs {
+        return error.IntegerOverflow;
+    }
+    return lhs * rhs;
+}
+
+export fn checked_align_up_usize(value: usize, alignment: usize) !usize {
+    if !binary_is_power_of_two(alignment) {
+        return error.InvalidAlignment;
+    }
+    const aligned_sum: usize = try checked_add_usize(value, alignment - 1);
+    return aligned_sum & ~(alignment - 1);
+}
+
+export fn read_be_u16(src: &[byte]) !u16 {
+    if src.len < 2 {
+        return error.ByteReaderTruncated;
+    }
+    return ((src[0] as u16) << 8u16) | (src[1] as u16);
+}
+
+export fn read_be_u32(src: &[byte]) !u32 {
+    if src.len < 4 {
+        return error.ByteReaderTruncated;
+    }
+    return ((src[0] as u32) << 24u32)
+        | ((src[1] as u32) << 16u32)
+        | ((src[2] as u32) << 8u32)
+        | (src[3] as u32);
+}
+
+export fn read_be_u64(src: &[byte]) !u64 {
+    if src.len < 8 {
+        return error.ByteReaderTruncated;
+    }
+    return ((src[0] as u64) << 56u64)
+        | ((src[1] as u64) << 48u64)
+        | ((src[2] as u64) << 40u64)
+        | ((src[3] as u64) << 32u64)
+        | ((src[4] as u64) << 24u64)
+        | ((src[5] as u64) << 16u64)
+        | ((src[6] as u64) << 8u64)
+        | (src[7] as u64);
+}
+
+export fn read_le_u16(src: &[byte]) !u16 {
+    if src.len < 2 {
+        return error.ByteReaderTruncated;
+    }
+    return (src[0] as u16) | ((src[1] as u16) << 8u16);
+}
+
+export fn read_le_u32(src: &[byte]) !u32 {
+    if src.len < 4 {
+        return error.ByteReaderTruncated;
+    }
+    return (src[0] as u32)
+        | ((src[1] as u32) << 8u32)
+        | ((src[2] as u32) << 16u32)
+        | ((src[3] as u32) << 24u32);
+}
+
+export fn read_le_u64(src: &[byte]) !u64 {
+    if src.len < 8 {
+        return error.ByteReaderTruncated;
+    }
+    return (src[0] as u64)
+        | ((src[1] as u64) << 8u64)
+        | ((src[2] as u64) << 16u64)
+        | ((src[3] as u64) << 24u64)
+        | ((src[4] as u64) << 32u64)
+        | ((src[5] as u64) << 40u64)
+        | ((src[6] as u64) << 48u64)
+        | ((src[7] as u64) << 56u64);
+}
+
+export fn write_be_u16(dst: &[byte], value: u16) !void {
+    if dst.len < 2 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = ((value >> 8u16) & 255u16) as byte;
+    dst[1] = (value & 255u16) as byte;
+}
+
+export fn write_be_u32(dst: &[byte], value: u32) !void {
+    if dst.len < 4 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = ((value >> 24u32) & 255u32) as byte;
+    dst[1] = ((value >> 16u32) & 255u32) as byte;
+    dst[2] = ((value >> 8u32) & 255u32) as byte;
+    dst[3] = (value & 255u32) as byte;
+}
+
+export fn write_be_u64(dst: &[byte], value: u64) !void {
+    if dst.len < 8 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = ((value >> 56u64) & 255u64) as byte;
+    dst[1] = ((value >> 48u64) & 255u64) as byte;
+    dst[2] = ((value >> 40u64) & 255u64) as byte;
+    dst[3] = ((value >> 32u64) & 255u64) as byte;
+    dst[4] = ((value >> 24u64) & 255u64) as byte;
+    dst[5] = ((value >> 16u64) & 255u64) as byte;
+    dst[6] = ((value >> 8u64) & 255u64) as byte;
+    dst[7] = (value & 255u64) as byte;
+}
+
+export fn write_le_u16(dst: &[byte], value: u16) !void {
+    if dst.len < 2 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = (value & 255u16) as byte;
+    dst[1] = ((value >> 8u16) & 255u16) as byte;
+}
+
+export fn write_le_u32(dst: &[byte], value: u32) !void {
+    if dst.len < 4 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = (value & 255u32) as byte;
+    dst[1] = ((value >> 8u32) & 255u32) as byte;
+    dst[2] = ((value >> 16u32) & 255u32) as byte;
+    dst[3] = ((value >> 24u32) & 255u32) as byte;
+}
+
+export fn write_le_u64(dst: &[byte], value: u64) !void {
+    if dst.len < 8 {
+        return error.ByteWriterOutOfBounds;
+    }
+    dst[0] = (value & 255u64) as byte;
+    dst[1] = ((value >> 8u64) & 255u64) as byte;
+    dst[2] = ((value >> 16u64) & 255u64) as byte;
+    dst[3] = ((value >> 24u64) & 255u64) as byte;
+    dst[4] = ((value >> 32u64) & 255u64) as byte;
+    dst[5] = ((value >> 40u64) & 255u64) as byte;
+    dst[6] = ((value >> 48u64) & 255u64) as byte;
+    dst[7] = ((value >> 56u64) & 255u64) as byte;
+}
+
+export fn byte_reader_init(reader: &ByteReader, bytes: &[byte]) void {
+    byte_reader_reset(reader, bytes);
+}
+
+export fn byte_reader_reset(reader: &ByteReader, bytes: &[byte]) void {
+    if reader == null {
+        return;
+    }
+    reader.bytes = bytes;
+    reader.cursor = 0;
+}
+
+export fn byte_reader_cursor(reader: &ByteReader) usize {
+    if reader == null {
+        return 0;
+    }
+    return reader.cursor;
+}
+
+export fn byte_reader_remaining(reader: &ByteReader) usize {
+    if reader == null || reader.cursor >= reader.bytes.len {
+        return 0;
+    }
+    return reader.bytes.len - reader.cursor;
+}
+
+export fn byte_reader_read_u8(reader: &ByteReader) !u8 {
+    const start: usize = try byte_reader_take(reader, 1);
+    return reader.bytes[start] as u8;
+}
+
+export fn byte_reader_read_u16(reader: &ByteReader) !u16 {
+    const start: usize = try byte_reader_take(reader, 2);
+    return read_be_u16(reader.bytes[start:2]);
+}
+
+export fn byte_reader_read_u32(reader: &ByteReader) !u32 {
+    const start: usize = try byte_reader_take(reader, 4);
+    return read_be_u32(reader.bytes[start:4]);
+}
+
+export fn byte_reader_read_u64(reader: &ByteReader) !u64 {
+    const start: usize = try byte_reader_take(reader, 8);
+    return read_be_u64(reader.bytes[start:8]);
+}
+
+export fn byte_reader_read_slice(reader: &ByteReader, len: usize) !&[byte] {
+    const start: usize = try byte_reader_take(reader, len);
+    return reader.bytes[start:len];
+}
+
+export fn byte_writer_init(writer: &ByteWriter, bytes: &[byte]) void {
+    if writer == null {
+        return;
+    }
+    writer.bytes = bytes;
+    writer.cursor = 0;
+}
+
+export fn byte_writer_cursor(writer: &ByteWriter) usize {
+    if writer == null {
+        return 0;
+    }
+    return writer.cursor;
+}
+
+export fn byte_writer_remaining(writer: &ByteWriter) usize {
+    if writer == null || writer.cursor >= writer.bytes.len {
+        return 0;
+    }
+    return writer.bytes.len - writer.cursor;
+}
+
+export fn byte_writer_write_u8(writer: &ByteWriter, value: u8) !void {
+    const start: usize = try byte_writer_reserve(writer, 1);
+    writer.bytes[start] = value as byte;
+}
+
+export fn byte_writer_write_u16(writer: &ByteWriter, value: u16) !void {
+    const start: usize = try byte_writer_reserve(writer, 2);
+    try write_be_u16(writer.bytes[start:2], value);
+}
+
+export fn byte_writer_write_u32(writer: &ByteWriter, value: u32) !void {
+    const start: usize = try byte_writer_reserve(writer, 4);
+    try write_be_u32(writer.bytes[start:4], value);
+}
+
+export fn byte_writer_write_u64(writer: &ByteWriter, value: u64) !void {
+    const start: usize = try byte_writer_reserve(writer, 8);
+    try write_be_u64(writer.bytes[start:8], value);
+}
+
+export fn byte_writer_write_slice(writer: &ByteWriter, src: &[byte]) !void {
+    const start: usize = try byte_writer_reserve(writer, src.len);
+    var i: usize = 0;
+    while i < src.len {
+        writer.bytes[start + i] = src[i];
+        i = i + 1;
+    }
+}
+
+export fn byte_writer_reserve_u16(writer: &ByteWriter) !usize {
+    const offset: usize = byte_writer_cursor(writer);
+    try byte_writer_write_u16(writer, 0u16);
+    return offset;
+}
+
+export fn byte_writer_backfill_u16(writer: &ByteWriter, offset: usize, value: u16) !void {
+    if writer == null {
+        return error.ByteWriterOutOfBounds;
+    }
+    const end: usize = try checked_add_usize(offset, 2);
+    if end > writer.bytes.len {
+        return error.ByteWriterOutOfBounds;
+    }
+    try write_be_u16(writer.bytes[offset:2], value);
+}
+
+export fn constant_time_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    const max_len: usize = if lhs.len > rhs.len { lhs.len } else { rhs.len };
+    var diff: u64 = (lhs.len as u64) ^ (rhs.len as u64);
+    var i: usize = 0;
+    while i < max_len {
+        var lhs_byte: byte = 0 as byte;
+        var rhs_byte: byte = 0 as byte;
+        if i < lhs.len {
+            lhs_byte = lhs[i];
+        }
+        if i < rhs.len {
+            rhs_byte = rhs[i];
+        }
+        diff = diff | ((lhs_byte ^ rhs_byte) as u64);
+        i = i + 1;
+    }
+    return diff == 0u64;
+}

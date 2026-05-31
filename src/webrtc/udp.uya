@@ -1,0 +1,104 @@
+// webrtc.udp - UDP classifier 和 I/O 边界 helper
+// 模块路径：src/webrtc/udp.uya → use webrtc.udp;
+
+use webrtc.errors;
+
+export const UDP_FIRST_BYTE_CLASS_UNKNOWN: u8 = 0u8;
+export const UDP_FIRST_BYTE_CLASS_STUN: u8 = 1u8;
+export const UDP_FIRST_BYTE_CLASS_RESERVED: u8 = 2u8;
+export const UDP_FIRST_BYTE_CLASS_DTLS: u8 = 3u8;
+export const UDP_FIRST_BYTE_CLASS_TURN_CHANNEL_DATA: u8 = 4u8;
+export const UDP_FIRST_BYTE_CLASS_RTP_RTCP: u8 = 5u8;
+
+export const UDP_PACKET_KIND_UNKNOWN: u8 = 0u8;
+export const UDP_PACKET_KIND_STUN: u8 = 1u8;
+export const UDP_PACKET_KIND_RESERVED: u8 = 2u8;
+export const UDP_PACKET_KIND_DTLS: u8 = 3u8;
+export const UDP_PACKET_KIND_TURN_CHANNEL_DATA: u8 = 4u8;
+export const UDP_PACKET_KIND_RTP: u8 = 5u8;
+export const UDP_PACKET_KIND_RTCP: u8 = 6u8;
+
+export const UDP_STUN_HEADER_BYTES: usize = 20;
+export const UDP_DTLS_RECORD_HEADER_BYTES: usize = 13;
+export const UDP_TURN_CHANNEL_DATA_HEADER_BYTES: usize = 4;
+export const UDP_RTP_HEADER_BYTES: usize = 12;
+export const UDP_RTCP_HEADER_BYTES: usize = 4;
+
+export const UDP_ERRNO_EINTR: u32 = 4u32;
+export const UDP_ERRNO_EAGAIN: u32 = 11u32;
+
+export error UdpShortWrite;
+
+fn udp_packet_requires_bytes(bytes: &[byte], min_len: usize) !void {
+    if bytes.len < min_len {
+        return error.PacketTooShort;
+    }
+}
+
+// RFC 5761 在 mux 场景保留 RTP PT 64..95，因此第二字节的 192..223 可判为 RTCP。
+fn udp_is_rtcp_packet_type(value: byte) bool {
+    return value >= 192 as byte && value <= 223 as byte;
+}
+
+export fn udp_classifier_first_byte_kind(first_byte: byte) u8 {
+    if first_byte <= 3 as byte {
+        return UDP_FIRST_BYTE_CLASS_STUN;
+    }
+    if first_byte >= 16 as byte && first_byte <= 19 as byte {
+        return UDP_FIRST_BYTE_CLASS_RESERVED;
+    }
+    if first_byte >= 20 as byte && first_byte <= 63 as byte {
+        return UDP_FIRST_BYTE_CLASS_DTLS;
+    }
+    if first_byte >= 64 as byte && first_byte <= 79 as byte {
+        return UDP_FIRST_BYTE_CLASS_TURN_CHANNEL_DATA;
+    }
+    if first_byte >= 128 as byte && first_byte <= 191 as byte {
+        return UDP_FIRST_BYTE_CLASS_RTP_RTCP;
+    }
+    return UDP_FIRST_BYTE_CLASS_UNKNOWN;
+}
+
+export fn udp_classify_packet(bytes: &[byte]) !u8 {
+    try udp_packet_requires_bytes(bytes, 1);
+
+    const first_byte_kind: u8 = udp_classifier_first_byte_kind(bytes[0]);
+
+    if first_byte_kind == UDP_FIRST_BYTE_CLASS_STUN {
+        try udp_packet_requires_bytes(bytes, UDP_STUN_HEADER_BYTES);
+        return UDP_PACKET_KIND_STUN;
+    }
+    if first_byte_kind == UDP_FIRST_BYTE_CLASS_RESERVED {
+        return UDP_PACKET_KIND_RESERVED;
+    }
+    if first_byte_kind == UDP_FIRST_BYTE_CLASS_DTLS {
+        try udp_packet_requires_bytes(bytes, UDP_DTLS_RECORD_HEADER_BYTES);
+        return UDP_PACKET_KIND_DTLS;
+    }
+    if first_byte_kind == UDP_FIRST_BYTE_CLASS_TURN_CHANNEL_DATA {
+        try udp_packet_requires_bytes(bytes, UDP_TURN_CHANNEL_DATA_HEADER_BYTES);
+        return UDP_PACKET_KIND_TURN_CHANNEL_DATA;
+    }
+    if first_byte_kind == UDP_FIRST_BYTE_CLASS_RTP_RTCP {
+        try udp_packet_requires_bytes(bytes, 2);
+        if udp_is_rtcp_packet_type(bytes[1]) {
+            try udp_packet_requires_bytes(bytes, UDP_RTCP_HEADER_BYTES);
+            return UDP_PACKET_KIND_RTCP;
+        }
+
+        try udp_packet_requires_bytes(bytes, UDP_RTP_HEADER_BYTES);
+        return UDP_PACKET_KIND_RTP;
+    }
+
+    return UDP_PACKET_KIND_UNKNOWN;
+}
+
+export fn udp_retryable_errno(errno_id: u32) bool {
+    return errno_id == UDP_ERRNO_EAGAIN || errno_id == UDP_ERRNO_EINTR;
+}
+
+export fn udp_send_validate_full_datagram(requested_len: usize, written_len: usize) !void {
+    if written_len < requested_len {
+        return error.UdpShortWrite;
+    }
+}

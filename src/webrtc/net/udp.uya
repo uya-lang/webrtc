@@ -1,0 +1,292 @@
+// webrtc.net.udp - Linux UDP socket、batch I/O 与 fallback 边界
+// 模块路径：src/webrtc/net/udp.uya → use webrtc.net.udp;
+
+use libc.syscall;
+use std.http.server.fill_sockaddr_loopback_16;
+use std.http.server.read_port_from_sockaddr_16;
+
+export const UDP_SOCKADDR_BYTES: usize = 16;
+export const UDP_RECV_SLOT_BYTES: usize = 2048;
+export const UDP_IO_BATCH_MAX: usize = 32;
+
+export const UDP_SOCKET_FLAG_CONNECTED: u32 = 1u32;
+export const UDP_SOCKET_FLAG_NONBLOCKING: u32 = 2u32;
+
+// Linux x86_64: recvmmsg(2) / sendmmsg(2) syscall numbers.
+export const SYS_recvmmsg: i64 = 299;
+export const SYS_sendmmsg: i64 = 307;
+
+export error UdpSocketConfigInvalid;
+export error UdpSocketClosed;
+export error UdpBatchEmpty;
+export error UdpBatchTooLarge;
+
+export struct UdpSocketConfig {
+    bind_port: u16 = 0u16,
+    connect_port: u16 = 0u16,
+    nonblocking: bool = true,
+    reuse_port: bool = false,
+}
+
+export struct UdpSocket {
+    fd: i32 = -1,
+    local_port: u16 = 0u16,
+    remote_port: u16 = 0u16,
+    flags: u32 = 0u32,
+}
+
+export struct UdpRecvSlot {
+    addr: [byte: UDP_SOCKADDR_BYTES] = [],
+    addr_len: u32 = UDP_SOCKADDR_BYTES as u32,
+    payload: [byte: UDP_RECV_SLOT_BYTES] = [],
+    payload_len: usize = 0,
+    kind: u8 = 0u8,
+}
+
+export struct UdpSendSlot {
+    addr: [byte: UDP_SOCKADDR_BYTES] = [],
+    addr_len: u32 = UDP_SOCKADDR_BYTES as u32,
+    payload: &[byte] = [],
+    payload_len: usize = 0,
+}
+
+// 这里用简化 ABI 描述 batched datagram layout；真实 syscall 边界后续再替换成精确 mmsghdr/iovec。
+export struct UdpMsgHdr {
+    name: &[byte] = [],
+    payload: &[byte] = [],
+    flags: u32 = 0u32,
+}
+
+export struct UdpMMsgHdr {
+    msg: UdpMsgHdr = UdpMsgHdr{},
+    len: u32 = 0u32,
+}
+
+export struct UdpIoBatchResult {
+    packet_count: usize = 0,
+    would_block: bool = false,
+    interrupted: bool = false,
+    used_fallback: bool = false,
+    short_writes: u64 = 0u64,
+}
+
+export extern "libc" fn sys_udp_recvfrom(
+    sockfd: i32,
+    buf: &byte,
+    len: usize,
+    flags: i32,
+    addr: &byte,
+    addrlen: &u32,
+) !isize {
+    return @syscall(SYS_recvfrom, sockfd as i64, buf as i64, len as i64, flags as i64, addr as i64, addrlen as i64) as! isize;
+}
+
+export extern "libc" fn sys_udp_sendto(
+    sockfd: i32,
+    buf: &[byte],
+    flags: i32,
+    addr: &[byte],
+    addrlen: u32,
+) !isize {
+    return @syscall(SYS_sendto, sockfd as i64, &buf[0] as i64, buf.len as i64, flags as i64, &addr[0] as i64, addrlen as i64) as! isize;
+}
+
+export fn sys_udp_recvmmsg(sockfd: i32, msgs: &UdpMMsgHdr, vlen: u32, flags: u32) !i32 {
+    return @syscall(SYS_recvmmsg, sockfd as i64, msgs as i64, vlen as i64, flags as i64, 0 as i64) as! i32;
+}
+
+export fn sys_udp_sendmmsg(sockfd: i32, msgs: &UdpMMsgHdr, vlen: u32, flags: u32) !i32 {
+    return @syscall(SYS_sendmmsg, sockfd as i64, msgs as i64, vlen as i64, flags as i64) as! i32;
+}
+
+fn udp_socket_validate(socket: &UdpSocket) !void {
+    if socket == null || socket.fd < 0 {
+        return error.UdpSocketClosed;
+    }
+}
+
+fn udp_batch_validate(slot_count: usize) !usize {
+    if slot_count == 0 {
+        return error.UdpBatchEmpty;
+    }
+    if slot_count > UDP_IO_BATCH_MAX {
+        return error.UdpBatchTooLarge;
+    }
+    return slot_count;
+}
+
+fn udp_socket_apply_reuse(socket_fd: i32, reuse_port: bool) void {
+    var one: i32 = 1;
+    _ = sys_setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &one as &void, 4 as u32) catch {};
+    if reuse_port {
+        _ = sys_setsockopt(socket_fd, SOL_SOCKET, SO_REUSEPORT, &one as &void, 4 as u32) catch {};
+    }
+}
+
+fn udp_socket_refresh_local_port(socket: &UdpSocket, requested_port: u16) void {
+    if requested_port != 0u16 {
+        socket.local_port = requested_port;
+        return;
+    }
+
+    var out: [byte: UDP_SOCKADDR_BYTES] = [];
+    var out_len: u32 = UDP_SOCKADDR_BYTES as u32;
+    _ = sys_getsockname(socket.fd, &out[0] as &void, &out_len) catch {};
+    socket.local_port = read_port_from_sockaddr_16(&out[0] as &byte);
+}
+
+export fn udp_socket_set_nonblocking(socket: &UdpSocket) !void {
+    try udp_socket_validate(socket);
+    const flags: i32 = try sys_fcntl(socket.fd, F_GETFL, 0);
+    if (flags & O_NONBLOCK) == 0 {
+        _ = try sys_fcntl(socket.fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    socket.flags = socket.flags | UDP_SOCKET_FLAG_NONBLOCKING;
+}
+
+export fn udp_socket_bind_loopback(socket: &UdpSocket, port: u16) !void {
+    try udp_socket_validate(socket);
+    var addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    fill_sockaddr_loopback_16(port, &addr[0] as &byte);
+    _ = try sys_bind(socket.fd, &addr[0] as &void, UDP_SOCKADDR_BYTES as u32);
+    udp_socket_refresh_local_port(socket, port);
+}
+
+export fn udp_socket_connect_optional(socket: &UdpSocket, port: u16) !bool {
+    try udp_socket_validate(socket);
+    if port == 0u16 {
+        return false;
+    }
+
+    var addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    fill_sockaddr_loopback_16(port, &addr[0] as &byte);
+    _ = try sys_connect(socket.fd, &addr[0] as &void, UDP_SOCKADDR_BYTES as u32);
+    socket.remote_port = port;
+    socket.flags = socket.flags | UDP_SOCKET_FLAG_CONNECTED;
+    return true;
+}
+
+export fn udp_socket_open(config: UdpSocketConfig) !UdpSocket {
+    const fd: i32 = try sys_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    udp_socket_apply_reuse(fd, config.reuse_port);
+
+    var socket_local: UdpSocket = UdpSocket{
+        fd: fd,
+        local_port: 0u16,
+        remote_port: 0u16,
+        flags: 0u32,
+    };
+
+    try udp_socket_bind_loopback(&socket_local, config.bind_port);
+    _ = try udp_socket_connect_optional(&socket_local, config.connect_port);
+    if config.nonblocking {
+        try udp_socket_set_nonblocking(&socket_local);
+    }
+    return socket_local;
+}
+
+export fn udp_socket_close(socket: &UdpSocket) void {
+    if socket == null {
+        return;
+    }
+    if socket.fd >= 0 {
+        _ = sys_close(socket.fd) catch {};
+    }
+    socket.fd = -1;
+    socket.flags = 0u32;
+}
+
+export fn udp_socket_recv_fallback(socket: &UdpSocket, slot: &UdpRecvSlot) !usize {
+    try udp_socket_validate(socket);
+    var addr_len: u32 = UDP_SOCKADDR_BYTES as u32;
+    const read_len: isize = try sys_udp_recvfrom(
+        socket.fd,
+        &slot.payload[0],
+        UDP_RECV_SLOT_BYTES,
+        0,
+        &slot.addr[0],
+        &addr_len,
+    );
+    slot.addr_len = addr_len;
+    slot.payload_len = read_len as usize;
+    return slot.payload_len;
+}
+
+export fn udp_socket_send_fallback(socket: &UdpSocket, slot: &UdpSendSlot) !usize {
+    try udp_socket_validate(socket);
+    if slot.payload.len == 0 {
+        return 0;
+    }
+
+    const addr_len: u32 = if slot.addr_len == 0u32 { UDP_SOCKADDR_BYTES as u32 } else { slot.addr_len };
+    const written: isize = try sys_udp_sendto(socket.fd, slot.payload, 0, slot.addr[0:UDP_SOCKADDR_BYTES], addr_len);
+    slot.payload_len = written as usize;
+    return slot.payload_len;
+}
+
+export fn udp_socket_recvmmsg(socket: &UdpSocket, slots: &UdpRecvSlot, slot_count: usize) !UdpIoBatchResult {
+    try udp_socket_validate(socket);
+    const batch_len: usize = try udp_batch_validate(slot_count);
+
+    var result: UdpIoBatchResult = UdpIoBatchResult{};
+    var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
+    var i: usize = 0;
+    while i < batch_len {
+        msgs[i].msg = UdpMsgHdr{
+            name: slots[i].addr[0:UDP_SOCKADDR_BYTES],
+            payload: slots[i].payload[0:UDP_RECV_SLOT_BYTES],
+            flags: 0u32,
+        };
+        i = i + 1;
+    }
+
+    const recv_result: !i32 = sys_udp_recvmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
+    if recv_result.error_id != 0 {
+        const fallback_len: usize = try udp_socket_recv_fallback(socket, &slots[0]);
+        result.packet_count = if fallback_len > 0 { 1 } else { 0 };
+        result.used_fallback = true;
+        return result;
+    }
+
+    const recv_count: usize = recv_result as usize;
+    result.packet_count = recv_count;
+    i = 0;
+    while i < recv_count {
+        slots[i].payload_len = msgs[i].len as usize;
+        i = i + 1;
+    }
+    return result;
+}
+
+export fn udp_socket_sendmmsg(socket: &UdpSocket, slots: &UdpSendSlot, slot_count: usize) !UdpIoBatchResult {
+    try udp_socket_validate(socket);
+    const batch_len: usize = try udp_batch_validate(slot_count);
+
+    var result: UdpIoBatchResult = UdpIoBatchResult{};
+    var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
+    var i: usize = 0;
+    while i < batch_len {
+        const send_len: usize = if slots[i].payload_len == 0 { slots[i].payload.len } else { slots[i].payload_len };
+        msgs[i].msg = UdpMsgHdr{
+            name: slots[i].addr[0:UDP_SOCKADDR_BYTES],
+            payload: slots[i].payload[0:send_len],
+            flags: 0u32,
+        };
+        i = i + 1;
+    }
+
+    const send_result: !i32 = sys_udp_sendmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
+    if send_result.error_id != 0 {
+        const fallback_len: usize = try udp_socket_send_fallback(socket, &slots[0]);
+        result.packet_count = if fallback_len > 0 { 1 } else { 0 };
+        result.used_fallback = true;
+        return result;
+    }
+
+    const send_count: usize = send_result as usize;
+    result.packet_count = send_count;
+    if send_count < batch_len {
+        result.short_writes = 1u64;
+    }
+    return result;
+}

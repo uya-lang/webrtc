@@ -2,6 +2,7 @@ use std.testing.expect;
 use std.testing.assert_eq_i32;
 use std.testing.assert_eq_u64;
 use webrtc.ring;
+use webrtc.testing;
 
 fn new_ring_queue() RingQueue {
     return RingQueue{
@@ -73,4 +74,22 @@ test "ring queue validates capacity bounds" {
 
     const too_large: !void = ring_queue_init(&queue_local, RING_QUEUE_MAX_CAPACITY + 1);
     try expect(too_large.error_id == @error_id(error.RingQueueConfigInvalid));
+}
+
+test "ring queue counter helper captures depth and drops" {
+    var queue_local: RingQueue = new_ring_queue();
+    try ring_queue_init(&queue_local, 2);
+
+    try ring_queue_push(&queue_local, 1u64);
+    try ring_queue_push(&queue_local, 2u64);
+    _ = ring_queue_push(&queue_local, 3u64);
+    _ = try ring_queue_pop(&queue_local);
+
+    const snapshot: QueueCounterSnapshot = queue_counter_snapshot(
+        queue_local.push_count,
+        queue_local.pop_count,
+        queue_local.drop_count,
+        queue_local.high_watermark,
+    );
+    try queue_counter_expect(&snapshot, 2u64, 1u64, 1u64, 2u64);
 }

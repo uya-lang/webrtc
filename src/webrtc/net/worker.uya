@@ -1,0 +1,368 @@
+// webrtc.net.worker - Linux epoll worker、timer min-heap 与 command/event queue
+// 模块路径：src/webrtc/net/worker.uya → use webrtc.net.worker;
+
+use libc.syscall;
+use webrtc.net.udp;
+use webrtc.ring;
+
+export const WORKER_TIMER_HEAP_MAX: usize = 256;
+export const WORKER_QUEUE_CAPACITY_MAX: usize = 1024;
+export const WORKER_EPOLL_EVENT_MAX: usize = 64;
+
+export const WORKER_TIMER_KIND_ICE_RETRANSMIT: u8 = 1u8;
+export const WORKER_TIMER_KIND_PACER: u8 = 2u8;
+
+export const WORKER_COMMAND_KIND_WAKE: u8 = 1u8;
+export const WORKER_COMMAND_KIND_REGISTER_SOCKET: u8 = 2u8;
+export const WORKER_COMMAND_KIND_SEND_BATCH: u8 = 3u8;
+
+export const WORKER_EVENT_KIND_WAKE_ACK: u8 = 1u8;
+export const WORKER_EVENT_KIND_SOCKET_READABLE: u8 = 2u8;
+export const WORKER_EVENT_KIND_TIMER_FIRED: u8 = 3u8;
+
+export error WorkerConfigInvalid;
+export error WorkerTimerHeapFull;
+export error WorkerTimerHeapEmpty;
+export error WorkerTimerNotReady;
+export error WorkerQueueOverflow;
+export error WorkerQueueEmpty;
+
+export struct WorkerTimer {
+    id: u64 = 0u64,
+    deadline_us: u64 = 0u64,
+    kind: u8 = 0u8,
+}
+
+export struct WorkerTimerHeap {
+    items: [WorkerTimer: WORKER_TIMER_HEAP_MAX] = [],
+    len: usize = 0,
+}
+
+export struct WorkerCommand {
+    kind: u8 = 0u8,
+    transport_id: u64 = 0u64,
+    user_data: u64 = 0u64,
+    fd: i32 = -1,
+}
+
+export struct WorkerEvent {
+    kind: u8 = 0u8,
+    transport_id: u64 = 0u64,
+    user_data: u64 = 0u64,
+    fd: i32 = -1,
+}
+
+export struct WorkerRunStats {
+    drained_commands: usize = 0,
+    epoll_events: usize = 0,
+    fired_timers: usize = 0,
+}
+
+export struct TransportWorkerConfig {
+    worker_id: u32 = 0u32,
+    max_events: usize = WORKER_EPOLL_EVENT_MAX,
+    command_queue_capacity: usize = 128,
+    event_queue_capacity: usize = 128,
+}
+
+export struct TransportWorker {
+    worker_id: u32 = 0u32,
+    epoll_fd: i32 = -1,
+    max_events: usize = WORKER_EPOLL_EVENT_MAX,
+    timer_heap: WorkerTimerHeap = WorkerTimerHeap{},
+    command_queue: RingQueue = RingQueue{},
+    event_queue: RingQueue = RingQueue{},
+    command_slots: [WorkerCommand: WORKER_QUEUE_CAPACITY_MAX] = [],
+    event_slots: [WorkerEvent: WORKER_QUEUE_CAPACITY_MAX] = [],
+    command_queue_capacity: usize = 0,
+    event_queue_capacity: usize = 0,
+    command_write_seq: u64 = 0u64,
+    event_write_seq: u64 = 0u64,
+    epoll_events: [EpollEvent: WORKER_EPOLL_EVENT_MAX] = [],
+}
+
+fn worker_timer_less(a: WorkerTimer, b: WorkerTimer) bool {
+    if a.deadline_us < b.deadline_us {
+        return true;
+    }
+    if a.deadline_us > b.deadline_us {
+        return false;
+    }
+    return a.id < b.id;
+}
+
+fn worker_timer_heap_swap(heap: &WorkerTimerHeap, a: usize, b: usize) void {
+    const tmp: WorkerTimer = heap.items[a];
+    heap.items[a] = heap.items[b];
+    heap.items[b] = tmp;
+}
+
+fn worker_timer_heap_sift_up(heap: &WorkerTimerHeap, index: usize) void {
+    if index == 0 {
+        return;
+    }
+
+    var child: usize = index;
+    while child > 0 {
+        const parent: usize = (child - 1) / 2;
+        if !worker_timer_less(heap.items[child], heap.items[parent]) {
+            return;
+        }
+        worker_timer_heap_swap(heap, child, parent);
+        child = parent;
+    }
+}
+
+fn worker_timer_heap_sift_down(heap: &WorkerTimerHeap, index: usize) void {
+    var parent: usize = index;
+    while true {
+        const left: usize = parent * 2 + 1;
+        const right: usize = left + 1;
+        if left >= heap.len {
+            return;
+        }
+
+        var best: usize = left;
+        if right < heap.len && worker_timer_less(heap.items[right], heap.items[left]) {
+            best = right;
+        }
+        if !worker_timer_less(heap.items[best], heap.items[parent]) {
+            return;
+        }
+        worker_timer_heap_swap(heap, parent, best);
+        parent = best;
+    }
+}
+
+fn worker_queue_slot(token: u64) usize {
+    return (token % (WORKER_QUEUE_CAPACITY_MAX as u64)) as usize;
+}
+
+fn worker_validate_queue_cap(cap: usize) !void {
+    if cap == 0 || cap > WORKER_QUEUE_CAPACITY_MAX {
+        return error.WorkerConfigInvalid;
+    }
+}
+
+export fn worker_timer_heap_init(heap: &WorkerTimerHeap) void {
+    if heap == null {
+        return;
+    }
+    heap.len = 0;
+}
+
+export fn worker_timer_heap_push(heap: &WorkerTimerHeap, timer: WorkerTimer) !void {
+    if heap == null {
+        return error.WorkerConfigInvalid;
+    }
+    if heap.len >= WORKER_TIMER_HEAP_MAX {
+        return error.WorkerTimerHeapFull;
+    }
+    heap.items[heap.len] = timer;
+    heap.len = heap.len + 1;
+    worker_timer_heap_sift_up(heap, heap.len - 1);
+}
+
+export fn worker_timer_heap_peek(heap: &WorkerTimerHeap) !WorkerTimer {
+    if heap == null || heap.len == 0 {
+        return error.WorkerTimerHeapEmpty;
+    }
+    return heap.items[0];
+}
+
+export fn worker_timer_heap_pop_ready(heap: &WorkerTimerHeap, now_us: u64) !WorkerTimer {
+    if heap == null || heap.len == 0 {
+        return error.WorkerTimerHeapEmpty;
+    }
+    if heap.items[0].deadline_us > now_us {
+        return error.WorkerTimerNotReady;
+    }
+
+    const ready: WorkerTimer = heap.items[0];
+    heap.len = heap.len - 1;
+    if heap.len > 0 {
+        heap.items[0] = heap.items[heap.len];
+        worker_timer_heap_sift_down(heap, 0);
+    }
+    return ready;
+}
+
+export fn transport_worker_init(worker: &TransportWorker, config: TransportWorkerConfig) !void {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+    try worker_validate_queue_cap(config.command_queue_capacity);
+    try worker_validate_queue_cap(config.event_queue_capacity);
+    if config.max_events == 0 || config.max_events > WORKER_EPOLL_EVENT_MAX {
+        return error.WorkerConfigInvalid;
+    }
+
+    worker.worker_id = config.worker_id;
+    worker.max_events = config.max_events;
+    worker.command_queue_capacity = config.command_queue_capacity;
+    worker.event_queue_capacity = config.event_queue_capacity;
+    worker.command_write_seq = 0u64;
+    worker.event_write_seq = 0u64;
+    worker_timer_heap_init(&worker.timer_heap);
+    try ring_queue_init(&worker.command_queue, config.command_queue_capacity);
+    try ring_queue_init(&worker.event_queue, config.event_queue_capacity);
+    worker.epoll_fd = try sys_epoll_create1(EPOLL_CLOEXEC);
+}
+
+export fn transport_worker_close(worker: &TransportWorker) void {
+    if worker == null {
+        return;
+    }
+    if worker.epoll_fd >= 0 {
+        _ = sys_close(worker.epoll_fd) catch {};
+    }
+    worker.epoll_fd = -1;
+}
+
+export fn transport_worker_register_udp_socket(worker: &TransportWorker, socket: &UdpSocket, interest_mask: u32) !void {
+    if worker == null || worker.epoll_fd < 0 {
+        return error.WorkerConfigInvalid;
+    }
+    var ev: EpollEvent = EpollEvent{
+        events: interest_mask,
+        _pad: 0u32,
+        data: socket.fd as u64,
+    };
+    _ = try sys_epoll_ctl(worker.epoll_fd, EPOLL_CTL_ADD, socket.fd, &ev);
+}
+
+export fn transport_worker_enqueue_command(worker: &TransportWorker, command: WorkerCommand) !void {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+    const token: u64 = worker.command_write_seq;
+    const slot: usize = worker_queue_slot(token);
+    worker.command_slots[slot] = command;
+    const push_result: !void = ring_queue_push(&worker.command_queue, token);
+    if push_result.error_id != 0 {
+        return error.WorkerQueueOverflow;
+    }
+    worker.command_write_seq = worker.command_write_seq + 1u64;
+}
+
+export fn transport_worker_publish_event(worker: &TransportWorker, event: WorkerEvent) !void {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+    const token: u64 = worker.event_write_seq;
+    const slot: usize = worker_queue_slot(token);
+    worker.event_slots[slot] = event;
+    const push_result: !void = ring_queue_push(&worker.event_queue, token);
+    if push_result.error_id != 0 {
+        return error.WorkerQueueOverflow;
+    }
+    worker.event_write_seq = worker.event_write_seq + 1u64;
+}
+
+export fn transport_worker_pop_event(worker: &TransportWorker) !WorkerEvent {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+    const token_result: !u64 = ring_queue_pop(&worker.event_queue);
+    if token_result.error_id != 0 {
+        return error.WorkerQueueEmpty;
+    }
+    return worker.event_slots[worker_queue_slot(token_result)];
+}
+
+export fn transport_worker_arm_timer(worker: &TransportWorker, timer: WorkerTimer) !void {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+    try worker_timer_heap_push(&worker.timer_heap, timer);
+}
+
+fn transport_worker_on_command(worker: &TransportWorker, command: WorkerCommand) !void {
+    if command.kind == WORKER_COMMAND_KIND_WAKE {
+        try transport_worker_publish_event(worker, WorkerEvent{
+            kind: WORKER_EVENT_KIND_WAKE_ACK,
+            transport_id: command.transport_id,
+            user_data: command.user_data,
+            fd: command.fd,
+        });
+        return;
+    }
+    if command.kind == WORKER_COMMAND_KIND_REGISTER_SOCKET {
+        try transport_worker_publish_event(worker, WorkerEvent{
+            kind: WORKER_EVENT_KIND_SOCKET_READABLE,
+            transport_id: command.transport_id,
+            user_data: command.user_data,
+            fd: command.fd,
+        });
+        return;
+    }
+}
+
+fn transport_worker_drain_commands(worker: &TransportWorker) !usize {
+    var drained: usize = 0;
+    while !ring_queue_is_empty(&worker.command_queue) {
+        const token: u64 = try ring_queue_pop(&worker.command_queue);
+        const command: WorkerCommand = worker.command_slots[worker_queue_slot(token)];
+        try transport_worker_on_command(worker, command);
+        drained = drained + 1;
+    }
+    return drained;
+}
+
+fn transport_worker_collect_ready_timers(worker: &TransportWorker, now_us: u64) !usize {
+    var fired: usize = 0;
+    while true {
+        const timer_result: !WorkerTimer = worker_timer_heap_pop_ready(&worker.timer_heap, now_us);
+        if timer_result.error_id != 0 {
+            return fired;
+        }
+        const timer: WorkerTimer = timer_result;
+        try transport_worker_publish_event(worker, WorkerEvent{
+            kind: WORKER_EVENT_KIND_TIMER_FIRED,
+            transport_id: timer.id,
+            user_data: timer.deadline_us,
+            fd: -1,
+        });
+        fired = fired + 1;
+    }
+}
+
+fn transport_worker_poll_epoll(worker: &TransportWorker, timeout_ms: i32) !usize {
+    if worker.epoll_fd < 0 {
+        return 0;
+    }
+
+    const poll_result: !i32 = sys_epoll_wait(worker.epoll_fd, &worker.epoll_events[0], worker.max_events as i32, timeout_ms);
+    if poll_result.error_id != 0 {
+        return 0;
+    }
+
+    const count: usize = poll_result as usize;
+    var i: usize = 0;
+    while i < count {
+        const fd: i32 = worker.epoll_events[i].data as i32;
+        try transport_worker_publish_event(worker, WorkerEvent{
+            kind: WORKER_EVENT_KIND_SOCKET_READABLE,
+            transport_id: fd as u64,
+            user_data: worker.epoll_events[i].events as u64,
+            fd: fd,
+        });
+        i = i + 1;
+    }
+    return count;
+}
+
+export fn transport_worker_run_once(worker: &TransportWorker, now_us: u64, timeout_ms: i32) !WorkerRunStats {
+    if worker == null {
+        return error.WorkerConfigInvalid;
+    }
+
+    const drained: usize = try transport_worker_drain_commands(worker);
+    const polled: usize = try transport_worker_poll_epoll(worker, timeout_ms);
+    const fired: usize = try transport_worker_collect_ready_timers(worker, now_us);
+    return WorkerRunStats{
+        drained_commands: drained,
+        epoll_events: polled,
+        fired_timers: fired,
+    };
+}

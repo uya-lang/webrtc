@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 0 benchmark registry。真实 bench runner 以后会从这里切到 Uya runtime。
+export fn benchmark_main_emit_placeholder_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "placeholder",
+        suite: "phase0",
+        unit: "ns/op",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

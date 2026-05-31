@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 1 热路径 bench 基线占位：后续切到真实 arena/ring microbench。
+export fn benchmark_main_emit_arena_ring_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_arena_ring",
+        suite: "phase1",
+        unit: "ns/op",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

@@ -1,0 +1,73 @@
+// webrtc.testing - allocation counter / high-watermark 测试辅助
+// 模块路径：src/webrtc/testing.uya → use webrtc.testing;
+
+use std.testing.assert_eq_u64;
+
+export struct AllocationCounterSnapshot {
+    alloc_count: u64 = 0u64,
+    free_count: u64 = 0u64,
+    in_use_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+export struct QueueCounterSnapshot {
+    push_count: u64 = 0u64,
+    pop_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+export fn allocation_counter_snapshot(
+    alloc_count: u64,
+    free_count: u64,
+    in_use_count: u64,
+    high_watermark: u64,
+) AllocationCounterSnapshot {
+    return AllocationCounterSnapshot{
+        alloc_count: alloc_count,
+        free_count: free_count,
+        in_use_count: in_use_count,
+        high_watermark: high_watermark,
+    };
+}
+
+export fn queue_counter_snapshot(
+    push_count: u64,
+    pop_count: u64,
+    drop_count: u64,
+    high_watermark: u64,
+) QueueCounterSnapshot {
+    return QueueCounterSnapshot{
+        push_count: push_count,
+        pop_count: pop_count,
+        drop_count: drop_count,
+        high_watermark: high_watermark,
+    };
+}
+
+export fn allocation_counter_expect_delta(
+    before: &AllocationCounterSnapshot,
+    after: &AllocationCounterSnapshot,
+    alloc_delta: u64,
+    free_delta: u64,
+    in_use_count: u64,
+    high_watermark: u64,
+) !void {
+    try assert_eq_u64(after.alloc_count - before.alloc_count, alloc_delta);
+    try assert_eq_u64(after.free_count - before.free_count, free_delta);
+    try assert_eq_u64(after.in_use_count, in_use_count);
+    try assert_eq_u64(after.high_watermark, high_watermark);
+}
+
+export fn queue_counter_expect(
+    snapshot: &QueueCounterSnapshot,
+    push_count: u64,
+    pop_count: u64,
+    drop_count: u64,
+    high_watermark: u64,
+) !void {
+    try assert_eq_u64(snapshot.push_count, push_count);
+    try assert_eq_u64(snapshot.pop_count, pop_count);
+    try assert_eq_u64(snapshot.drop_count, drop_count);
+    try assert_eq_u64(snapshot.high_watermark, high_watermark);
+}

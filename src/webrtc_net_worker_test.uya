@@ -1,0 +1,61 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use webrtc.net.worker;
+
+test "worker timer heap orders earliest deadlines first" {
+    var heap: WorkerTimerHeap = WorkerTimerHeap{};
+    worker_timer_heap_init(&heap);
+
+    try worker_timer_heap_push(&heap, WorkerTimer{
+        id: 2u64,
+        deadline_us: 200u64,
+        kind: WORKER_TIMER_KIND_PACER,
+    });
+    try worker_timer_heap_push(&heap, WorkerTimer{
+        id: 1u64,
+        deadline_us: 100u64,
+        kind: WORKER_TIMER_KIND_ICE_RETRANSMIT,
+    });
+
+    const first: WorkerTimer = try worker_timer_heap_pop_ready(&heap, 100u64);
+    try assert_eq_i32(first.id as i32, 1);
+}
+
+test "transport worker owns epoll timer heap and bounded queues" {
+    var worker_local: TransportWorker = TransportWorker{};
+    try transport_worker_init(&worker_local, TransportWorkerConfig{
+        worker_id: 7u32,
+        max_events: 64,
+        command_queue_capacity: 128,
+        event_queue_capacity: 128,
+    });
+
+    try expect(worker_local.worker_id == 7u32);
+    try expect(worker_local.command_queue_capacity == 128);
+    try expect(worker_local.event_queue_capacity == 128);
+    try expect(worker_local.epoll_fd >= -1);
+}
+
+test "transport worker queues commands and emits events" {
+    var worker_local: TransportWorker = TransportWorker{};
+    try transport_worker_init(&worker_local, TransportWorkerConfig{
+        worker_id: 9u32,
+        max_events: 32,
+        command_queue_capacity: 4,
+        event_queue_capacity: 4,
+    });
+
+    try transport_worker_enqueue_command(&worker_local, WorkerCommand{
+        kind: WORKER_COMMAND_KIND_WAKE,
+        transport_id: 44u64,
+        user_data: 77u64,
+    });
+    try transport_worker_publish_event(&worker_local, WorkerEvent{
+        kind: WORKER_EVENT_KIND_WAKE_ACK,
+        transport_id: 44u64,
+        user_data: 77u64,
+    });
+
+    const queued_event: WorkerEvent = try transport_worker_pop_event(&worker_local);
+    try assert_eq_i32(queued_event.kind as i32, WORKER_EVENT_KIND_WAKE_ACK as i32);
+}

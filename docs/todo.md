@@ -28,9 +28,9 @@
 - [x] 创建 `src/webrtc/arena.uya`，实现固定 slab packet arena。
 - [x] 创建 `src/webrtc/ring.uya`，实现 bounded ring queue。
 - [x] 创建 `tests/` 基础测试入口。
-- [ ] 创建 `benchmarks/` 基础 benchmark 入口。
-- [ ] 创建 allocation counter / high-watermark 测试辅助。
-- [ ] 创建 benchmark JSON lines 输出 helper。
+- [x] 创建 `benchmarks/` 基础 benchmark 入口。
+- [x] 创建 allocation counter / high-watermark 测试辅助。
+- [x] 创建 benchmark JSON lines 输出 helper。
 
 验收标准：
 
@@ -42,19 +42,19 @@
 
 ## Phase 1：基础二进制、buffer 与 packet 工具
 
-- [ ] 先增加 binary/buffer/arena failing tests：截断、越界、重复 free、cap 超限、clone 预算。
-- [ ] 先增加 `PacketRef` size / alignment 断言。
-- [ ] 先增加 arena/ring allocation counter 和 high-watermark tests。
-- [ ] 实现 big-endian / little-endian 读写 helpers。
-- [ ] 实现 checked integer add/mul/align helpers。
-- [ ] 实现 `ByteReader`，支持 cursor、remaining、read_u8/u16/u32/u64、read_slice。
-- [ ] 实现 `ByteWriter`，支持固定 buffer、回填 length、写 slice。
-- [ ] 实现 `PacketRef` 和 `PacketArena`。
-- [ ] 实现 arena free-list 和 reset。
-- [ ] 实现 slab token transfer。
-- [ ] 实现受预算约束的 packet clone 到 owner arena。
-- [ ] 实现常量时间 byte compare。
-- [ ] 增加 `bench_arena_ring`。
+- [x] 先增加 binary/buffer/arena failing tests：截断、越界、重复 free、cap 超限、clone 预算。
+- [x] 先增加 `PacketRef` size / alignment 断言。
+- [x] 先增加 arena/ring allocation counter 和 high-watermark tests。
+- [x] 实现 big-endian / little-endian 读写 helpers。
+- [x] 实现 checked integer add/mul/align helpers。
+- [x] 实现 `ByteReader`，支持 cursor、remaining、read_u8/u16/u32/u64、read_slice。
+- [x] 实现 `ByteWriter`，支持固定 buffer、回填 length、写 slice。
+- [x] 实现 `PacketRef` 和 `PacketArena`。
+- [x] 实现 arena free-list 和 reset。
+- [x] 实现 slab token transfer。
+- [x] 实现受预算约束的 packet clone 到 owner arena。
+- [x] 实现常量时间 byte compare。
+- [x] 增加 `bench_arena_ring`。
 
 验收标准：
 
@@ -66,18 +66,18 @@
 
 ## Phase 2：UDP I/O 与事件循环
 
-- [ ] 先增加 UDP classifier 首字节矩阵测试。
-- [ ] 先增加短包、unknown、reserved/ZRTP、TURN ChannelData 边界测试。
-- [ ] 先增加 EAGAIN/EINTR/短写 failing tests。
-- [ ] 先建立 `bench_udp_echo` JSON lines 基线。
-- [ ] 实现 Linux UDP socket 创建、bind、connect 可选、nonblocking。
-- [ ] 实现 epoll worker。
-- [ ] 实现 monotonic timer wheel 或 min-heap。
-- [ ] 实现 `recvmmsg` 批量收包路径。
-- [ ] 实现 `sendmmsg` 批量发包路径。
-- [ ] 实现 fallback `recvfrom/sendto`。
-- [ ] 实现 UDP packet classifier：STUN / DTLS / TURN ChannelData / RTP / RTCP / reserved / unknown。
-- [ ] 实现 worker command queue 和 event queue。
+- [x] 先增加 UDP classifier 首字节矩阵测试。
+- [x] 先增加短包、unknown、reserved/ZRTP、TURN ChannelData 边界测试。
+- [x] 先增加 EAGAIN/EINTR/短写 failing tests。
+- [x] 先建立 `bench_udp_echo` JSON lines 基线。
+- [x] 实现 Linux UDP socket 创建、bind、connect 可选、nonblocking。
+- [x] 实现 epoll worker。
+- [x] 实现 monotonic timer wheel 或 min-heap。
+- [x] 实现 `recvmmsg` 批量收包路径。
+- [x] 实现 `sendmmsg` 批量发包路径。
+- [x] 实现 fallback `recvfrom/sendto`。
+- [x] 实现 UDP packet classifier：STUN / DTLS / TURN ChannelData / RTP / RTCP / reserved / unknown。
+- [x] 实现 worker command queue 和 event queue。
 - [ ] 增加 loopback UDP echo 测试。
 
 验收标准：

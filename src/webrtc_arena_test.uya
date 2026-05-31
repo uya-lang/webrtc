@@ -2,6 +2,7 @@ use std.testing.expect;
 use std.testing.assert_eq_i32;
 use std.testing.assert_eq_u64;
 use webrtc.arena;
+use webrtc.testing;
 
 fn new_packet_arena() PacketArena {
     return PacketArena{
@@ -98,4 +99,72 @@ test "packet arena reset restores all slabs" {
 
 test "packet ref stays within cache friendly budget" {
     try expect(@size_of(PacketRef) <= 64);
+    try expect(@align_of(PacketRef) <= 16);
+}
+
+test "packet arena allocation counters expose alloc free and watermark deltas" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 29u32, 2, 32);
+
+    const before: AllocationCounterSnapshot = allocation_counter_snapshot(
+        arena_local.alloc_count,
+        arena_local.free_count,
+        arena_local.in_use_count,
+        arena_local.high_watermark,
+    );
+
+    var payload: [byte: 3] = [1 as byte, 2 as byte, 3 as byte];
+    const packet_a: PacketRef = try packet_arena_alloc(&arena_local, payload[0:3], 0u64, 0u32, 0u16, 0u16);
+    const packet_b: PacketRef = try packet_arena_alloc(&arena_local, payload[0:3], 0u64, 0u32, 0u16, 0u16);
+    try packet_arena_free(&arena_local, &packet_b);
+
+    const after: AllocationCounterSnapshot = allocation_counter_snapshot(
+        arena_local.alloc_count,
+        arena_local.free_count,
+        arena_local.in_use_count,
+        arena_local.high_watermark,
+    );
+    try allocation_counter_expect_delta(&before, &after, 2u64, 1u64, 1u64, 2u64);
+    try packet_arena_free(&arena_local, &packet_a);
+}
+
+test "slab token transfer invalidates moved ref and preserves payload" {
+    var arena_local: PacketArena = new_packet_arena();
+    try packet_arena_init(&arena_local, 31u32, 1, 16);
+
+    var payload: [byte: 4] = [3 as byte, 4 as byte, 5 as byte, 6 as byte];
+    var packet: PacketRef = try packet_arena_alloc(&arena_local, payload[0:4], 44u64, 5u32, 6u16, 7u16);
+
+    const token: SlabTransferToken = try packet_ref_take_slab_token(&packet);
+    const restored: PacketRef = slab_transfer_token_restore(&token);
+    const view: &[byte] = try packet_arena_bytes(&arena_local, &restored);
+    try assert_eq_i32(view[2] as i32, 5);
+    try expect((packet.flags & PACKET_REF_FLAG_MOVED) != 0u16);
+
+    const moved_ref: !&[byte] = packet_arena_bytes(&arena_local, &packet);
+    try expect(moved_ref.error_id == @error_id(error.PacketArenaInvalidRef));
+}
+
+test "packet arena clone budget tracks clone stats and rejects overflow" {
+    var src_arena: PacketArena = new_packet_arena();
+    var owner_arena: PacketArena = new_packet_arena();
+    var clone_budget: PacketCloneBudget = PacketCloneBudget{};
+    try packet_arena_init(&src_arena, 37u32, 1, 16);
+    try packet_arena_init(&owner_arena, 41u32, 1, 16);
+    packet_clone_budget_init(&clone_budget, 4u64, 1u64);
+
+    var payload: [byte: 4] = [8 as byte, 7 as byte, 6 as byte, 5 as byte];
+    const packet: PacketRef = try packet_arena_alloc(&src_arena, payload[0:4], 12u64, 9u32, 1u16, 2u16);
+
+    const cloned: PacketRef = try packet_arena_clone_to_owner(&owner_arena, &src_arena, &packet, &clone_budget);
+    try assert_eq_u64(clone_budget.clone_count, 1u64);
+    try assert_eq_u64(clone_budget.clone_bytes, 4u64);
+    try assert_eq_u64(clone_budget.high_watermark, 1u64);
+
+    const clone_overflow: !PacketRef = packet_arena_clone_to_owner(&owner_arena, &src_arena, &packet, &clone_budget);
+    try expect(clone_overflow.error_id == @error_id(error.PacketArenaCloneBudgetExceeded));
+    try assert_eq_u64(clone_budget.drop_count, 1u64);
+
+    packet_clone_budget_release(&clone_budget, cloned.len as u64);
+    try assert_eq_u64(clone_budget.in_use_packets, 0u64);
 }

@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 2 UDP echo bench 基线占位：后续接到真实 recvmmsg/sendmmsg 与 fallback 路径。
+export fn benchmark_main_emit_udp_echo_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_udp_echo",
+        suite: "phase2",
+        unit: "qps",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

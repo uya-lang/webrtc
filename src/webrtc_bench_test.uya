@@ -1,0 +1,18 @@
+use std.testing.expect;
+use webrtc.bench;
+
+test "benchmark jsonl helper formats arena ring sample" {
+    var line_buf: [byte: BENCHMARK_JSONL_MAX_LINE_BYTES] = [];
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_arena_ring",
+        suite: "phase1",
+        unit: "ns/op",
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+
+    const written: usize = try benchmark_jsonl_write_line(line_buf[0:BENCHMARK_JSONL_MAX_LINE_BYTES], &sample);
+    try expect(written > 0);
+    try expect(line_buf[0] == '{' as byte);
+}

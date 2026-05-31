@@ -3,6 +3,7 @@
 
 export const PACKET_ARENA_MAX_SLABS: usize = 256;
 export const PACKET_ARENA_MAX_SLAB_BYTES: usize = 2048;
+export const PACKET_REF_FLAG_MOVED: u16 = 1u16;
 
 const PACKET_ARENA_STORAGE_BYTES: usize = PACKET_ARENA_MAX_SLABS * PACKET_ARENA_MAX_SLAB_BYTES;
 const PACKET_REF_COMPONENT_MAX: usize = 65535;
@@ -12,6 +13,7 @@ export error PacketArenaExhausted;
 export error PacketArenaPayloadTooLarge;
 export error PacketArenaInvalidRef;
 export error PacketArenaDoubleFree;
+export error PacketArenaCloneBudgetExceeded;
 
 // PacketRef 只保存 slab 身份和 packet 元数据，不暴露可逃逸的内部切片。
 export struct PacketRef {
@@ -24,6 +26,20 @@ export struct PacketRef {
     len: u16 = 0u16,
     kind: u16 = 0u16,
     flags: u16 = 0u16,
+}
+
+export struct SlabTransferToken {
+    packet: PacketRef = PacketRef{},
+}
+
+export struct PacketCloneBudget {
+    max_bytes: u64 = 0u64,
+    max_packets: u64 = 0u64,
+    clone_bytes: u64 = 0u64,
+    clone_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    in_use_packets: u64 = 0u64,
+    high_watermark: u64 = 0u64,
 }
 
 // 固定容量 arena：每个 slab 只承载一个 packet，free-list 走 LIFO。
@@ -108,6 +124,83 @@ fn packet_arena_validate_owner_ref(arena: &PacketArena, packet: &PacketRef) !usi
         return error.PacketArenaInvalidRef;
     }
     return slot;
+}
+
+fn packet_clone_budget_can_clone(budget: &PacketCloneBudget, byte_len: u64) bool {
+    if budget == null {
+        return false;
+    }
+
+    if budget.max_packets != 0u64 && budget.in_use_packets + 1u64 > budget.max_packets {
+        return false;
+    }
+    if budget.max_bytes != 0u64 && budget.clone_bytes + byte_len > budget.max_bytes {
+        return false;
+    }
+    return true;
+}
+
+export fn packet_clone_budget_init(budget: &PacketCloneBudget, max_bytes: u64, max_packets: u64) void {
+    if budget == null {
+        return;
+    }
+
+    budget.max_bytes = max_bytes;
+    budget.max_packets = max_packets;
+    budget.clone_bytes = 0u64;
+    budget.clone_count = 0u64;
+    budget.drop_count = 0u64;
+    budget.in_use_packets = 0u64;
+    budget.high_watermark = 0u64;
+}
+
+export fn packet_clone_budget_release(budget: &PacketCloneBudget, byte_len: u64) void {
+    if budget == null {
+        return;
+    }
+
+    if budget.in_use_packets > 0u64 {
+        budget.in_use_packets = budget.in_use_packets - 1u64;
+    }
+    if budget.clone_bytes >= byte_len {
+        budget.clone_bytes = budget.clone_bytes - byte_len;
+    } else {
+        budget.clone_bytes = 0u64;
+    }
+}
+
+export fn packet_ref_take_slab_token(packet: &PacketRef) !SlabTransferToken {
+    if packet == null || packet.generation == 0u32 {
+        return error.PacketArenaInvalidRef;
+    }
+
+    const moved: PacketRef = PacketRef{
+        recv_time_us: packet.recv_time_us,
+        arena_id: packet.arena_id,
+        slab_id: packet.slab_id,
+        generation: packet.generation,
+        five_tuple_id: packet.five_tuple_id,
+        offset: packet.offset,
+        len: packet.len,
+        kind: packet.kind,
+        flags: packet.flags,
+    };
+
+    packet.generation = 0u32;
+    packet.offset = 0u16;
+    packet.len = 0u16;
+    packet.flags = packet.flags | PACKET_REF_FLAG_MOVED;
+
+    return SlabTransferToken{
+        packet: moved,
+    };
+}
+
+export fn slab_transfer_token_restore(token: &SlabTransferToken) PacketRef {
+    if token == null {
+        return PacketRef{};
+    }
+    return token.packet;
 }
 
 export fn packet_arena_init(arena: &PacketArena, arena_id: u32, slab_count: usize, slab_size: usize) !void {
@@ -227,6 +320,36 @@ export fn packet_arena_bytes(arena: &PacketArena, packet: &PacketRef) !&[byte] {
         return arena.storage[base:len];
     }
     return error.PacketArenaInvalidRef;
+}
+
+export fn packet_arena_clone_to_owner(
+    owner_arena: &PacketArena,
+    src_arena: &PacketArena,
+    packet: &PacketRef,
+    budget: &PacketCloneBudget,
+) !PacketRef {
+    const payload: &[byte] = try packet_arena_bytes(src_arena, packet);
+    const payload_len: u64 = payload.len as u64;
+    if !packet_clone_budget_can_clone(budget, payload_len) {
+        budget.drop_count = budget.drop_count + 1u64;
+        return error.PacketArenaCloneBudgetExceeded;
+    }
+
+    const cloned: PacketRef = try packet_arena_alloc(
+        owner_arena,
+        payload,
+        packet.recv_time_us,
+        packet.five_tuple_id,
+        packet.kind,
+        packet.flags,
+    );
+    budget.clone_count = budget.clone_count + 1u64;
+    budget.clone_bytes = budget.clone_bytes + payload_len;
+    budget.in_use_packets = budget.in_use_packets + 1u64;
+    if budget.in_use_packets > budget.high_watermark {
+        budget.high_watermark = budget.in_use_packets;
+    }
+    return cloned;
 }
 
 export fn packet_arena_free(arena: &PacketArena, packet: &PacketRef) !void {
