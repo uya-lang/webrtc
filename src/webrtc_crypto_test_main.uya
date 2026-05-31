@@ -1,0 +1,86 @@
+use libc.printf;
+use webrtc.binary;
+use webrtc.crypto.random;
+
+fn crypto_test_check_constant_time_compare_edges() i32 {
+    var empty: [byte: 1] = [];
+    if !constant_time_bytes_equal(empty[0:0], empty[0:0]) {
+        return 10;
+    }
+
+    var short_a: [byte: 3] = [1 as byte, 2 as byte, 3 as byte];
+    var short_b: [byte: 2] = [1 as byte, 2 as byte];
+    if constant_time_bytes_equal(short_a[0:3], short_b[0:2]) {
+        return 11;
+    }
+
+    var lhs: [byte: 8] = [7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte];
+    var rhs_first_mismatch: [byte: 8] = [1 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte];
+    var rhs_last_mismatch: [byte: 8] = [7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 1 as byte];
+    var rhs_equal: [byte: 8] = [7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte, 7 as byte];
+
+    if constant_time_bytes_equal(lhs[0:8], rhs_first_mismatch[0:8]) {
+        return 12;
+    }
+    if constant_time_bytes_equal(lhs[0:8], rhs_last_mismatch[0:8]) {
+        return 13;
+    }
+    if !constant_time_bytes_equal(lhs[0:8], rhs_equal[0:8]) {
+        return 14;
+    }
+
+    return 0;
+}
+
+fn crypto_test_check_random_source_failure_paths() i32 {
+    crypto_random_test_reset();
+
+    var empty: [byte: 1] = [];
+    if crypto_random_fill(empty[0:0]).error_id != 0 {
+        return 20;
+    }
+
+    var out: [byte: 32] = [];
+    if crypto_random_fill(out[0:32]).error_id != 0 {
+        return 21;
+    }
+
+    crypto_random_test_set_fail_open(true);
+    const open_failure: !void = crypto_random_fill(out[0:32]);
+    if open_failure.error_id != @error_id(error.RandomSourceFailed) {
+        return 22;
+    }
+
+    crypto_random_test_reset();
+    crypto_random_test_set_fail_read(true);
+    const read_failure: !void = crypto_random_fill(out[0:32]);
+    if read_failure.error_id != @error_id(error.RandomSourceFailed) {
+        return 23;
+    }
+
+    crypto_random_test_reset();
+    if crypto_random_fill(out[0:32]).error_id != 0 {
+        return 24;
+    }
+
+    return 0;
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var result: i32 = crypto_test_check_constant_time_compare_edges();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = crypto_test_check_random_source_failure_paths();
+    if result != 0 {
+        _ = printf("CRYPTO_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    return 0;
+}

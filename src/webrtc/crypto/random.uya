@@ -1,0 +1,62 @@
+// webrtc.crypto.random - low-level platform entropy boundary for Phase 7 tests
+// 模块路径：src/webrtc/crypto/random.uya → use webrtc.crypto.random;
+
+use libc.sys_open;
+use libc.sys_read;
+use libc.sys_close;
+use libc.O_RDONLY;
+use libc.O_CLOEXEC;
+use webrtc.errors;
+
+var crypto_random_fail_open: bool = false;
+var crypto_random_fail_read: bool = false;
+
+export fn crypto_random_test_reset() void {
+    crypto_random_fail_open = false;
+    crypto_random_fail_read = false;
+}
+
+export fn crypto_random_test_set_fail_open(enabled: bool) void {
+    crypto_random_fail_open = enabled;
+}
+
+export fn crypto_random_test_set_fail_read(enabled: bool) void {
+    crypto_random_fail_read = enabled;
+}
+
+export fn crypto_random_fill(dst: &[byte]) !void {
+    if dst.len == 0usize {
+        return;
+    }
+    if crypto_random_fail_open {
+        return error.RandomSourceFailed;
+    }
+
+    var path: [byte: 13] = [47, 100, 101, 118, 47, 117, 114, 97, 110, 100, 111, 109, 0];
+    const fd: !i32 = sys_open(&path[0], (O_RDONLY as i32) | O_CLOEXEC, 0i32);
+    if fd.error_id != 0 {
+        return error.RandomSourceFailed;
+    }
+
+    var total: usize = 0usize;
+    while total < dst.len {
+        if crypto_random_fail_read {
+            _ = sys_close(fd.value) catch {};
+            return error.RandomSourceFailed;
+        }
+
+        const read_result: !isize = sys_read(fd.value, &dst[total], dst.len - total);
+        if read_result.error_id != 0 {
+            _ = sys_close(fd.value) catch {};
+            return error.RandomSourceFailed;
+        }
+        if read_result.value <= 0isize {
+            _ = sys_close(fd.value) catch {};
+            return error.RandomSourceFailed;
+        }
+
+        total = total + (read_result.value as usize);
+    }
+
+    _ = sys_close(fd.value) catch {};
+}

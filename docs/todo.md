@@ -191,7 +191,7 @@
 ## Phase 7：Crypto 基础
 
 - [x] 先收集官方 vectors 和 Wycheproof 风格负例。
-- [ ] 先增加 constant-time 比较测试和随机源失败测试。
+- [x] 先增加 constant-time 比较测试和随机源失败测试。
 - [ ] 先建立 AES/GHASH/HMAC microbench 基线。
 - [ ] 实现 SHA-1。
 - [ ] 实现 SHA-256。
