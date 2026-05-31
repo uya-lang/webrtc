@@ -1,0 +1,326 @@
+// webrtc.turn.parse - TURN Allocate parser
+// 模块路径：src/webrtc/turn/parse.uya → use webrtc.turn.parse;
+
+use webrtc.binary;
+use webrtc.errors;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.turn.model;
+
+const TURN_ALLOCATE_REQUEST_SEEN_REQUESTED_TRANSPORT: u32 = 1u32;
+const TURN_ALLOCATE_REQUEST_SEEN_LIFETIME: u32 = 2u32;
+const TURN_ALLOCATE_REQUEST_SEEN_REQUESTED_ADDRESS_FAMILY: u32 = 4u32;
+const TURN_ALLOCATE_REQUEST_SEEN_EVEN_PORT: u32 = 8u32;
+const TURN_ALLOCATE_REQUEST_SEEN_DONT_FRAGMENT: u32 = 16u32;
+const TURN_ALLOCATE_REQUEST_SEEN_RESERVATION_TOKEN: u32 = 32u32;
+
+const TURN_ALLOCATE_SUCCESS_SEEN_LIFETIME: u32 = 1u32;
+const TURN_ALLOCATE_SUCCESS_SEEN_XOR_MAPPED_ADDRESS: u32 = 2u32;
+const TURN_ALLOCATE_SUCCESS_SEEN_RESERVATION_TOKEN: u32 = 4u32;
+
+fn turn_parse_known_allocate_request_attribute(attr_type: u16) bool {
+    if attr_type == TURN_ATTRIBUTE_REQUESTED_TRANSPORT {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_LIFETIME {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_EVEN_PORT {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_USERNAME {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_REALM {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_NONCE {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_known_allocate_success_attribute(attr_type: u16) bool {
+    if attr_type == TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_LIFETIME {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS {
+        return true;
+    }
+    if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256 {
+        return true;
+    }
+    if attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+        return true;
+    }
+    return attr_type == STUN_ATTRIBUTE_SOFTWARE;
+}
+
+fn turn_parse_transaction_id_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn turn_parse_copy_reservation_token(dst: &[byte], src: &[byte]) void {
+    var i: usize = 0;
+    while i < TURN_RESERVATION_TOKEN_BYTES {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+fn turn_allocate_request_seen_mask(attr_type: u16) u32 {
+    if attr_type == TURN_ATTRIBUTE_REQUESTED_TRANSPORT {
+        return TURN_ALLOCATE_REQUEST_SEEN_REQUESTED_TRANSPORT;
+    }
+    if attr_type == TURN_ATTRIBUTE_LIFETIME {
+        return TURN_ALLOCATE_REQUEST_SEEN_LIFETIME;
+    }
+    if attr_type == TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY {
+        return TURN_ALLOCATE_REQUEST_SEEN_REQUESTED_ADDRESS_FAMILY;
+    }
+    if attr_type == TURN_ATTRIBUTE_EVEN_PORT {
+        return TURN_ALLOCATE_REQUEST_SEEN_EVEN_PORT;
+    }
+    if attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+        return TURN_ALLOCATE_REQUEST_SEEN_DONT_FRAGMENT;
+    }
+    if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+        return TURN_ALLOCATE_REQUEST_SEEN_RESERVATION_TOKEN;
+    }
+    return 0u32;
+}
+
+fn turn_allocate_success_seen_mask(attr_type: u16) u32 {
+    if attr_type == TURN_ATTRIBUTE_LIFETIME {
+        return TURN_ALLOCATE_SUCCESS_SEEN_LIFETIME;
+    }
+    if attr_type == STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS {
+        return TURN_ALLOCATE_SUCCESS_SEEN_XOR_MAPPED_ADDRESS;
+    }
+    if attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+        return TURN_ALLOCATE_SUCCESS_SEEN_RESERVATION_TOKEN;
+    }
+    return 0u32;
+}
+
+fn turn_allocate_validate_request_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_allocate_request_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_allocate_request_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+fn turn_allocate_validate_success_attribute(attr: &StunAttribute, seen_mask: u32) !u32 {
+    if attr == null {
+        return error.InvalidPacket;
+    }
+    if stun_attribute_is_comprehension_required(attr.attr_type) && !turn_parse_known_allocate_success_attribute(attr.attr_type) {
+        return error.UnsupportedCapability;
+    }
+
+    const mask: u32 = turn_allocate_success_seen_mask(attr.attr_type);
+    if mask != 0u32 && (seen_mask & mask) != 0u32 {
+        return error.InvalidPacket;
+    }
+    return seen_mask | mask;
+}
+
+export fn turn_parse_requested_transport(value: &[byte]) !u8 {
+    if value.len != 4usize {
+        return error.InvalidPacket;
+    }
+    if value[1] != 0 as byte || value[2] != 0 as byte || value[3] != 0 as byte {
+        return error.InvalidPacket;
+    }
+    return value[0] as u8;
+}
+
+export fn turn_parse_lifetime(value: &[byte]) !u32 {
+    if value.len != 4usize {
+        return error.InvalidPacket;
+    }
+    return read_be_u32(value[0:4]);
+}
+
+export fn turn_parse_requested_address_family(value: &[byte]) !u8 {
+    if value.len != 4usize {
+        return error.InvalidPacket;
+    }
+    if value[1] != 0 as byte || value[2] != 0 as byte || value[3] != 0 as byte {
+        return error.InvalidPacket;
+    }
+
+    const family: u8 = value[0] as u8;
+    if family != TURN_REQUESTED_ADDRESS_FAMILY_IPV4 && family != TURN_REQUESTED_ADDRESS_FAMILY_IPV6 {
+        return error.UnsupportedCapability;
+    }
+    return family;
+}
+
+export fn turn_parse_even_port(value: &[byte]) !bool {
+    if value.len != 1usize {
+        return error.InvalidPacket;
+    }
+    if (value[0] & 0x7F as byte) != 0 as byte {
+        return error.InvalidPacket;
+    }
+    return (value[0] & (TURN_EVEN_PORT_RESERVE_MASK as byte)) != 0 as byte;
+}
+
+export fn turn_parse_dont_fragment(value: &[byte]) !void {
+    if value.len != 0usize {
+        return error.InvalidPacket;
+    }
+}
+
+export fn turn_parse_reservation_token(value: &[byte], dst: &[byte]) !void {
+    if value.len != TURN_RESERVATION_TOKEN_BYTES || dst.len < TURN_RESERVATION_TOKEN_BYTES {
+        return error.InvalidPacket;
+    }
+    turn_parse_copy_reservation_token(dst, value);
+}
+
+export fn turn_allocate_request_parse(packet: &[byte]) !TurnAllocateRequest {
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_ALLOCATE || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+        return error.InvalidPacket;
+    }
+
+    var request: TurnAllocateRequest = turn_allocate_request_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_allocate_validate_request_attribute(&attr, seen_mask);
+
+        if attr.attr_type == TURN_ATTRIBUTE_REQUESTED_TRANSPORT {
+            request.requested_transport_protocol = try turn_parse_requested_transport(attr.value);
+            request.requested_transport_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_LIFETIME {
+            request.lifetime_seconds = try turn_parse_lifetime(attr.value);
+            request.lifetime_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY {
+            request.requested_address_family = try turn_parse_requested_address_family(attr.value);
+            request.requested_address_family_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_EVEN_PORT {
+            request.reserve_next_port = try turn_parse_even_port(attr.value);
+            request.even_port_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_DONT_FRAGMENT {
+            try turn_parse_dont_fragment(attr.value);
+            request.dont_fragment = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+            try turn_parse_reservation_token(attr.value, request.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]);
+            request.reservation_token_present = true;
+        }
+    }
+
+    if !request.requested_transport_present {
+        return error.InvalidPacket;
+    }
+    if request.requested_transport_protocol != TURN_PROTOCOL_UDP {
+        return error.UnsupportedCapability;
+    }
+    if request.even_port_present && request.reservation_token_present {
+        return error.InvalidPacket;
+    }
+    return request;
+}
+
+export fn turn_allocate_success_response_parse(packet: &[byte], expected_transaction_id: &[byte]) !TurnAllocateSuccessResponse {
+    if expected_transaction_id.len != STUN_TRANSACTION_ID_BYTES {
+        return error.InvalidPacket;
+    }
+
+    const header: StunMessageHeader = try stun_header_parse(packet);
+    if header.method != TURN_METHOD_ALLOCATE || header.message_class != STUN_MESSAGE_CLASS_SUCCESS_RESPONSE {
+        return error.InvalidPacket;
+    }
+    if !turn_parse_transaction_id_equal(header.transaction_id[0:STUN_TRANSACTION_ID_BYTES], expected_transaction_id) {
+        return error.InvalidPacket;
+    }
+
+    var response: TurnAllocateSuccessResponse = turn_allocate_success_response_make();
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+
+    var seen_mask: u32 = 0u32;
+    while iter.cursor < iter.bytes.len {
+        const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+        seen_mask = try turn_allocate_validate_success_attribute(&attr, seen_mask);
+
+        if attr.attr_type == TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS {
+            if response.relayed_address_count >= TURN_MAX_RELAYED_ADDRESSES {
+                return error.InvalidPacket;
+            }
+
+            response.relayed_addresses[response.relayed_address_count] =
+                try stun_parse_xor_mapped_address(attr.value, header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+            response.relayed_address_count = response.relayed_address_count + 1usize;
+        } else if attr.attr_type == TURN_ATTRIBUTE_LIFETIME {
+            response.lifetime_seconds = try turn_parse_lifetime(attr.value);
+            response.lifetime_present = true;
+        } else if attr.attr_type == STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS {
+            response.mapped_address = try stun_parse_xor_mapped_address(attr.value, header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+            response.mapped_address_present = true;
+        } else if attr.attr_type == TURN_ATTRIBUTE_RESERVATION_TOKEN {
+            try turn_parse_reservation_token(attr.value, response.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]);
+            response.reservation_token_present = true;
+        }
+    }
+
+    if response.relayed_address_count == 0usize {
+        return error.InvalidPacket;
+    }
+    if !response.lifetime_present {
+        return error.InvalidPacket;
+    }
+    return response;
+}

@@ -1,0 +1,282 @@
+use libc.printf;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+use webrtc.turn.model;
+use webrtc.turn.parse;
+use webrtc.turn.write;
+
+fn turn_test_fill_transaction_id(dst: &[byte]) void {
+    var i: usize = 0;
+    while i < dst.len {
+        dst[i] = ((i as u8) + 1u8) as byte;
+        i = i + 1;
+    }
+}
+
+fn turn_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn turn_test_expect_error(result_error_id: u32) bool {
+    return result_error_id != 0u32;
+}
+
+fn turn_test_check_allocate_request_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var packet: [byte: 160] = [];
+    var builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_request(&builder, packet[0:160], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 10;
+    }
+    if turn_builder_append_requested_transport_udp(&builder).error_id != 0 {
+        return 11;
+    }
+    if turn_builder_append_requested_address_family(&builder, TURN_REQUESTED_ADDRESS_FAMILY_IPV4).error_id != 0 {
+        return 12;
+    }
+    if turn_builder_append_lifetime(&builder, 600u32).error_id != 0 {
+        return 13;
+    }
+    if turn_builder_append_even_port(&builder, true).error_id != 0 {
+        return 14;
+    }
+    if turn_builder_append_dont_fragment(&builder).error_id != 0 {
+        return 15;
+    }
+
+    const finish_result: !usize = turn_builder_finish(&builder);
+    if finish_result.error_id != 0 {
+        return 16;
+    }
+    const written_len: usize = finish_result.value;
+
+    const header_result: !StunMessageHeader = stun_header_parse(packet[0:written_len]);
+    if header_result.error_id != 0 {
+        return 17;
+    }
+    const header: StunMessageHeader = header_result.value;
+    if header.method != TURN_METHOD_ALLOCATE {
+        return 18;
+    }
+    if header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+        return 19;
+    }
+
+    const request_result: !TurnAllocateRequest = turn_allocate_request_parse(packet[0:written_len]);
+    if request_result.error_id != 0 {
+        return 20;
+    }
+    const request: TurnAllocateRequest = request_result.value;
+    if !request.requested_transport_present || request.requested_transport_protocol != TURN_PROTOCOL_UDP {
+        return 21;
+    }
+    if !request.requested_address_family_present || request.requested_address_family != TURN_REQUESTED_ADDRESS_FAMILY_IPV4 {
+        return 22;
+    }
+    if !request.lifetime_present || request.lifetime_seconds != 600u32 {
+        return 23;
+    }
+    if !request.even_port_present || !request.reserve_next_port {
+        return 24;
+    }
+    if !request.dont_fragment {
+        return 25;
+    }
+    return 0;
+}
+
+fn turn_test_check_allocate_success_response_roundtrip() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var relay_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 10 as byte];
+    var relay_ipv6: [byte: 16] = [
+        0x20 as byte, 0x01 as byte, 0x0d as byte, 0xb8 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0 as byte,
+        0 as byte, 0 as byte, 0 as byte, 0x34 as byte,
+    ];
+    var mapped_ipv4: [byte: 4] = [192 as byte, 0 as byte, 2 as byte, 44 as byte];
+    var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    reservation_token[0] = 0x10 as byte;
+    reservation_token[1] = 0x20 as byte;
+    reservation_token[2] = 0x30 as byte;
+    reservation_token[3] = 0x40 as byte;
+    reservation_token[4] = 0x50 as byte;
+    reservation_token[5] = 0x60 as byte;
+    reservation_token[6] = 0x70 as byte;
+    reservation_token[7] = 0x80 as byte;
+
+    var packet: [byte: 256] = [];
+    var builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_success_response(&builder, packet[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 30;
+    }
+    if turn_builder_append_xor_relayed_address_ipv4(&builder, 50000u16, relay_ipv4[0:4]).error_id != 0 {
+        return 31;
+    }
+    if turn_builder_append_xor_relayed_address_ipv6(&builder, 50001u16, relay_ipv6[0:16]).error_id != 0 {
+        return 32;
+    }
+    if turn_builder_append_lifetime(&builder, 900u32).error_id != 0 {
+        return 33;
+    }
+    if turn_builder_append_reservation_token(&builder, reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]).error_id != 0 {
+        return 34;
+    }
+    if stun_builder_append_xor_mapped_address_ipv4(&builder, 40000u16, mapped_ipv4[0:4]).error_id != 0 {
+        return 35;
+    }
+
+    const finish_result: !usize = turn_builder_finish(&builder);
+    if finish_result.error_id != 0 {
+        return 36;
+    }
+    const written_len: usize = finish_result.value;
+
+    const response_result: !TurnAllocateSuccessResponse =
+        turn_allocate_success_response_parse(packet[0:written_len], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if response_result.error_id != 0 {
+        return 37;
+    }
+    const response: TurnAllocateSuccessResponse = response_result.value;
+    if response.relayed_address_count != 2usize {
+        return 38;
+    }
+    if response.relayed_addresses[0].family != STUN_ADDRESS_FAMILY_IPV4 {
+        return 39;
+    }
+    if response.relayed_addresses[0].port != 50000u16 {
+        return 40;
+    }
+    if !turn_test_bytes_equal(response.relayed_addresses[0].address_bytes[0:4], relay_ipv4[0:4]) {
+        return 41;
+    }
+    if response.relayed_addresses[1].family != STUN_ADDRESS_FAMILY_IPV6 {
+        return 42;
+    }
+    if response.relayed_addresses[1].port != 50001u16 {
+        return 43;
+    }
+    if !turn_test_bytes_equal(response.relayed_addresses[1].address_bytes[0:16], relay_ipv6[0:16]) {
+        return 44;
+    }
+    if !response.mapped_address_present || response.mapped_address.port != 40000u16 {
+        return 45;
+    }
+    if !turn_test_bytes_equal(response.mapped_address.address_bytes[0:4], mapped_ipv4[0:4]) {
+        return 46;
+    }
+    if !response.lifetime_present || response.lifetime_seconds != 900u32 {
+        return 47;
+    }
+    if !response.reservation_token_present {
+        return 48;
+    }
+    if !turn_test_bytes_equal(response.reservation_token[0:TURN_RESERVATION_TOKEN_BYTES], reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]) {
+        return 49;
+    }
+    return 0;
+}
+
+fn turn_test_check_allocate_invalid_paths() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    turn_test_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var empty_request_packet: [byte: 64] = [];
+    var empty_request_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_request(&empty_request_builder, empty_request_packet[0:64], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 50;
+    }
+    const empty_finish_result: !usize = turn_builder_finish(&empty_request_builder);
+    if empty_finish_result.error_id != 0 {
+        return 51;
+    }
+    const empty_request_result: !TurnAllocateRequest = turn_allocate_request_parse(empty_request_packet[0:empty_finish_result.value]);
+    if !turn_test_expect_error(empty_request_result.error_id) {
+        return 52;
+    }
+
+    var bad_request_packet: [byte: 128] = [];
+    var bad_request_builder: StunMessageBuilder = stun_message_builder_make();
+    var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    reservation_token[0] = 1 as byte;
+    if turn_builder_init_allocate_request(&bad_request_builder, bad_request_packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 53;
+    }
+    if turn_builder_append_requested_transport_udp(&bad_request_builder).error_id != 0 {
+        return 54;
+    }
+    if turn_builder_append_even_port(&bad_request_builder, true).error_id != 0 {
+        return 55;
+    }
+    if turn_builder_append_reservation_token(&bad_request_builder, reservation_token[0:TURN_RESERVATION_TOKEN_BYTES]).error_id != 0 {
+        return 56;
+    }
+    const bad_finish_result: !usize = turn_builder_finish(&bad_request_builder);
+    if bad_finish_result.error_id != 0 {
+        return 57;
+    }
+    const bad_request_result: !TurnAllocateRequest = turn_allocate_request_parse(bad_request_packet[0:bad_finish_result.value]);
+    if !turn_test_expect_error(bad_request_result.error_id) {
+        return 58;
+    }
+
+    var bad_response_packet: [byte: 128] = [];
+    var bad_response_builder: StunMessageBuilder = stun_message_builder_make();
+    if turn_builder_init_allocate_success_response(&bad_response_builder, bad_response_packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 59;
+    }
+    if turn_builder_append_lifetime(&bad_response_builder, 600u32).error_id != 0 {
+        return 60;
+    }
+    const bad_response_finish_result: !usize = turn_builder_finish(&bad_response_builder);
+    if bad_response_finish_result.error_id != 0 {
+        return 61;
+    }
+    const bad_response_result: !TurnAllocateSuccessResponse =
+        turn_allocate_success_response_parse(bad_response_packet[0:bad_response_finish_result.value], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    if !turn_test_expect_error(bad_response_result.error_id) {
+        return 62;
+    }
+
+    return 0;
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    var result: i32 = turn_test_check_allocate_request_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_allocate_success_response_roundtrip();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = turn_test_check_allocate_invalid_paths();
+    if result != 0 {
+        _ = printf("TURN_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    _ = argc;
+    _ = argv;
+    return 0;
+}

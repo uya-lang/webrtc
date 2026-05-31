@@ -1,0 +1,177 @@
+// webrtc.turn.write - TURN Allocate builder
+// 模块路径：src/webrtc/turn/write.uya → use webrtc.turn.write;
+
+use webrtc.binary;
+use webrtc.stun.model;
+use webrtc.stun.write;
+use webrtc.turn.model;
+
+fn turn_builder_reserve(builder: &StunMessageBuilder, len: usize) !usize {
+    if builder == null || builder.cursor > builder.bytes.len || len > builder.bytes.len - builder.cursor {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    const start: usize = builder.cursor;
+    builder.cursor = builder.cursor + len;
+    return start;
+}
+
+fn turn_builder_set_message_type(builder: &StunMessageBuilder, message_type: u16) !void {
+    if builder == null || builder.bytes.len < STUN_HEADER_BYTES {
+        return error.InvalidPacket;
+    }
+
+    builder.message_type = message_type;
+    try write_be_u16(builder.bytes[0:2], message_type);
+}
+
+fn turn_builder_write_attribute(builder: &StunMessageBuilder, attr_type: u16, value: &[byte]) !void {
+    const padding_len: usize = ((4usize - (value.len & 3usize)) & 3usize);
+    const total_len: usize = try checked_add_usize(STUN_ATTRIBUTE_HEADER_BYTES, value.len);
+    const padded_total_len: usize = try checked_add_usize(total_len, padding_len);
+    const start: usize = try turn_builder_reserve(builder, padded_total_len);
+
+    try write_be_u16(builder.bytes[start:2], attr_type);
+    try write_be_u16(builder.bytes[start + 2:2], value.len as u16);
+
+    var i: usize = 0;
+    while i < value.len {
+        builder.bytes[start + STUN_ATTRIBUTE_HEADER_BYTES + i] = value[i];
+        i = i + 1;
+    }
+    while i < value.len + padding_len {
+        builder.bytes[start + STUN_ATTRIBUTE_HEADER_BYTES + i] = 0 as byte;
+        i = i + 1;
+    }
+}
+
+fn turn_builder_write_cookie_bytes(dst: &[byte]) !void {
+    try write_be_u32(dst, STUN_MAGIC_COOKIE);
+}
+
+fn turn_builder_append_xor_address_ipv4(builder: &StunMessageBuilder, attr_type: u16, port: u16, address: &[byte]) !void {
+    if address.len != 4usize {
+        return error.InvalidPacket;
+    }
+
+    var value: [byte: 8] = [];
+    var cookie_bytes: [byte: 4] = [];
+    try turn_builder_write_cookie_bytes(cookie_bytes[0:4]);
+
+    value[0] = 0 as byte;
+    value[1] = STUN_ADDRESS_FAMILY_IPV4 as byte;
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16) as u16));
+
+    var i: usize = 0;
+    while i < 4usize {
+        value[4 + i] = address[i] ^ cookie_bytes[i];
+        i = i + 1;
+    }
+    return turn_builder_write_attribute(builder, attr_type, value[0:8]);
+}
+
+fn turn_builder_append_xor_address_ipv6(builder: &StunMessageBuilder, attr_type: u16, port: u16, address: &[byte]) !void {
+    if address.len != 16usize {
+        return error.InvalidPacket;
+    }
+
+    var value: [byte: 20] = [];
+    var cookie_bytes: [byte: 4] = [];
+    try turn_builder_write_cookie_bytes(cookie_bytes[0:4]);
+
+    value[0] = 0 as byte;
+    value[1] = STUN_ADDRESS_FAMILY_IPV6 as byte;
+    try write_be_u16(value[2:2], port ^ ((STUN_MAGIC_COOKIE >> 16) as u16));
+
+    var i: usize = 0;
+    while i < 4usize {
+        value[4 + i] = address[i] ^ cookie_bytes[i];
+        i = i + 1;
+    }
+    var transaction_index: usize = 0;
+    while i < 16usize {
+        value[4 + i] = address[i] ^ builder.transaction_id[transaction_index];
+        transaction_index = transaction_index + 1usize;
+        i = i + 1;
+    }
+    return turn_builder_write_attribute(builder, attr_type, value[0:20]);
+}
+
+export fn turn_builder_init_allocate_request(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_request(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_REQUEST));
+}
+
+export fn turn_builder_init_allocate_success_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_success_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_SUCCESS_RESPONSE));
+}
+
+export fn turn_builder_init_allocate_error_response(builder: &StunMessageBuilder, dst: &[byte], transaction_id: &[byte]) !void {
+    try stun_builder_init_binding_error_response(builder, dst, transaction_id);
+    return turn_builder_set_message_type(builder, stun_message_type_encode(TURN_METHOD_ALLOCATE, STUN_MESSAGE_CLASS_ERROR_RESPONSE));
+}
+
+export fn turn_builder_append_requested_transport(builder: &StunMessageBuilder, protocol: u8) !void {
+    var value: [byte: 4] = [];
+    value[0] = protocol as byte;
+    value[1] = 0 as byte;
+    value[2] = 0 as byte;
+    value[3] = 0 as byte;
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_REQUESTED_TRANSPORT, value[0:4]);
+}
+
+export fn turn_builder_append_requested_transport_udp(builder: &StunMessageBuilder) !void {
+    return turn_builder_append_requested_transport(builder, TURN_PROTOCOL_UDP);
+}
+
+export fn turn_builder_append_lifetime(builder: &StunMessageBuilder, lifetime_seconds: u32) !void {
+    var value: [byte: 4] = [];
+    try write_be_u32(value[0:4], lifetime_seconds);
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_LIFETIME, value[0:4]);
+}
+
+export fn turn_builder_append_requested_address_family(builder: &StunMessageBuilder, family: u8) !void {
+    if family != TURN_REQUESTED_ADDRESS_FAMILY_IPV4 && family != TURN_REQUESTED_ADDRESS_FAMILY_IPV6 {
+        return error.UnsupportedCapability;
+    }
+
+    var value: [byte: 4] = [];
+    value[0] = family as byte;
+    value[1] = 0 as byte;
+    value[2] = 0 as byte;
+    value[3] = 0 as byte;
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY, value[0:4]);
+}
+
+export fn turn_builder_append_even_port(builder: &StunMessageBuilder, reserve_next_port: bool) !void {
+    var value: [byte: 1] = [];
+    if reserve_next_port {
+        value[0] = TURN_EVEN_PORT_RESERVE_MASK as byte;
+    }
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_EVEN_PORT, value[0:1]);
+}
+
+export fn turn_builder_append_dont_fragment(builder: &StunMessageBuilder) !void {
+    var empty_bytes: [byte: 1] = [];
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_DONT_FRAGMENT, empty_bytes[0:0]);
+}
+
+export fn turn_builder_append_reservation_token(builder: &StunMessageBuilder, reservation_token: &[byte]) !void {
+    if reservation_token.len != TURN_RESERVATION_TOKEN_BYTES {
+        return error.InvalidPacket;
+    }
+    return turn_builder_write_attribute(builder, TURN_ATTRIBUTE_RESERVATION_TOKEN, reservation_token);
+}
+
+export fn turn_builder_append_xor_relayed_address_ipv4(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    return turn_builder_append_xor_address_ipv4(builder, TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS, port, address);
+}
+
+export fn turn_builder_append_xor_relayed_address_ipv6(builder: &StunMessageBuilder, port: u16, address: &[byte]) !void {
+    return turn_builder_append_xor_address_ipv6(builder, TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS, port, address);
+}
+
+export fn turn_builder_finish(builder: &StunMessageBuilder) !usize {
+    return stun_builder_finish(builder);
+}

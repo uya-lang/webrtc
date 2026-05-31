@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+test -f src/webrtc_turn_test_main.uya
+test -d src/webrtc/turn
+test -f src/webrtc/turn/model.uya
+test -f src/webrtc/turn/parse.uya
+test -f src/webrtc/turn/write.uya
+
+rg -Fq "export const TURN_METHOD_ALLOCATE" src/webrtc/turn/model.uya
+rg -Fq "export const TURN_ATTRIBUTE_REQUESTED_TRANSPORT" src/webrtc/turn/model.uya
+rg -Fq "export struct TurnAllocateRequest" src/webrtc/turn/model.uya
+rg -Fq "export struct TurnAllocateSuccessResponse" src/webrtc/turn/model.uya
+
+rg -Fq "export fn turn_parse_requested_transport" src/webrtc/turn/parse.uya
+rg -Fq "export fn turn_parse_lifetime" src/webrtc/turn/parse.uya
+rg -Fq "export fn turn_allocate_request_parse" src/webrtc/turn/parse.uya
+rg -Fq "export fn turn_allocate_success_response_parse" src/webrtc/turn/parse.uya
+
+rg -Fq "export fn turn_builder_init_allocate_request" src/webrtc/turn/write.uya
+rg -Fq "export fn turn_builder_init_allocate_success_response" src/webrtc/turn/write.uya
+rg -Fq "export fn turn_builder_append_requested_transport_udp" src/webrtc/turn/write.uya
+rg -Fq "export fn turn_builder_append_xor_relayed_address_ipv4" src/webrtc/turn/write.uya
+rg -Fq "export fn turn_builder_finish" src/webrtc/turn/write.uya
+
+rg -Fq "turn_test_check_allocate_request_roundtrip" src/webrtc_turn_test_main.uya
+rg -Fq "turn_test_check_allocate_success_response_roundtrip" src/webrtc_turn_test_main.uya
+rg -Fq "turn_test_check_allocate_invalid_paths" src/webrtc_turn_test_main.uya
+
+../uya/bin/uya run src/webrtc_turn_test_main.uya

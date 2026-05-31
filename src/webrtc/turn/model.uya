@@ -1,0 +1,89 @@
+// webrtc.turn.model - TURN methods、attributes 与 Allocate 运行期模型
+// 模块路径：src/webrtc/turn/model.uya → use webrtc.turn.model;
+
+use webrtc.stun.model;
+
+export const TURN_METHOD_ALLOCATE: u16 = 0x0003u16;
+export const TURN_METHOD_REFRESH: u16 = 0x0004u16;
+export const TURN_METHOD_SEND: u16 = 0x0006u16;
+export const TURN_METHOD_DATA: u16 = 0x0007u16;
+export const TURN_METHOD_CREATE_PERMISSION: u16 = 0x0008u16;
+export const TURN_METHOD_CHANNEL_BIND: u16 = 0x0009u16;
+
+export const TURN_ATTRIBUTE_CHANNEL_NUMBER: u16 = 0x000Cu16;
+export const TURN_ATTRIBUTE_LIFETIME: u16 = 0x000Du16;
+export const TURN_ATTRIBUTE_XOR_PEER_ADDRESS: u16 = 0x0012u16;
+export const TURN_ATTRIBUTE_DATA: u16 = 0x0013u16;
+export const TURN_ATTRIBUTE_REALM: u16 = 0x0014u16;
+export const TURN_ATTRIBUTE_NONCE: u16 = 0x0015u16;
+export const TURN_ATTRIBUTE_XOR_RELAYED_ADDRESS: u16 = 0x0016u16;
+export const TURN_ATTRIBUTE_REQUESTED_ADDRESS_FAMILY: u16 = 0x0017u16;
+export const TURN_ATTRIBUTE_EVEN_PORT: u16 = 0x0018u16;
+export const TURN_ATTRIBUTE_REQUESTED_TRANSPORT: u16 = 0x0019u16;
+export const TURN_ATTRIBUTE_DONT_FRAGMENT: u16 = 0x001Au16;
+export const TURN_ATTRIBUTE_RESERVATION_TOKEN: u16 = 0x0022u16;
+
+export const TURN_PROTOCOL_UDP: u8 = 17u8;
+export const TURN_EVEN_PORT_RESERVE_MASK: u8 = 0x80u8;
+export const TURN_REQUESTED_ADDRESS_FAMILY_IPV4: u8 = STUN_ADDRESS_FAMILY_IPV4;
+export const TURN_REQUESTED_ADDRESS_FAMILY_IPV6: u8 = STUN_ADDRESS_FAMILY_IPV6;
+export const TURN_RESERVATION_TOKEN_BYTES: usize = 8usize;
+export const TURN_MAX_RELAYED_ADDRESSES: usize = 2usize;
+
+export struct TurnAllocateRequest {
+    requested_transport_protocol: u8 = 0u8,
+    requested_transport_present: bool = false,
+    requested_address_family: u8 = 0u8,
+    requested_address_family_present: bool = false,
+    lifetime_seconds: u32 = 0u32,
+    lifetime_present: bool = false,
+    even_port_present: bool = false,
+    reserve_next_port: bool = false,
+    dont_fragment: bool = false,
+    reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [],
+    reservation_token_present: bool = false,
+}
+
+export struct TurnAllocateSuccessResponse {
+    relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [],
+    relayed_address_count: usize = 0usize,
+    mapped_address: StunXorMappedAddress = StunXorMappedAddress{},
+    mapped_address_present: bool = false,
+    lifetime_seconds: u32 = 0u32,
+    lifetime_present: bool = false,
+    reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [],
+    reservation_token_present: bool = false,
+}
+
+export fn turn_allocate_request_make() TurnAllocateRequest {
+    var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    return TurnAllocateRequest{
+        requested_transport_protocol: 0u8,
+        requested_transport_present: false,
+        requested_address_family: 0u8,
+        requested_address_family_present: false,
+        lifetime_seconds: 0u32,
+        lifetime_present: false,
+        even_port_present: false,
+        reserve_next_port: false,
+        dont_fragment: false,
+        reservation_token: reservation_token,
+        reservation_token_present: false,
+    };
+}
+
+export fn turn_allocate_success_response_make() TurnAllocateSuccessResponse {
+    var relayed_addresses: [StunXorMappedAddress: TURN_MAX_RELAYED_ADDRESSES] = [];
+    const mapped_address: StunXorMappedAddress = stun_xor_mapped_address_make();
+    var reservation_token: [byte: TURN_RESERVATION_TOKEN_BYTES] = [];
+    return TurnAllocateSuccessResponse{
+        relayed_addresses: relayed_addresses,
+        relayed_address_count: 0usize,
+        mapped_address: mapped_address,
+        mapped_address_present: false,
+        lifetime_seconds: 0u32,
+        lifetime_present: false,
+        reservation_token: reservation_token,
+        reservation_token_present: false,
+    };
+}
