@@ -157,7 +157,7 @@
 - [x] 实现 controlling / controlled role。
 - [x] 实现 nomination。
 - [x] 实现 role conflict。
-- [ ] 实现 selected pair。
+- [x] 实现 selected pair。
 - [ ] 实现 consent freshness。
 - [ ] 实现 trickle ICE 状态。
 - [ ] 实现 ICE state change event。

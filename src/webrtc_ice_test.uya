@@ -96,6 +96,43 @@ fn ice_test_seed_connectivity_check_agent(agent: &IceAgent, role: u8) !u16 {
     return 0u16;
 }
 
+fn ice_test_seed_selected_pair_agents(controlling_agent: &IceAgent, controlled_agent: &IceAgent) !void {
+    _ = try ice_test_seed_connectivity_check_agent(controlling_agent, ICE_AGENT_ROLE_CONTROLLING);
+    controlling_agent.nomination_mode = ICE_NOMINATION_MODE_AGGRESSIVE;
+
+    ice_agent_init(controlled_agent, ICE_AGENT_ROLE_CONTROLLED, 0x8877665544332211u64);
+    try ice_credentials_set(&controlled_agent.local_credentials, "remoteuf" as &[byte], "remote-password" as &[byte]);
+    try ice_credentials_set(&controlled_agent.remote_credentials, "localuf" as &[byte], "local-password" as &[byte]);
+
+    try ice_test_init_remote_candidate(
+        &controlled_agent.local_candidates[0],
+        "rf-check" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        2113937151u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "198.51.100.21" as &[byte],
+        6000u16,
+    );
+    controlled_agent.local_candidate_count = 1usize;
+
+    try ice_test_init_remote_candidate(
+        &controlled_agent.remote_candidates[0],
+        "lf-check" as &[byte],
+        ICE_COMPONENT_RTP,
+        ICE_CANDIDATE_TRANSPORT_UDP,
+        ICE_CANDIDATE_TYPE_HOST,
+        2130706431u32,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.11" as &[byte],
+        5000u16,
+    );
+    controlled_agent.remote_candidate_count = 1usize;
+
+    try expect((try ice_agent_rebuild_checklist(controlled_agent)) == 1usize);
+}
+
 test "ice candidate model owns transport address and related address metadata" {
     try expect(ICE_MAX_FOUNDATION_BYTES >= 16);
     try expect(ICE_MAX_ADDRESS_BYTES >= 16);
@@ -667,8 +704,12 @@ test "regular nomination waits for a valid pair and marks a successful nominatio
         nomination_response_packet[0:nomination_response_len],
         9100u64,
     );
+    try expect(ice_agent_has_selected_pair(&agent));
+    try expect(agent.selected_pair_index == pair_index);
+    try expect(agent.checklist[0].selected);
     try expect(agent.checklist[0].nominated);
     try expect(agent.checklist[0].response_count == 2u32);
+    try expect(agent.state == ICE_AGENT_STATE_COMPLETED);
 }
 
 test "connectivity check success response updates pair timing consent and validity" {
@@ -772,6 +813,87 @@ test "aggressive nomination mode allows use-candidate on the first controlling c
     const use_candidate_attr: StunAttribute =
         try ice_test_stun_find_attribute(packet[0:packet_len], STUN_ATTRIBUTE_USE_CANDIDATE);
     try stun_parse_use_candidate(use_candidate_attr.value);
+}
+
+test "dual agents complete selected pair across nomination request and success response" {
+    var controlling_agent: IceAgent = ice_agent_make();
+    var controlled_agent: IceAgent = ice_agent_make();
+    try ice_test_seed_selected_pair_agents(&controlling_agent, &controlled_agent);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        108 as byte,
+        109 as byte,
+        110 as byte,
+        111 as byte,
+        112 as byte,
+        113 as byte,
+        114 as byte,
+        115 as byte,
+        116 as byte,
+        117 as byte,
+        118 as byte,
+        119 as byte,
+    ];
+    var transaction: IceConnectivityCheckTransaction = ice_connectivity_check_transaction_make();
+    try ice_connectivity_check_transaction_init(
+        &transaction,
+        &controlling_agent,
+        0u16,
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+        true,
+    );
+
+    var request_packet: [byte: 256] = [];
+    const request_len: usize = try ice_connectivity_check_build_binding_request(
+        &controlling_agent,
+        &transaction,
+        request_packet[0:256],
+        1500u64,
+    );
+
+    var response_packet: [byte: 256] = [];
+    const response_len: usize = try ice_agent_connectivity_check_handle_request(
+        &controlled_agent,
+        &controlled_agent.local_candidates[0].address,
+        &controlled_agent.remote_candidates[0].address,
+        request_packet[0:request_len],
+        response_packet[0:256],
+        1800u64,
+    );
+
+    try expect(ice_agent_has_selected_pair(&controlled_agent));
+    try expect(controlled_agent.selected_pair_index == 0u16);
+    try expect(controlled_agent.checklist[0].selected);
+    try expect(controlled_agent.checklist[0].nominated);
+    try expect(controlled_agent.state == ICE_AGENT_STATE_COMPLETED);
+
+    const response_result: IceConnectivityCheckResult = try ice_agent_connectivity_check_handle_response(
+        &controlling_agent,
+        &transaction,
+        response_packet[0:response_len],
+        2200u64,
+    );
+    try expect(response_result.message_class == STUN_MESSAGE_CLASS_SUCCESS_RESPONSE);
+    try expect(response_result.error_code == 0u16);
+    try expect(ice_agent_has_selected_pair(&controlling_agent));
+    try expect(controlling_agent.selected_pair_index == 0u16);
+    try expect(controlling_agent.checklist[0].selected);
+    try expect(controlling_agent.checklist[0].nominated);
+    try expect(controlling_agent.state == ICE_AGENT_STATE_COMPLETED);
+
+    const response_header: StunMessageHeader = try stun_header_parse(response_packet[0:response_len]);
+    try expect(response_header.message_class == STUN_MESSAGE_CLASS_SUCCESS_RESPONSE);
+    const xor_mapped_attr: StunAttribute =
+        try ice_test_stun_find_attribute(response_packet[0:response_len], STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS);
+    const xor_mapped: StunXorMappedAddress =
+        try stun_parse_xor_mapped_address(xor_mapped_attr.value, response_header.transaction_id[0:STUN_TRANSACTION_ID_BYTES]);
+    try expect(xor_mapped.family == STUN_ADDRESS_FAMILY_IPV4);
+    try expect(xor_mapped.port == 5000u16);
+    try expect(xor_mapped.address_len == 4usize);
+    try expect(xor_mapped.address_bytes[0] == 192 as byte);
+    try expect(xor_mapped.address_bytes[1] == 0 as byte);
+    try expect(xor_mapped.address_bytes[2] == 2 as byte);
+    try expect(xor_mapped.address_bytes[3] == 11 as byte);
 }
 
 test "controlled agent rejects use-candidate connectivity checks" {
