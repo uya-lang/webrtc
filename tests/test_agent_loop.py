@@ -190,13 +190,92 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
 
         rendered = stream.getvalue()
         self.assertIn("\x1b[2J\x1b[H", rendered)
-        self.assertIn("\x1b[3;12r", rendered)
-        self.assertIn("[agent] 当前任务: ", rendered)
-        self.assertIn("\x1b[32m实现实时输出\x1b[0m", rendered)
-        self.assertIn("[agent] 已运行 01:05 | 日志 .agent/logs/current.log", rendered)
+        self.assertIn("\x1b[5;12r", rendered)
+        self.assertIn("+----------------------------------------------------------+", rendered)
+        self.assertIn("| [agent] 当前任务: \x1b[32m实现实时输出\x1b[0m", rendered)
+        self.assertIn("| [agent] 已运行 01:05 | 日志 .agent/logs/current.log", rendered)
         self.assertIn("line one\nline two\n", rendered)
-        self.assertIn("\x1b[3;1Hline one\nline two\n", rendered)
+        self.assertIn("\x1b[5;1Hline one\nline two\n", rendered)
         self.assertIn("\x1b[r", rendered)
+
+    def test_live_display_reserves_top_row_for_vscode_terminal(self):
+        module = load_agent_loop_module(
+            {
+                "CODEX_SANDBOX": None,
+                "TERM": "xterm-256color",
+                "TERM_PROGRAM": "vscode",
+            }
+        )
+        stream = FakeTTY()
+        with patch.dict(os.environ, {"TERM_PROGRAM": "vscode"}, clear=False):
+            display = module.LiveOutputDisplay(stream, enabled=True)
+
+            with patch.object(module.shutil, "get_terminal_size", return_value=os.terminal_size((60, 12))):
+                display.start("实现实时输出")
+                display.update(
+                    current_task="实现实时输出",
+                    elapsed_seconds=65,
+                    log_path=".agent/logs/current.log",
+                    log_note="+1.0KB output",
+                    force=True,
+                )
+                display.write("line one\n")
+                display.finish()
+
+        rendered = stream.getvalue()
+        self.assertIn("\x1b[6;12r", rendered)
+        self.assertIn("\x1b[2;1H", rendered)
+        self.assertIn("\x1b[3;1H", rendered)
+        self.assertIn("\x1b[4;1H", rendered)
+        self.assertIn("\x1b[5;1H", rendered)
+        self.assertIn("\x1b[6;1Hline one\n", rendered)
+
+    def test_live_display_restores_cursor_correctly_after_wide_output(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
+        stream = FakeTTY()
+        display = module.LiveOutputDisplay(stream, enabled=True)
+
+        with patch.object(module.shutil, "get_terminal_size", return_value=os.terminal_size((20, 6))):
+            display.start("宽字符输出")
+            display.write("你好你好你好你好你好a")
+            display.update(
+                current_task="宽字符输出",
+                elapsed_seconds=5,
+                log_path=".agent/logs/current.log",
+                log_note="+20B output",
+                force=True,
+            )
+            display.write("tail\n")
+            display.finish()
+
+        rendered = stream.getvalue()
+        self.assertIn("\x1b[6;2Htail\n", rendered)
+
+    def test_clip_display_text_uses_terminal_column_width(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        clipped = module.clip_display_text("你好世界hello", 8)
+
+        self.assertLessEqual(module.display_text_width(clipped), 8)
+        self.assertTrue(clipped.endswith("..."))
+
+    def test_render_live_header_lines_matches_tty_width_with_border(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        lines = module.render_live_header_lines(
+            "非常长的任务名称需要被裁切",
+            elapsed_seconds=65,
+            log_path=".agent/logs/current.log",
+            log_note="+1.0KB output",
+            width=20,
+            color=False,
+        )
+
+        self.assertEqual(len(lines), 4)
+        for line in lines:
+            self.assertEqual(module.display_text_width(line), 20)
+        self.assertEqual(lines[0], "+" + ("-" * 18) + "+")
+        self.assertEqual(lines[-1], "+" + ("-" * 18) + "+")
 
     def test_live_display_does_not_forward_cursor_movement_from_child_output(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None, "TERM": "xterm-256color"})
@@ -213,7 +292,7 @@ class AgentLoopLiveOutputTests(unittest.TestCase):
         self.assertNotIn("\x1b7", rendered)
         self.assertNotIn("\x1b8", rendered)
         self.assertIn("日志仍应留在滚动区\n", rendered)
-        self.assertIn("\x1b[3;1H日志仍应留在滚动区\n", rendered)
+        self.assertIn("\x1b[5;1H日志仍应留在滚动区\n", rendered)
 
     def test_live_display_falls_back_to_plain_text_when_not_using_tty_mode(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})

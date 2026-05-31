@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -154,13 +155,73 @@ def supports_live_output(stream):
     return bool(is_tty and term and term != "dumb")
 
 
+def detect_live_header_top_padding():
+    raw_value = os.environ.get("AGENT_LIVE_HEADER_TOP_PADDING")
+    if raw_value is not None:
+        try:
+            return max(0, int(raw_value.strip() or "0"))
+        except ValueError:
+            return 0
+
+    term_program = os.environ.get("TERM_PROGRAM", "").strip().lower()
+    if term_program == "vscode":
+        return 1
+
+    if os.environ.get("VSCODE_INJECTION") or os.environ.get("VSCODE_SHELL_INTEGRATION"):
+        return 1
+
+    return 0
+
+
 def clip_display_text(text, width):
     clean = " ".join(str(text).splitlines())
-    if width <= 0 or len(clean) <= width:
+    if width <= 0:
+        return ""
+    if display_text_width(clean) <= width:
         return clean
     if width <= 3:
-        return clean[:width]
-    return clean[: width - 3] + "..."
+        return trim_display_text(clean, width)
+    return trim_display_text(clean, width - 3) + "..."
+
+
+def char_display_width(char):
+    if not char:
+        return 0
+    if char in "\n\r":
+        return 0
+    if unicodedata.combining(char):
+        return 0
+    category = unicodedata.category(char)
+    if category in {"Cf", "Mn", "Me"}:
+        return 0
+    if unicodedata.east_asian_width(char) in {"W", "F"}:
+        return 2
+    return 1
+
+
+def display_text_width(text):
+    return sum(char_display_width(char) for char in str(text))
+
+
+def trim_display_text(text, width):
+    if width <= 0:
+        return ""
+
+    trimmed = []
+    used = 0
+    for char in str(text):
+        char_width = char_display_width(char)
+        if used + char_width > width:
+            break
+        trimmed.append(char)
+        used += char_width
+
+    return "".join(trimmed)
+
+
+def pad_display_text(text, width):
+    padding = max(0, width - display_text_width(text))
+    return str(text) + (" " * padding)
 
 
 def sanitize_live_output_chunk(text, pending_escape=""):
@@ -293,13 +354,16 @@ def render_live_status_line(current_task, elapsed_seconds=None, log_path=None, l
     clipped_suffix = suffix
 
     if isinstance(width, int) and width > 0:
-        available = max(0, width - len(prefix))
-        if len(task_text) + len(suffix) > available:
-            if len(task_text) >= available:
+        available = max(0, width - display_text_width(prefix))
+        if display_text_width(task_text) + display_text_width(suffix) > available:
+            if display_text_width(task_text) >= available:
                 clipped_task = clip_display_text(task_text, available)
                 clipped_suffix = ""
             else:
-                clipped_suffix = clip_display_text(suffix, available - len(task_text))
+                clipped_suffix = clip_display_text(
+                    suffix,
+                    available - display_text_width(task_text),
+                )
 
     if color and clipped_task:
         colored_task = f"{ANSI_GREEN}{clipped_task}{ANSI_RESET}"
@@ -312,17 +376,20 @@ def render_live_status_line(current_task, elapsed_seconds=None, log_path=None, l
 def render_live_header_lines(current_task, elapsed_seconds=None, log_path=None, log_note=None, width=None, color=False):
     task_prefix = "[agent] 当前任务: "
     task_text = current_task or "无"
-    task_available = None
-    if isinstance(width, int) and width > 0:
-        task_available = max(0, width - len(task_prefix))
-
-    if task_available is not None:
-        task_text = clip_display_text(task_text, task_available)
-
-    if color and task_text:
-        task_line = task_prefix + ANSI_GREEN + task_text + ANSI_RESET
+    header_width = max(20, int(width or 80))
+    inner_width = max(1, header_width - 4)
+    task_prefix_width = display_text_width(task_prefix)
+    if task_prefix_width >= inner_width:
+        plain_task_content = clip_display_text(task_prefix + task_text, inner_width)
+        rendered_task_content = plain_task_content
     else:
-        task_line = task_prefix + task_text
+        task_available = max(0, inner_width - task_prefix_width)
+        task_text = clip_display_text(task_text, task_available)
+        plain_task_content = task_prefix + task_text
+        if color and task_text:
+            rendered_task_content = task_prefix + ANSI_GREEN + task_text + ANSI_RESET
+        else:
+            rendered_task_content = plain_task_content
 
     meta_prefix = "[agent] "
     meta_parts = build_live_meta_parts(
@@ -331,14 +398,19 @@ def render_live_header_lines(current_task, elapsed_seconds=None, log_path=None, 
         log_note=log_note,
     )
     meta_text = " | ".join(meta_parts) if meta_parts else "等待输出"
-    meta_available = None
-    if isinstance(width, int) and width > 0:
-        meta_available = max(0, width - len(meta_prefix))
-    if meta_available is not None:
+    meta_prefix_width = display_text_width(meta_prefix)
+    if meta_prefix_width >= inner_width:
+        plain_meta_content = clip_display_text(meta_prefix + meta_text, inner_width)
+    else:
+        meta_available = max(0, inner_width - meta_prefix_width)
         meta_text = clip_display_text(meta_text, meta_available)
-    meta_line = meta_prefix + meta_text
+        plain_meta_content = meta_prefix + meta_text
 
-    return task_line, meta_line
+    border_line = "+" + ("-" * (header_width - 2)) + "+"
+    task_line = "| " + rendered_task_content + (" " * max(0, inner_width - display_text_width(plain_task_content))) + " |"
+    meta_line = "| " + pad_display_text(plain_meta_content, inner_width) + " |"
+
+    return border_line, task_line, meta_line, border_line
 
 
 class LiveOutputDisplay:
@@ -351,8 +423,12 @@ class LiveOutputDisplay:
         self.current_task = "无"
         self.last_header = None
         self.pending_escape = ""
-        self.header_rows = 2
-        self.scroll_top = self.header_rows + 1
+        self.header_rows = 4
+        self.header_top = 1 + (detect_live_header_top_padding() if self.enabled else 0)
+        self.task_row = self.header_top + 1
+        self.meta_row = self.header_top + 2
+        self.border_bottom_row = self.header_top + 3
+        self.scroll_top = self.header_top + self.header_rows
         self.cursor_row = self.scroll_top
         self.cursor_col = 1
 
@@ -387,12 +463,24 @@ class LiveOutputDisplay:
                 self.cursor_col = min(max(1, next_stop), self.cols)
                 continue
 
-            if self.cursor_col >= self.cols:
+            char_width = max(0, min(self.cols, char_display_width(char)))
+            if char_width == 0:
+                continue
+
+            current_offset = self.cursor_col - 1
+            if current_offset + char_width > self.cols:
                 if self.cursor_row < self.rows:
                     self.cursor_row += 1
-                self.cursor_col = 1
+                current_offset = 0
+
+            if current_offset + char_width >= self.cols:
+                if self.cursor_row < self.rows:
+                    self.cursor_row += 1
+                    self.cursor_col = 1
+                else:
+                    self.cursor_col = self.cols
             else:
-                self.cursor_col += 1
+                self.cursor_col = current_offset + char_width + 1
 
         self._clamp_cursor()
 
@@ -412,7 +500,7 @@ class LiveOutputDisplay:
         if plain_header == self.last_header and not force:
             return
 
-        rendered_task, rendered_meta = render_live_header_lines(
+        rendered_border_top, rendered_task, rendered_meta, rendered_border_bottom = render_live_header_lines(
             self.current_task,
             elapsed_seconds=elapsed_seconds,
             log_path=log_path,
@@ -422,12 +510,18 @@ class LiveOutputDisplay:
         )
 
         self._clamp_cursor()
-        self._write("\x1b[1;1H")
+        self._write(f"\x1b[{self.header_top};1H")
+        self._write("\x1b[2K")
+        self._write(rendered_border_top)
+        self._write(f"\x1b[{self.task_row};1H")
         self._write("\x1b[2K")
         self._write(rendered_task)
-        self._write("\x1b[2;1H")
+        self._write(f"\x1b[{self.meta_row};1H")
         self._write("\x1b[2K")
         self._write(rendered_meta)
+        self._write(f"\x1b[{self.border_bottom_row};1H")
+        self._write("\x1b[2K")
+        self._write(rendered_border_bottom)
         self._write(f"\x1b[{self.cursor_row};{self.cursor_col}H")
         self._flush()
         self.last_header = plain_header
