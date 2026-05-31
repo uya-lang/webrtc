@@ -589,6 +589,114 @@ fn dtls_test_check_ecdhe_generated_key_share() i32 {
     return 0;
 }
 
+fn dtls_test_check_finished_roundtrip() i32 {
+    var body: [byte: 12] = [
+        0x36 as byte, 0x7d as byte, 0x2f as byte, 0x44 as byte,
+        0xff as byte, 0xea as byte, 0xb3 as byte, 0x70 as byte,
+        0xff as byte, 0x98 as byte, 0x66 as byte, 0xb2 as byte,
+    ];
+    const parsed: !DtlsFinished = dtls_finished_parse(body[0:12]);
+    if parsed.error_id != 0 {
+        return 125;
+    }
+    const verify_data: &[byte] = parsed.value.verify_data;
+    if verify_data.len != 12usize || verify_data[0] != 0x36 as byte || verify_data[11] != 0xb2 as byte {
+        return 126;
+    }
+    var out: [byte: 16] = [];
+    const written: !usize = dtls_finished_write(&parsed.value, out[0:16]);
+    if written.error_id != 0 || written.value != 12usize {
+        return 127;
+    }
+    var index: usize = 0usize;
+    while index < 12usize {
+        if out[index] != body[index] {
+            return 128;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_finished_invalid_cases() i32 {
+    var short_body: [byte: 11] = [
+        0x36 as byte, 0x7d as byte, 0x2f as byte, 0x44 as byte,
+        0xff as byte, 0xea as byte, 0xb3 as byte, 0x70 as byte,
+        0xff as byte, 0x98 as byte, 0x66 as byte,
+    ];
+    if dtls_finished_parse(short_body[0:11]).error_id == 0 {
+        return 129;
+    }
+
+    var bad_message: DtlsFinished = DtlsFinished{
+        verify_data: short_body[0:11],
+    };
+    var out: [byte: 16] = [];
+    if dtls_finished_write(&bad_message, out[0:16]).error_id == 0 {
+        return 130;
+    }
+    return 0;
+}
+
+fn dtls_test_check_finished_verify_data_vectors() i32 {
+    var master_secret: [byte: 48] = [
+        0x00 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte,
+        0x88 as byte, 0x99 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte, 0xee as byte, 0xff as byte,
+        0x10 as byte, 0x21 as byte, 0x32 as byte, 0x43 as byte, 0x54 as byte, 0x65 as byte, 0x76 as byte, 0x87 as byte,
+        0x98 as byte, 0xa9 as byte, 0xba as byte, 0xcb as byte, 0xdc as byte, 0xed as byte, 0xfe as byte, 0x0f as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x99 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte, 0xee as byte, 0xff as byte, 0x00 as byte,
+    ];
+    var transcript_hash: [byte: 32] = [
+        0x6a as byte, 0xe1 as byte, 0x6d as byte, 0x58 as byte, 0x4f as byte, 0x9c as byte, 0x7c as byte, 0x9f as byte,
+        0x26 as byte, 0x73 as byte, 0xec as byte, 0x1f as byte, 0x3f as byte, 0x6f as byte, 0x6a as byte, 0x0b as byte,
+        0x0c as byte, 0x4d as byte, 0x3b as byte, 0x2a as byte, 0x19 as byte, 0x08 as byte, 0x07 as byte, 0x06 as byte,
+        0x05 as byte, 0x04 as byte, 0x03 as byte, 0x02 as byte, 0x01 as byte, 0x00 as byte, 0xff as byte, 0xee as byte,
+    ];
+    var expected_client: [byte: 12] = [
+        0x36 as byte, 0x7d as byte, 0x2f as byte, 0x44 as byte,
+        0xff as byte, 0xea as byte, 0xb3 as byte, 0x70 as byte,
+        0xff as byte, 0x98 as byte, 0x66 as byte, 0xb2 as byte,
+    ];
+    var expected_server: [byte: 12] = [
+        0x96 as byte, 0x7b as byte, 0x3b as byte, 0x06 as byte,
+        0x31 as byte, 0xe3 as byte, 0xac as byte, 0x67 as byte,
+        0xec as byte, 0x11 as byte, 0x1b as byte, 0x2e as byte,
+    ];
+    var actual_client: [byte: 12] = [];
+    var actual_server: [byte: 12] = [];
+    if dtls_finished_verify_data_compute(master_secret[0:48], transcript_hash[0:32], true, actual_client[0:12]).error_id != 0 {
+        return 131;
+    }
+    if dtls_finished_verify_data_compute(master_secret[0:48], transcript_hash[0:32], false, actual_server[0:12]).error_id != 0 {
+        return 132;
+    }
+    var index: usize = 0usize;
+    while index < 12usize {
+        if actual_client[index] != expected_client[index] {
+            return 133;
+        }
+        if actual_server[index] != expected_server[index] {
+            return 134;
+        }
+        index = index + 1usize;
+    }
+    var client_message: DtlsFinished = DtlsFinished{
+        verify_data: expected_client[0:12],
+    };
+    if dtls_finished_verify(&client_message, master_secret[0:48], transcript_hash[0:32], true).error_id != 0 {
+        return 135;
+    }
+    if dtls_finished_verify(&client_message, master_secret[0:48], transcript_hash[0:32], false).error_id == 0 {
+        return 136;
+    }
+    expected_client[0] = expected_client[0] ^ (1 as byte);
+    if dtls_finished_verify(&client_message, master_secret[0:48], transcript_hash[0:32], true).error_id == 0 {
+        return 137;
+    }
+    return 0;
+}
+
 fn dtls_test_check_exporter_reference_cases() i32 {
     return 0;
 }
@@ -682,6 +790,24 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_ecdhe_generated_key_share();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_finished_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_finished_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_finished_verify_data_vectors();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;

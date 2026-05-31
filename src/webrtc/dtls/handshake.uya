@@ -3,6 +3,7 @@
 
 use webrtc.binary;
 use webrtc.crypto.csprng;
+use webrtc.crypto.hmac;
 use webrtc.crypto.p256;
 use webrtc.dtls.model;
 use webrtc.errors;
@@ -17,6 +18,9 @@ export const DTLS_NAMED_CURVE_SECP256R1: u16 = 23u16;
 export const DTLS_HASH_ALGORITHM_SHA256: u8 = 4u8;
 export const DTLS_SIGNATURE_ALGORITHM_ECDSA: u8 = 3u8;
 export const DTLS_ECDHE_KEY_SHARE_GENERATION_ATTEMPTS: usize = 16usize;
+export const DTLS_FINISHED_VERIFY_DATA_BYTES: usize = 12usize;
+export const DTLS_MASTER_SECRET_BYTES: usize = 48usize;
+export const DTLS_FINISHED_TRANSCRIPT_HASH_BYTES: usize = 32usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -80,6 +84,10 @@ export fn dtls_ecdhe_key_share_make() DtlsEcdheKeyShare {
         public_key: public_key,
         public_key_len: 0usize,
     };
+}
+
+export struct DtlsFinished {
+    verify_data: &[byte] = [],
 }
 
 export struct DtlsHandshakeFragment {
@@ -277,6 +285,50 @@ fn dtls_client_key_exchange_validate(message: &DtlsClientKeyExchange) !usize {
         return error.UnsupportedCapability;
     }
     return total_length;
+}
+
+fn dtls_finished_validate(message: &DtlsFinished) !void {
+    if message == null || message.verify_data.len != DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return error.InvalidPacket;
+    }
+}
+
+fn dtls_tls12_p_hash_sha256(secret: &[byte], seed: &[byte], out: &[byte]) !void {
+    if out.len == 0usize {
+        return;
+    }
+
+    var a: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    var chunk: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    var buffer: [byte: 64] = [];
+    try crypto_hmac_sha256_digest(secret, seed, a[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES]);
+
+    var written: usize = 0usize;
+    while written < out.len {
+        var cursor: usize = 0usize;
+        var index: usize = 0usize;
+        while index < DTLS_FINISHED_TRANSCRIPT_HASH_BYTES {
+            buffer[cursor] = a[index];
+            cursor = cursor + 1usize;
+            index = index + 1usize;
+        }
+        index = 0usize;
+        while index < seed.len {
+            buffer[cursor] = seed[index];
+            cursor = cursor + 1usize;
+            index = index + 1usize;
+        }
+
+        try crypto_hmac_sha256_digest(secret, buffer[0:cursor], chunk[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES]);
+        index = 0usize;
+        while index < DTLS_FINISHED_TRANSCRIPT_HASH_BYTES && written < out.len {
+            out[written] = chunk[index];
+            written = written + 1usize;
+            index = index + 1usize;
+        }
+
+        try crypto_hmac_sha256_digest(secret, a[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES], a[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES]);
+    }
 }
 
 export fn dtls_client_hello_parse(body: &[byte]) !DtlsClientHello {
@@ -720,6 +772,87 @@ export fn dtls_ecdhe_p256_key_share_generate(share: &DtlsEcdheKeyShare) !void {
 export fn dtls_ecdhe_p256_shared_secret(private_key: &[byte], peer_public_key: &[byte], shared_secret_out: &[byte]) !void {
     try dtls_ecdhe_public_key_validate(peer_public_key);
     return crypto_p256_ecdh_shared_secret(private_key, peer_public_key, shared_secret_out);
+}
+
+export fn dtls_finished_parse(body: &[byte]) !DtlsFinished {
+    if body.len < DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return error.PacketTooShort;
+    }
+    if body.len != DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return error.InvalidPacket;
+    }
+    return DtlsFinished{
+        verify_data: body[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    };
+}
+
+export fn dtls_finished_write(message: &DtlsFinished, out: &[byte]) !usize {
+    try dtls_finished_validate(message);
+    if out.len < DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    var index: usize = 0usize;
+    while index < DTLS_FINISHED_VERIFY_DATA_BYTES {
+        out[index] = message.verify_data[index];
+        index = index + 1usize;
+    }
+    return DTLS_FINISHED_VERIFY_DATA_BYTES;
+}
+
+export fn dtls_finished_verify_data_compute(master_secret: &[byte], transcript_hash: &[byte], client_finished: bool, out: &[byte]) !void {
+    if master_secret.len != DTLS_MASTER_SECRET_BYTES
+        || transcript_hash.len != DTLS_FINISHED_TRANSCRIPT_HASH_BYTES
+        || out.len < DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var client_label: [byte: 15] = [
+        'c' as byte, 'l' as byte, 'i' as byte, 'e' as byte, 'n' as byte,
+        't' as byte, ' ' as byte, 'f' as byte, 'i' as byte, 'n' as byte,
+        'i' as byte, 's' as byte, 'h' as byte, 'e' as byte, 'd' as byte,
+    ];
+    var server_label: [byte: 15] = [
+        's' as byte, 'e' as byte, 'r' as byte, 'v' as byte, 'e' as byte,
+        'r' as byte, ' ' as byte, 'f' as byte, 'i' as byte, 'n' as byte,
+        'i' as byte, 's' as byte, 'h' as byte, 'e' as byte, 'd' as byte,
+    ];
+    var seed: [byte: 47] = [];
+    var cursor: usize = 0usize;
+    var label: &[byte] = server_label[0:15];
+    if client_finished {
+        label = client_label[0:15];
+    }
+
+    var index: usize = 0usize;
+    while index < label.len {
+        seed[cursor] = label[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < transcript_hash.len {
+        seed[cursor] = transcript_hash[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+
+    return dtls_tls12_p_hash_sha256(master_secret, seed[0:cursor], out[0:DTLS_FINISHED_VERIFY_DATA_BYTES]);
+}
+
+export fn dtls_finished_verify(message: &DtlsFinished, master_secret: &[byte], transcript_hash: &[byte], client_finished: bool) !void {
+    try dtls_finished_validate(message);
+
+    var expected: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    try dtls_finished_verify_data_compute(
+        master_secret,
+        transcript_hash,
+        client_finished,
+        expected[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    );
+    if !constant_time_bytes_equal(message.verify_data, expected[0:DTLS_FINISHED_VERIFY_DATA_BYTES]) {
+        return error.IntegrityCheckFailed;
+    }
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {
