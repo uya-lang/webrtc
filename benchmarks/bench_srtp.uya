@@ -1,0 +1,132 @@
+// SRTP protect/unprotect benchmark
+
+use std.bench;
+use std.time;
+use webrtc.binary;
+use webrtc.srtp.model;
+use webrtc.srtp.srtp;
+
+fn main() {
+    var ctx = model.SrtpContext{};
+    
+    // Master key and salt (from DTLS-SRTP key derivation)
+    var master_key: [byte] = [
+        0x0b, 0x0b,0x0b, 0x0b, 0x0b,0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+    ];
+    var master_salt: [byte] = [
+        0x00, 0x01,0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    ];
+    var ssrc: u32 = 0x12345678;
+    
+    // Derive session keys
+    var cipher_key: [byte: 16] = undefined;
+    var cipher_salt: [byte: 14] = undefined;
+    var auth_key: [byte: 20] = undefined;
+    srtp.srtp_derive_session_keys(
+        &ctx,
+        master_key,
+        master_salt,
+        ssrc,
+        cipher_key[0..16],
+        cipher_salt[0..14],
+        auth_key[0..20],
+    );
+    
+    ctx.profile = model.SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+    ctx.cipher_key = cipher_key;
+    ctx.cipher_salt = cipher_salt;
+    ctx.auth_key = auth_key;
+    ctx.s_largest_index = 0;
+    ctx.roc = 0;
+    
+    // Create test RTP packet (typical audio packet)
+    var rtp_header: [byte: 12] = [
+        0x80, 0x08, // V=2, P=0, X=0, CC=0, M=0, PT=8 (PCMA)
+        0x00, 0x01, // Sequence number
+        0x00, 0x00, 0x00, 0xa0, // Timestamp
+        0x12, 0x34, 0x56, 0x78, // SSRC
+    ];
+    var payload: [byte: 160] = undefined; // 20ms PCMA audio
+    for (var i = 0; i< 160; i += 1) {
+        payload[i] = @as(u8, @intCast(i % 256));
+    }
+    
+    var rtp_packet: [byte: 172] = undefined;
+    @memcpy(rtp_packet[0..12], rtp_header[0..12]);
+    @memcpy(rtp_packet[12..172], payload[0..160]);
+    
+    var srtp_packet: [byte: 182] = undefined; // RTP + 10-byte auth tag
+    
+    // Benchmark protect
+    var protect_duration: u64 = 0;
+    const protect_iterations = 10000;
+    var protect_start = time.nanoTimestamp();
+    var i: usize = 0;
+    while (i< protect_iterations) : (i += 1) {
+        _ = srtp.srtp_protect(&ctx, rtp_packet[0..172], srtp_packet[0..182]);
+    }
+    var protect_end = time.nanoTimestamp();
+    protect_duration = @intCast(protect_end - protect_start);
+    
+    const protect_ns_per_op = protect_duration / protect_iterations;
+    const protect_mbps = (@as(f64, @floatFromInt(172 * protect_iterations)) / @as(f64, @floatFromInt(protect_duration))) * 1e9 / 1e6;
+    
+    std.debug.print("SRTP protect (172-byte packet):\n", .{});
+    std.debug.print("  Iterations: {d}\n", .{protect_iterations});
+    std.debug.print("  Total time: {d} us\n", .{protect_duration / 1000});
+    std.debug.print("  Per op: {d} ns\n", .{protect_ns_per_op});
+    std.debug.print("  Throughput: {d:.2} MB/s\n", .{protect_mbps});
+    std.debug.print("\n", .{});
+    
+    // Reset context for unprotect benchmark
+    ctx.s_largest_index = 0;
+    ctx.roc = 0;
+    
+    // Protect one packet first
+    _ = srtp.srtp_protect(&ctx, rtp_packet[0..172], srtp_packet[0..182]);
+    
+    // Benchmark unprotect
+    var unprotect_duration: u64 = 0;
+    const unprotect_iterations = 10000;
+    var unprotect_start = time.nanoTimestamp();
+    i = 0;
+    while (i< unprotect_iterations) : (i += 1) {
+        _ = srtp.srtp_unprotect(&ctx, srtp_packet[0..182], rtp_packet[0..172]);
+    }
+    var unprotect_end = time.nanoTimestamp();
+    unprotect_duration = @intCast(unprotect_end - unprotect_start);
+    
+    const unprotect_ns_per_op = unprotect_duration / unprotect_iterations;
+    const unprotect_mbps = (@as(f64, @floatFromInt(172 * unprotect_iterations)) / @as(f64, @floatFromInt(unprotect_duration))) * 1e9 / 1e6;
+    
+    std.debug.print("SRTP unprotect (172-byte packet):\n", .{});
+    std.debug.print("  Iterations: {d}\n", .{unprotect_iterations});
+    std.debug.print("  Total time: {d} us\n", .{unprotect_duration / 1000});
+    std.debug.print("  Per op: {d} ns\n", .{unprotect_ns_per_op});
+    std.debug.print("  Throughput: {d:.2} MB/s\n", .{unprotect_mbps});
+    std.debug.print("\n", .{});
+    
+    // Replay protection benchmark
+    ctx.s_largest_index = 0;
+    ctx.roc = 0;
+    
+    var replay_duration: u64 = 0;
+    const replay_iterations = 100000;
+    var replay_start = time.nanoTimestamp();
+    i = 0;
+    while (i< replay_iterations) : (i += 1) {
+        ctx.s_largest_index = i;
+        _ = srtp.srtp_replay_check(&ctx, i + 1);
+    }
+    var replay_end = time.nanoTimestamp();
+    replay_duration = @intCast(replay_end - replay_start);
+    
+    const replay_ns_per_op = replay_duration / replay_iterations;
+    
+    std.debug.print("Replay check (sequential):\n", .{});
+    std.debug.print("  Iterations: {d}\n", .{replay_iterations});
+    std.debug.print("  Total time: {d} us\n", .{replay_duration / 1000});
+    std.debug.print("  Per op: {d} ns\n", .{replay_ns_per_op});
+}

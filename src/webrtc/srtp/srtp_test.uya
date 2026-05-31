@@ -1,0 +1,180 @@
+// SRTP implementation tests
+
+const std = @import("std");
+const testing = std.testing;
+const srtp = @import("srtp.uya");
+const model = @import("model.uya");
+
+test "srtp_derive_session_keys" {
+    var ctx = model.SrtpContext{};
+    
+    // Test vector from RFC 3711
+    var master_key: [16]u8 = [16]u8{
+        0xE1, 0xF9, 0x7A, 0x0D, 0x3E, 0x01, 0x8B, 0xE0,
+        0xD6, 0x4F, 0xA3, 0x2C, 0x06, 0xDE, 0x41, 0x39,
+    };
+    var master_salt: [14]u8 = [14]u8{
+        0x0E, 0xC6, 0x75, 0xAD, 0x49, 0x8A, 0xFE, 0xEB,
+        0xB6, 0x96, 0x0B, 0x3A, 0xAB, 0xE6,
+    };
+    var ssrc: u32 = 0x12345678;
+    
+    var cipher_key: [16]u8 = undefined;
+    var cipher_salt: [14]u8 = undefined;
+    var auth_key: [20]u8 = undefined;
+    
+    try srtp.srtp_derive_session_keys(
+        &ctx,
+        &master_key,
+        &master_salt,
+        ssrc,
+        &cipher_key,
+        &cipher_salt,
+        &auth_key,
+    );
+    
+    // Verify derived keys are non-zero
+    var all_zero = true;
+    for (cipher_key) |byte| {
+        if (byte != 0) all_zero = false;
+    }
+    try testing.expect(!all_zero);
+}
+
+test "srtp_replay_check" {
+    var ctx = model.SrtpContext{};
+    ctx.s_largest_index = 0;
+    
+    // First packet should be accepted
+    try testing.expect(srtp.srtp_replay_check(&ctx, 0));
+    ctx.s_largest_index = 0;
+    
+    // Sequential packets should be accepted
+    try testing.expect(srtp.srtp_replay_check(&ctx, 1));
+    ctx.s_largest_index = 1;
+    
+    try testing.expect(srtp.srtp_replay_check(&ctx, 2));
+    ctx.s_largest_index = 2;
+    
+    // Replay should be rejected
+    try testing.expect(!srtp.srtp_replay_check(&ctx, 1));
+    
+    // Old packet within window should be rejected
+    ctx.s_largest_index = 100;
+    try testing.expect(!srtp.srtp_replay_check(&ctx, 50));
+    
+    // Very old packet should be rejected
+    try testing.expect(!srtp.srtp_replay_check(&ctx, 0));
+}
+
+test "srtp_protect_unprotect" {
+    var ctx = model.SrtpContext{};
+    
+    // Setup context
+    var master_key: [16]u8 = [16]u8{
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+    };
+    var master_salt: [14]u8 = [14]u8{
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+    };
+    var ssrc: u32 = 0x12345678;
+    
+    var cipher_key: [16]u8 = undefined;
+    var cipher_salt: [14]u8 = undefined;
+    var auth_key: [20]u8 = undefined;
+    
+    try srtp.srtp_derive_session_keys(
+        &ctx,
+        &master_key,
+        &master_salt,
+        ssrc,
+        &cipher_key,
+        &cipher_salt,
+        &auth_key,
+    );
+    
+    ctx.profile = model.SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+    ctx.cipher_key = cipher_key;
+    ctx.cipher_salt = cipher_salt;
+    ctx.auth_key = auth_key;
+    ctx.s_largest_index = 0;
+    ctx.roc = 0;
+    
+    // Create test RTP packet
+    var rtp_packet: [172]u8 = undefined;
+    rtp_packet[0] = 0x80;
+    rtp_packet[1] = 0x08;
+    rtp_packet[2] = 0x00;
+    rtp_packet[3] = 0x01;
+    rtp_packet[4] = 0x00;
+    rtp_packet[5] = 0x00;
+    rtp_packet[6] = 0x00;
+    rtp_packet[7] = 0xa0;
+    rtp_packet[8] = 0x12;
+    rtp_packet[9] = 0x34;
+    rtp_packet[10] = 0x56;
+    rtp_packet[11] = 0x78;
+    
+    // Fill payload
+    var i: usize = 12;
+    while (i< 172) : (i += 1) {
+        rtp_packet[i] = @intCast(i % 256);
+    }
+    
+    var srtp_packet: [182]u8 = undefined;
+    
+    // Protect
+    const protected_len = try srtp.srtp_protect(&ctx, rtp_packet[0..172], srtp_packet[0..182]);
+    try testing.expectEqual(@as(usize, 182), protected_len);
+    
+    // Verify header is unchanged
+    try testing.expectEqual(rtp_packet[0], srtp_packet[0]);
+    try testing.expectEqual(rtp_packet[1], srtp_packet[1]);
+    
+    // Verify payload is encrypted (different from original)
+    var payload_changed = false;
+    i = 12;
+    while (i< 172) : (i += 1) {
+        if (rtp_packet[i] != srtp_packet[i]) {
+            payload_changed = true;
+            break;
+        }
+    }
+    try testing.expect(payload_changed);
+    
+    // Unprotect
+    var recovered_packet: [172]u8 = undefined;
+    const unprotected_len = try srtp.srtp_unprotect(&ctx, srtp_packet[0..182], recovered_packet[0..172]);
+    try testing.expectEqual(@as(usize, 172), unprotected_len);
+    
+    // Verify recovered packet matches original
+    for (rtp_packet[0..172], 0..) |byte, idx| {
+        try testing.expectEqual(byte, recovered_packet[idx]);
+    }
+}
+
+test "srtp_index_guess" {
+    var ctx = model.SrtpContext{};
+    ctx.roc = 0;
+    ctx.s_largest_index = 0;
+    
+    // Sequential packets
+    var index = srtp.srtp_index_guess(&ctx, 1, 0);
+    try testing.expectEqual(@as(u64, 1), index);
+    
+    ctx.s_largest_index = 1;
+    index = srtp.srtp_index_guess(&ctx, 2, 1);
+    try testing.expectEqual(@as(u64, 2), index);
+    
+    // Wrap around
+    ctx.roc = 0;
+    ctx.s_largest_index = 0xFFFE;
+    index = srtp.srtp_index_guess(&ctx, 0xFFFF, 0xFFFE);
+    try testing.expectEqual(@as(u64, 0xFFFF), index);
+    
+    ctx.s_largest_index = 0xFFFF;
+    index = srtp.srtp_index_guess(&ctx, 0, 0xFFFF);
+    try testing.expectEqual(@as(u64, 0x10000), index); // ROC incremented
+}

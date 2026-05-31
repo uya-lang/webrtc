@@ -1,0 +1,210 @@
+// webrtc.rtp.extension - RTP header extensions
+// Module: src/webrtc/rtp/rtp_extension.uya → use webrtc.rtp.extension;
+// RFC 5285
+
+use webrtc.binary;
+
+export error RtpExtensionInvalidId;
+export error RtpExtensionInvalidLength;
+export error RtpExtensionBufferTooSmall;
+
+export const RTP_EXTENSION_ONE_BYTE_PROFILE: u16 = 0xBEDEu16;
+export const RTP_EXTENSION_TWO_BYTE_PROFILE: u16 = 0x1000u16;
+
+export struct RtpExtension {
+    id: u8 = 0u8,
+    data: &[byte] = [],
+}
+
+export fn rtp_extension_make() RtpExtension {
+    var empty_bytes: [byte: 1] = [];
+    return RtpExtension{
+        id: 0u8,
+        data: empty_bytes[0:0],
+    };
+}
+
+export fn rtp_extension_parse_one_byte(
+    data: &[byte],
+    extensions: &mut [RtpExtension],
+) !usize {
+    if data.len< 2usize {
+        return error.RtpExtensionInvalidLength;
+    }
+    
+    var offset: usize = 0usize;
+    var count: usize = 0usize;
+    var max_count: usize = extensions.len;
+    
+    while offset< data.len {
+        if count >= max_count {
+            break;
+        }
+        
+        var byte: u8 =data[offset];
+        offset = offset+ 1usize;
+        
+if byte ==0u8 {
+            continue;
+        }
+        
+        var id: u8 =(byte >>4) &0x0Fu8;
+var len: usize= ((byte &0x0Fu8) as usize)+ 1usize;
+        
+if id ==0u8 ||id == 15u8 {
+            continue;
+        }
+        
+        if offset+ len > data.len {
+return error.RtpExtensionInvalidLength;
+        }
+        
+        extensions[count].id = id;
+        extensions[count].data =data[offset:offset+ len];
+        count = count+ 1usize;
+        offset= offset + len;
+    }
+    
+    returncount;
+}
+
+export fn rtp_extension_write_one_byte(
+    extensions: &[RtpExtension],
+    buffer:&[byte],
+) !usize {
+    var offset: usize =0usize;
+    
+    vari: usize =0usize;
+    while i< extensions.len {
+        var ext: &RtpExtension = extensions[i];
+        
+        if ext.id == 0u8 || ext.id == 15u8 {
+            i = i + 1usize;
+            continue;
+        }
+        
+        if ext.data.len == 0usize || ext.data.len >16usize {
+            i =i +1usize;
+            continue;
+        }
+
+        if offset +1usize +ext.data.len >buffer.len {
+            return error.RtpExtensionBufferTooSmall;
+}
+        
+var byte: u8 = ((ext.id &0x0Fu8) << 4) | ((ext.data.len - 1usize) as u8);
+        buffer[offset] = byte;
+        offset = offset + 1usize;
+        
+        var j: usize = 0usize;
+        while j< ext.data.len {
+            buffer[offset + j] = ext.data[j];
+            j = j + 1usize;
+        }
+        offset = offset + ext.data.len;
+        
+        i = i + 1usize;
+    }
+    
+    var padding: usize = (4usize - (offset % 4usize)) % 4usize;
+    var k: usize = 0usize;
+    while k< padding {
+        if offset + k >= buffer.len {
+            return error.RtpExtensionBufferTooSmall;
+        }
+buffer[offset + k] = 0u8;
+        k = k+ 1usize;
+    }
+    offset =offset + padding;
+    
+    returnoffset;
+}
+
+export fn rtp_extension_parse_two_byte(
+data: &[byte],
+    extensions: &mut [RtpExtension],
+) !usize{
+    ifdata.len< 2usize {
+        return error.RtpExtensionInvalidLength;
+    }
+    
+    var offset: usize = 0usize;
+    var count: usize = 0usize;
+    var max_count: usize = extensions.len;
+    
+    while offset< data.len {
+        if count >=max_count {
+            break;
+        }
+
+        if offset +2usize >data.len {
+            break;
+        }
+
+        var id:u8 = data[offset];
+var len: usize=(data[offset +1usize])as usize;
+        offset = offset+ 2usize;
+        
+if id ==0u8 {
+            continue;
+        }
+        
+        if offset+ len > data.len {
+return error.RtpExtensionInvalidLength;
+        }
+        
+        extensions[count].id = id;
+        extensions[count].data =data[offset:offset+ len];
+        count = count+ 1usize;
+        offset= offset + len;
+    }
+    
+    returncount;
+}
+
+export fn rtp_extension_write_two_byte(
+extensions: &[RtpExtension],
+    buffer: &[byte],
+)!usize {
+    var offset:usize = 0usize;
+
+    var i:usize = 0usize;
+while i< extensions.len {
+        var ext: &RtpExtension = extensions[i];
+        
+        if ext.id == 0u8 {
+            i = i + 1usize;
+            continue;
+        }
+        
+        if offset + 2usize + ext.data.len > buffer.len{
+            returnerror.RtpExtensionBufferTooSmall;
+        }
+        
+        buffer[offset] = ext.id;
+        buffer[offset + 1usize] = (ext.data.len &0xFFu8) as u8;
+offset = offset +2usize;
+        
+        varj: usize =0usize;
+        while j< ext.data.len {
+            buffer[offset + j] = ext.data[j];
+            j = j + 1usize;
+        }
+        offset = offset + ext.data.len;
+        
+        i = i + 1usize;
+    }
+    
+    var padding: usize = (4usize - (offset % 4usize)) % 4usize;
+    var k: usize = 0usize;
+    while k< padding {
+        if offset + k >= buffer.len {
+return error.RtpExtensionBufferTooSmall;
+        }
+        buffer[offset+ k] =0u8;
+        k= k +1usize;
+    }
+offset = offset +padding;
+
+    return offset;
+}

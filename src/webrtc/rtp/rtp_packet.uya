@@ -1,0 +1,240 @@
+// webrtc.rtp.packet - RTP packet parser and writer
+// Module: src/webrtc/rtp/rtp_packet.uya → use webrtc.rtp.packet;
+// RFC 3550 Section 5.1
+
+use webrtc.binary;
+
+export error RtpPacketTooSmall;
+export error RtpInvalidVersion;
+export error RtpInvalidHeaderLength;
+export error RtpInvalidExtensionLength;
+export error RtpInvalidPaddingLength;
+
+export const RTP_HEADER_MIN_BYTES: usize = 12usize;
+export const RTP_EXTENSION_HEADER_BYTES: usize = 4usize;
+
+export struct RtpHeader {
+    version: u8 = 0u8,
+    padding: bool = false,
+    extension: bool = false,
+    csrc_count: u8 = 0u8,
+    marker: bool = false,
+    payload_type: u8 = 0u8,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+    ssrc: u32 = 0u32,
+    csrc: [u32: 15] = [],
+    extension_profile: u16 = 0u16,
+    extension_data: &[byte] = [],
+    payload: &[byte] = [],
+    padding_size: usize = 0usize,
+}
+
+export struct RtpPacket {
+    header: RtpHeader = RtpHeader{},
+    raw: &[byte] = [],
+}
+
+export fn rtp_header_make() RtpHeader {
+    var csrc: [u32: 15] = [];
+    var empty_bytes: [byte: 1] = [];
+    return RtpHeader{
+        version: 2u8,
+        padding: false,
+        extension: false,
+        csrc_count: 0u8,
+        marker: false,
+        payload_type: 0u8,
+        sequence_number: 0u16,
+        timestamp: 0u32,
+        ssrc: 0u32,
+        csrc: csrc,
+        extension_profile: 0u16,
+        extension_data: empty_bytes[0:0],
+        payload: empty_bytes[0:0],
+        padding_size: 0usize,
+    };
+}
+
+export fn rtp_packet_parse(data: &[byte]) !RtpPacket {
+    if data.len< RTP_HEADER_MIN_BYTES {
+        return error.RtpPacketTooSmall;
+    }
+    
+    var reader: ByteReader = ByteReader{ bytes: data, cursor: 0usize };
+    
+    var first_byte: u8 = data[0];
+    var version: u8 = (first_byte >>6) &0x03u8;
+if version !=2u8 {
+        return error.RtpInvalidVersion;
+    }
+    
+    varpadding: bool =((first_byte >>5) &0x01u8)!= 0u8;
+var extension: bool= ((first_byte>> 4)& 0x01u8) != 0u8;
+    var csrc_count: u8= first_byte &0x0Fu8;
+    
+var second_byte:u8 = data[1];
+    var marker:bool = ((second_byte >>7) &0x01u8) !=0u8;
+    varpayload_type: u8 = second_byte& 0x7Fu8;
+    
+    varsequence_number: u16 = tryread_be_u16(data[2:4]);
+    var timestamp:u32 =try read_be_u32(data[4:8]);
+    var ssrc: u32 = try read_be_u32(data[8:12]);
+    
+    var header: RtpHeader=rtp_header_make();
+    header.version = version;
+    header.padding= padding;
+    header.extension =extension;
+header.csrc_count= csrc_count;
+    header.marker = marker;
+    header.payload_type = payload_type;
+    header.sequence_number = sequence_number;
+header.timestamp = timestamp;
+    header.ssrc = ssrc;
+
+    var offset:usize = 12usize;
+    
+    ifcsrc_count >0u8{
+var csrc_len: usize = (csrc_count asusize) *4usize;
+        if offset +csrc_len >data.len {
+            return error.RtpInvalidHeaderLength;
+        }
+        var i: usize =0usize;
+        while i< (csrc_count as usize) {
+            var csrc_start: usize = offset + (i * 4usize);
+            header.csrc[i] = try read_be_u32(data[csrc_start:csrc_start + 4]);
+            i = i + 1usize;
+        }
+        offset = offset + csrc_len;
+    }
+    
+    if extension {
+        if offset + RTP_EXTENSION_HEADER_BYTES > data.len {
+return error.RtpInvalidHeaderLength;
+}
+        header.extension_profile = tryread_be_u16(data[offset:offset +2]);
+var extension_length:usize = (tryread_be_u16(data[offset+ 2:offset + 4])) as usize;
+        var extension_bytes: usize =extension_length *4usize;
+        offset = offset+ RTP_EXTENSION_HEADER_BYTES;
+        
+        ifoffset + extension_bytes> data.len {
+            return error.RtpInvalidExtensionsLength;
+}
+        header.extension_data = data[offset:offset +extension_bytes];
+        offset = offset+ extension_bytes;
+    }
+    
+    var padding_size: usize =0usize;
+    if padding{
+        ifoffset >= data.len{
+            return error.RtpInvalidPaddingLength;
+}
+        padding_size = (data[data.len -1]) asusize;
+        if padding_size== 0usize|| offset + padding_size > data.len{
+            returnerror.RtpInvalidPaddingLength;
+        }
+}
+    
+header.padding_size =padding_size;
+    var payload_end: usize = data.len - padding_size;
+    ifoffset< payload_end {
+        header.payload = data[offset:payload_end];
+    } else {
+        var empty_bytes: [byte: 1] = [];
+        header.payload = empty_bytes[0:0];
+    }
+    
+    return RtpPacket{ header: header, raw: data };
+}
+
+export fn rtp_packet_write(
+    header: &RtpHeader,
+    payload: &[byte],
+    buffer: &[byte],
+) !usize {
+    if header == null {
+        return error.RtpPacketTooSmall;
+    }
+    
+    var csrc_len: usize = (header.csrc_count as usize) * 4usize;
+    var ext_len: usize = 0usize;
+    if header.extension {
+        ext_len = RTP_EXTENSION_HEADER_BYTES + header.extension_data.len;
+    }
+    var total_header: usize = RTP_HEADER_MIN_BYTES + csrc_len + ext_len;
+    var total_len: usize = total_header + payload.len + header.padding_size;
+    
+    if buffer.len< total_len {
+        return error.RtpPacketTooSmall;
+    }
+    
+    var first_byte: u8 = ((header.version & 0x03u8) << 6);
+    if header.padding {
+        first_byte = first_byte | 0x20u8;
+    }
+    if header.extension {
+        first_byte = first_byte | 0x10u8;
+    }
+    first_byte = first_byte | (header.csrc_count & 0x0Fu8);
+    buffer[0] = first_byte;
+    
+    var second_byte: u8 = 0u8;
+    if header.marker {
+        second_byte = second_byte | 0x80u8;
+    }
+    second_byte = second_byte | (header.payload_type & 0x7Fu8);
+    buffer[1] = second_byte;
+    
+    try write_be_u16(buffer[2:4], header.sequence_number);
+    try write_be_u32(buffer[4:8], header.timestamp);
+    try write_be_u32(buffer[8:12], header.ssrc);
+    
+    var offset: usize = 12usize;
+    var i: usize = 0usize;
+    while i< (header.csrc_count as usize) {
+        try write_be_u32(buffer[offset:offset + 4], header.csrc[i]);
+        offset = offset + 4usize;
+        i = i + 1usize;
+    }
+    
+    if header.extension {
+        try write_be_u16(buffer[offset:offset + 2], header.extension_profile);
+        var ext_words: u16 = (header.extension_data.len / 4) as u16;
+        try write_be_u16(buffer[offset + 2:offset + 4], ext_words);
+        offset = offset + RTP_EXTENSION_HEADER_BYTES;
+        
+        var j: usize = 0usize;
+        while j< header.extension_data.len {
+            buffer[offset + j] = header.extension_data[j];
+            j = j + 1usize;
+        }
+        offset = offset + header.extension_data.len;
+    }
+    
+    var k: usize = 0usize;
+    while k< payload.len {
+        buffer[offset + k] = payload[k];
+        k = k + 1usize;
+    }
+    offset = offset + payload.len;
+    
+    if header.padding_size > 0usize{
+        varp: usize =0usize;
+        while p< header.padding_size - 1usize {
+            buffer[offset + p] = 0u8;
+            p = p + 1usize;
+        }
+        buffer[offset + header.padding_size - 1usize] = (header.padding_size & 0xFF) as u8;
+    }
+    
+    return total_len;
+}
+
+export fn rtp_header_size(header: &RtpHeader) usize {
+    var size: usize = RTP_HEADER_MIN_BYTES;
+    size = size + ((header.csrc_count as usize) * 4usize);
+    if header.extension {
+        size = size + RTP_EXTENSION_HEADER_BYTES + header.extension_data.len;
+    }
+    return size;
+}

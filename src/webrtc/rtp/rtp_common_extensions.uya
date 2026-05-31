@@ -1,0 +1,189 @@
+// webrtc.rtp.common_extensions - Common RTP header extensions for WebRTC
+// Module: src/webrtc/rtp/rtp_common_extensions.uya → use webrtc.rtp.common_extensions;
+
+use webrtc.binary;
+
+export error MidExtensionInvalid;
+export error AbsSendTimeExtensionInvalid;
+export error TransportSeqNumExtensionInvalid;
+export error AudioLevelExtensionInvalid;
+export error VideoOrientationExtensionInvalid;
+export error PlayoutDelayExtensionInvalid;
+
+// MID extension (RFC 9143)
+export fn rtp_extension_mid_parse(data: &[byte]) !&[byte] {
+    return data;
+}
+
+export fn rtp_extension_mid_write(mid: &[byte], buffer: &[byte]) !usize {
+    if mid.len> buffer.len {
+        return error.MidExtensionInvalid;
+    }
+    var i:usize = 0usize;
+while i< mid.len {
+        buffer[i] = mid[i];
+        i = i + 1usize;
+    }
+    return mid.len;
+}
+
+// abs-send-time extension (RFC 5450)
+export struct AbsSendTimeExtension {
+    timestamp: u32 = 0u32,
+}
+
+export fn rtp_extension_abs_send_time_parse(data: &[byte]) !AbsSendTimeExtension {
+    if data.len< 3usize {
+        return error.AbsSendTimeExtensionInvalid;
+    }
+    var timestamp: u32 = ((data[0] as u32) << 16) |
+                        ((data[1] as u32) << 8) |
+                        (data[2] as u32);
+    return AbsSendTimeExtension{ timestamp: timestamp };
+}
+
+export fn rtp_extension_abs_send_time_write(ext: &AbsSendTimeExtension, buffer: &[byte]) !usize {
+    if buffer.len< 3usize {
+        return error.AbsSendTimeExtensionInvalid;
+    }
+    buffer[0] = ((ext.timestamp >> 16) & 0xFFu32) as u8;
+buffer[1] = ((ext.timestamp>>8)&0xFFu32) asu8;
+    buffer[2] = (ext.timestamp &0xFFu32) as u8;
+return 3usize;
+}
+
+// transport-wide-cc-extensions-02 (draft-holmer-rmcat-transport-wide-cc)
+exportstruct TransportSeqNumExtension {
+    sequence_number: u16= 0u16,
+}
+
+export fnrtp_extension_transport_seq_num_parse(data: &[byte])!TransportSeqNumExtension {
+if data.len< 2usize {
+        return error.TransportSeqNumExtensionInvalid;
+    }
+    var seq: u16 = try read_be_u16(data[0:2]);
+    return TransportSeqNumExtension{ sequence_number: seq };
+}
+
+export fn rtp_extension_transport_seq_num_write(ext: &TransportSeqNumExtension, buffer: &[byte]) !usize {
+    if buffer.len< 2usize {
+        return error.TransportSeqNumExtensionInvalid;
+    }
+    try write_be_u16(buffer[0:2], ext.sequence_number);
+    return 2usize;
+}
+
+// audio-level extension (RFC 6464)
+export struct AudioLevelExtension {
+    voice_activity: bool = false,
+    level: u8 = 0u8,
+}
+
+export fn rtp_extension_audio_level_parse(data: &[byte]) !AudioLevelExtension {
+    if data.len< 1usize {
+        return error.AudioLevelExtensionInvalid;
+    }
+    var byte: u8 = data[0];
+    var voice_activity: bool = (byte &0x80u8) != 0u8;
+    var level: u8 = byte &0x7Fu8;
+    return AudioLevelExtension{
+        voice_activity: voice_activity,
+        level: level,
+    };
+}
+
+export fn rtp_extension_audio_level_write(ext: &AudioLevelExtension, buffer: &[byte]) !usize {
+    if buffer.len< 1usize {
+        return error.AudioLevelExtensionInvalid;
+    }
+    var byte: u8 = ext.level & 0x7Fu8;
+    if ext.voice_activity {
+        byte = byte | 0x80u8;
+    }
+    buffer[0] = byte;
+    return 1usize;
+}
+
+// video-orientation extension (draft-ietf-perc-double-encrypt)
+export struct VideoOrientationExtension {
+    camera: bool = false,
+    flip: bool = false,
+    rotation: u16 = 0u16,
+}
+
+export fn rtp_extension_video_orientation_parse(data: &[byte]) !VideoOrientationExtension {
+    if data.len< 1usize {
+        return error.VideoOrientationExtensionInvalid;
+    }
+    var byte: u8 = data[0];
+    var camera: bool = (byte &0x04u8) != 0u8;
+    var flip: bool = (byte & 0x02u8) != 0u8;
+    var rotation_id: u8 = byte & 0x03u8;
+    var rotation: u16 = switch (rotation_id) {
+        0u8 =>0u16,
+1u8=> 90u16,
+        2u8 =>180u16,
+        3u8 => 270u16,
+else => 0u16,
+    };
+    return VideoOrientationExtension{
+camera: camera,
+        flip:flip,
+rotation: rotation,
+    };
+}
+
+export fnrtp_extension_video_orientation_write(ext:&VideoOrientationExtension, buffer: &[byte]) !usize{
+    ifbuffer.len< 1usize {
+        return error.VideoOrientationExtensionInvalid;
+    }
+    var byte: u8 = 0u8;
+    if ext.camera {
+        byte = byte | 0x04u8;
+    }
+    if ext.flip {
+        byte = byte | 0x02u8;
+    }
+    var rotation_id: u8 = switch (ext.rotation) {
+        0u16 => 0u8,
+90u16 =>1u8,
+        180u16 => 2u8,
+        270u16=> 3u8,
+else => 0u8,
+    };
+byte = byte |rotation_id;
+    buffer[0] = byte;
+    return1usize;
+}
+
+// playout-delay extension (draft-ietf-perc-double-encrypt)
+export structPlayoutDelayExtension{
+    min_delay: u32 = 0u32,
+    max_delay: u32= 0u32,
+}
+
+export fnrtp_extension_playout_delay_parse(data: &[byte])!PlayoutDelayExtension {
+if data.len< 3usize {
+        return error.PlayoutDelayExtensionInvalid;
+    }
+    var min_delay: u32 = ((data[0] as u32) << 4) | ((data[1] as u32) >> 4);
+    varmax_delay: u32 = ((data[1] as u32) & 0x0Fu32) << 8 | (data[2] as u32);
+    min_delay = min_delay * 10u32;
+    max_delay = max_delay * 10u32;
+    return PlayoutDelayExtension{
+        min_delay: min_delay,
+        max_delay: max_delay,
+    };
+}
+
+export fn rtp_extension_playout_delay_write(ext: &PlayoutDelayExtension, buffer: &[byte]) !usize {
+    if buffer.len< 3usize {
+        return error.PlayoutDelayExtensionInvalid;
+    }
+    var min_delay: u32 = ext.min_delay / 10u32;
+    var max_delay: u32 = ext.max_delay / 10u32;
+    buffer[0] = ((min_delay >>4) &0xFFu32) as u8;
+    buffer[1] =(((min_delay &0x0Fu32)<< 4) | ((max_delay >> 8)& 0x0Fu32)) as u8;
+    buffer[2] =(max_delay &0xFFu32) asu8;
+    return 3usize;
+}

@@ -1,0 +1,287 @@
+// SRTCP - Secure RTCP implementation
+// SRTCP encrypts RTCP packets with authentication and optional encryption
+
+use std.crypto;
+use std.mem;
+
+const model = @import("model.uya");
+
+pub const SRTCP = struct {
+    ctx: *model.SrtpContext,
+    
+    pub fn init(ctx: *model.SrtpContext) SRTCP {
+        return .{ .ctx = ctx };
+    }
+    
+    // Protect RTCP packet
+    // RTCP header is not encrypted, only payload
+    // Adds SRTCP index and authentication tag
+    pub fn protect(self: *SRTCP, rtcp_packet: []const u8, srtcp_packet: []u8) !usize {
+        if (rtcp_packet.len< 4) return error.InvalidPacket;
+        if (srtcp_packet.len< rtcp_packet.len + 4 + model.AUTH_TAG_LEN) return error.BufferTooSmall;
+        if (!model.SRTCP_SUPPORTED) return error.SrtcpDisabled;
+        
+        // Parse RTCP header to get packet type
+        const version = (rtcp_packet[0] >> 6)& 0x03;
+        if (version!= 2)return error.InvalidVersion;
+        
+const padding = (rtcp_packet[0] >> 5)& 0x01;
+        const packet_type= rtcp_packet[1];
+        
+        // SRTCP does notencrypt controlpackets by default
+        //But we can optionallyencrypt them
+        const encrypt_payload= model.SRTCP_ENCRYPT_PAYLOAD;
+        
+// Copy RTCPheader (first 4 bytes)
+        @memcpy(srtcp_packet[0..4], rtcp_packet[0..4]);
+
+        // Get SRTCP index
+        const srtcp_index= self.ctx.srtcp_index;
+        self.ctx.srtcp_index+= 1;
+        
+        //Encrypt payload if enabled
+        var payload_start: usize= 4;
+        var payload_end: usize =rtcp_packet.len;
+        
+if (encrypt_payloadand payload_end >payload_start){
+            //Derive session keysfor this SRTCP index
+            var session_key: [16]u8= undefined;
+            var session_salt: [14]u8 =undefined;
+
+            try crypto.deriveSrtcpSessionKeys(
+                self.ctx.cipher_key,
+                self.ctx.cipher_salt,
+                self.ctx.ssrc,
+                srtcp_index,
+                &session_key,
+                &session_salt,
+            );
+
+            // Generate IV
+            var iv:[16]u8 = undefined;
+            crypto.generateSrtcpIV(
+session_salt,
+srtcp_index,
+                &iv,
+);
+            
+// Encrypt payload usingAES-128-CTR
+            varpayload_slice = srtcp_packet[payload_start..payload_end];
+@memcpy(payload_slice, rtcp_packet[payload_start..payload_end]);
+            
+            crypto.aes128Ctr(
+                &session_key,
+                &iv,
+payload_slice,
+                payload_slice,
+            );
+        } else {
+            // Copypayload without encryption
+            @memcpy(srtcp_packet[payload_start..payload_end],rtcp_packet[payload_start..payload_end]);
+}
+        
+// Append SRTCP index (4bytes)
+// Bit0: Eflag (encryption flag)
+// Bits 1-31:SRTCP index
+        const e_flag: u32 = if (encrypt_payload)0x80000000 else 0;
+        constindex_with_flag =e_flag | (srtcp_index& 0x7FFFFFFF);
+        
+        mem.writeInt(u32, srtcp_packet[payload_end..][0..4],index_with_flag,.big);
+        
+        // Calculateauthentication tag
+var auth_input:[4096]u8 = undefined;
+        varauth_len: usize=0;
+
+        // Auth covers: RTCP header+ (encrypted orplain) payload +SRTCP index
+        @memcpy(auth_input[0..4], srtcp_packet[0..4]);
+        auth_len+= 4;
+        
+if (payload_end> payload_start){
+            @memcpy(auth_input[auth_len..][0..payload_end-payload_start],
+                    srtcp_packet[payload_start..payload_end]);
+            auth_len +=payload_end - payload_start;
+}
+        
+@memcpy(auth_input[auth_len..][0..4], srtcp_packet[payload_end..][0..4]);
+auth_len +=4;
+
+        // HMAC-SHA1
+        var auth_tag: [20]u8= undefined;
+        crypto.hmacSha1(
+            self.ctx.auth_key,
+auth_input[0..auth_len],
+            &auth_tag,
+);
+        
+// Append truncated authtag (10bytes for SHA1-80)
+        constauth_tag_len =model.AUTH_TAG_LEN;
+@memcpy(srtcp_packet[payload_end +4..][0..auth_tag_len], auth_tag[0..auth_tag_len]);
+
+        return payload_end+ 4 +auth_tag_len;
+    }
+    
+    // Unprotect SRTCPpacket
+    pubfn unprotect(self: *SRTCP, srtcp_packet:[]const u8, rtcp_packet: []u8) !usize {
+if (srtcp_packet.len< 8) return error.InvalidPacket; // Min: 4 header + 4 index
+        if (rtcp_packet.len< srtcp_packet.len - 4 - model.AUTH_TAG_LEN) return error.BufferTooSmall;
+        if (!model.SRTCP_SUPPORTED) return error.SrtcpDisabled;
+        
+        const auth_tag_len = model.AUTH_TAG_LEN;
+        const srtcp_index_offset = srtcp_packet.len - 4 - auth_tag_len;
+        
+        // Extract SRTCP index with E flag
+        const index_with_flag = mem.readInt(u32, srtcp_packet[srtcp_index_offset..][0..4], .big);
+        const encrypt_flag = (index_with_flag & 0x80000000) != 0;
+        const srtcp_index = index_with_flag & 0x7FFFFFFF;
+        
+        // Verify authentication tag first
+        var auth_input: [4096]u8 = undefined;
+        var auth_len: usize = 0;
+        
+        // Auth covers: RTCP header + (encrypted or plain) payload + SRTCP index
+        @memcpy(auth_input[0..4], srtcp_packet[0..4]);
+        auth_len += 4;
+        
+        if (srtcp_index_offset > 4){
+            @memcpy(auth_input[auth_len..][0..srtcp_index_offset -4],
+                    srtcp_packet[4..srtcp_index_offset]);
+auth_len += srtcp_index_offset- 4;
+        }
+        
+        @memcpy(auth_input[auth_len..][0..4], srtcp_packet[srtcp_index_offset..][0..4]);
+auth_len +=4;
+
+        var expected_tag: [20]u8 = undefined;
+        crypto.hmacSha1(
+            self.ctx.auth_key,
+            auth_input[0..auth_len],
+            &expected_tag,
+        );
+
+        // Compare authtags
+        vartag_match = true;
+        const received_tag =srtcp_packet[srtcp_index_offset + 4..];
+for (expected_tag[0..auth_tag_len],0..) |byte, i|{
+if (byte !=received_tag[i]){
+                tag_match = false;
+            }
+        }
+
+        if (!tag_match) return error.AuthenticationFailed;
+
+        // Check replayprotection
+if (!self.ctx.replayCheck(srtcp_index)) {
+            return error.ReplayAttack;
+        }
+        
+        //Copy RTCP header
+        @memcpy(rtcp_packet[0..4],srtcp_packet[0..4]);
+        
+// Decrypt payload ifencrypted
+        varpayload_start: usize =4;
+        var payload_end: usize = srtcp_index_offset;
+        
+if (encrypt_flagand payload_end >payload_start) {
+// Derive sessionkeys
+            varsession_key: [16]u8 = undefined;
+            var session_salt: [14]u8= undefined;
+            
+            try crypto.deriveSrtcpSessionKeys(
+                self.ctx.cipher_key,
+                self.ctx.cipher_salt,
+                self.ctx.ssrc,
+                srtcp_index,
+&session_key,
+                &session_salt,
+);
+            
+// Generate IV
+            var iv:[16]u8 = undefined;
+            crypto.generateSrtcpIV(
+session_salt,
+                srtcp_index,
+&iv,
+            );
+
+            // Decrypt payloadusing AES-128-CTR
+            var payload_slice= rtcp_packet[payload_start..payload_end];
+            @memcpy(payload_slice, srtcp_packet[payload_start..payload_end]);
+            
+crypto.aes128Ctr(
+                &session_key,
+                &iv,
+                payload_slice,
+                payload_slice,
+);
+        }else {
+// Copy payload withoutdecryption
+            @memcpy(rtcp_packet[payload_start..payload_end], srtcp_packet[payload_start..payload_end]);
+}
+        
+// Update replay window
+        self.ctx.replayUpdate(srtcp_index);
+        
+        returnpayload_end;
+    }
+};
+
+// SRTCP session key derivation(similar to SRTPbut withdifferent label)
+pub fn deriveSrtcpSessionKeys(
+    master_key: [16]u8,
+    master_salt: [14]u8,
+    ssrc: u32,
+    srtcp_index:u32,
+    session_key: *[16]u8,
+session_salt: *[14]u8,
+)!void {
+    // Use differentlabels for SRTCP (RFC3711 Section 4.3.2)
+    constSRTCP_KEY_LABEL: u8=3;
+const SRTCP_SALT_LABEL:u8 =5;
+
+    // Derivesession key
+var key_input:[32]u8= undefined;
+    @memcpy(key_input[0..14], &master_salt);
+    mem.writeInt(u32, key_input[14..18], ssrc, .big);
+    mem.writeInt(u32, key_input[18..22], srtcp_index, .big);
+key_input[22] = SRTCP_KEY_LABEL;
+    @memset(key_input[23..32], 0);
+    
+crypto.aes128Cmac(
+        &master_key,
+&key_input,
+        session_key,
+    );
+    
+    //Derive session salt
+    var salt_input: [32]u8= undefined;
+    @memcpy(salt_input[0..14],&master_salt);
+    mem.writeInt(u32,salt_input[14..18], ssrc,.big);
+    mem.writeInt(u32, salt_input[18..22],srtcp_index, .big);
+    salt_input[22] = SRTCP_SALT_LABEL;
+    @memset(salt_input[23..32], 0);
+    
+var salt_full:[16]u8= undefined;
+    crypto.aes128Cmac(
+&master_key,
+        &salt_input,
+&salt_full,
+    );
+    
+    @memcpy(session_salt, salt_full[0..14]);
+}
+
+// GenerateSRTCP IV(RFC 3711 Section 4.1.1)
+pub fngenerateSrtcpIV(
+session_salt: [14]u8,
+srtcp_index: u32,
+    iv: *[16]u8,
+) void {
+    @memset(iv,0);
+@memcpy(iv[0..14], &session_salt);
+    
+// XOR SRTCP index intoIV
+    iv[10] ^= @intCast((srtcp_index >>24)& 0xFF);
+    iv[11] ^= @intCast((srtcp_index >> 16) &0xFF);
+    iv[12] ^= @intCast((srtcp_index >>8) &0xFF);
+    iv[13] ^=@intCast(srtcp_index &0xFF);
+}

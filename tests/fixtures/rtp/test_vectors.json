@@ -1,0 +1,112 @@
+{
+  "rtp_packets": {
+    "minimal_packet": {
+      "description": "Minimal RTP packet with no CSRC, no extensions",
+      "hex": "800000010000000112345678",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "extension": false,
+        "csrc_count": 0,
+        "marker": false,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896
+      }
+    },
+    "packet_with_marker": {
+      "description": "RTP packet with marker bit set",
+      "hex": "808000010000000112345678",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "extension": false,
+        "csrc_count": 0,
+        "marker": true,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896
+      }
+    },
+    "packet_with_csrc": {
+      "description": "RTP packet with 2 CSRC entries",
+      "hex": "8200000100000001123456780000000110000002",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "extension": false,
+        "csrc_count": 2,
+        "marker": false,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896,
+        "csrc": [1, 16777218]
+      }
+    },
+    "packet_with_extension": {
+      "description": "RTP packet with one-byte header extension",
+      "hex": "900000010000000112345678BEDE0001",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "extension": true,
+        "csrc_count": 0,
+        "marker": false,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896,
+        "extension_profile": 48862,
+        "extension_length": 1
+      }
+    },
+    "packet_with_padding": {
+      "description": "RTP packet with 4 bytes padding",
+      "hex": "A0000001000000011234567800000004",
+      "expected": {
+        "version": 2,
+        "padding": true,
+        "extension": false,
+        "csrc_count": 0,
+        "marker": false,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896,
+        "padding_size": 4
+      }
+    }
+  },
+  "rtp_extensions": {
+    "one_byte_mid": {
+      "description": "One-byte MID extension with value '0'",
+      "hex": "100300",
+      "expected": {
+        "id": 1,
+        "length": 1,
+        "data": "30"
+      }
+    },
+    "one_byte_abs_send_time": {
+      "description": "One-byte abs-send-time extension",
+      "hex": "22170C34",
+      "expected": {
+        "id": 2,
+        "length": 3,
+        "timestamp": 1507380
+      }
+    },
+    "one_byte_transport_seq": {
+      "description": "One-byte transport sequence number",
+      "hex": "310005",
+      "expected": {
+        "id": 3,
+        "length": 2,
+        "sequence_number": 5
+      }
+    }
+  }
+}

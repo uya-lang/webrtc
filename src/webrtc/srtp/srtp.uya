@@ -1,0 +1,271 @@
+// webrtc.srtp.srtp - SRTP protect/unprotect implementation
+// Module: src/webrtc/srtp/srtp.uya
+// RFC 3711 implementation
+
+use webrtc.binary;
+use webrtc.crypto.aes;
+use webrtc.crypto.hmac;
+use webrtc.srtp.model;
+
+// Key derivation labels (RFC 3711 Section 4.3.1)
+const SRTP_LABEL_ENCRYPTION: u8 = 0u8;
+const SRTP_LABEL_AUTH: u8 = 1u8;
+const SRTP_LABEL_SALT: u8 = 2u8;
+const SRTCP_LABEL_ENCRYPTION: u8 = 3u8;
+const SRTCP_LABEL_AUTH: u8 = 4u8;
+const SRTCP_LABEL_SALT: u8 = 5u8;
+
+// Derive SRTP/SRTCP keys from master key and salt (RFC 3711 Section 4.3.1)
+export fn srtp_derive_session_keys(
+    master_key: &[byte],
+    master_salt: &[byte],
+    ssrc: u32,
+    cipher_key: &mut [byte],
+    auth_key: &mut [byte],
+    cipher_salt: &mut [byte],
+) !void {
+    if master_key.len != SRTP_KEY_BYTES {
+        return error!void;
+    }
+    if master_salt.len != SRTP_SALT_BYTES {
+        return error!void;
+    }
+    if cipher_key.len != SRTP_KEY_BYTES {
+        return error!void;
+    }
+    if auth_key.len != SRTP_AUTH_KEY_BYTES {
+        return error!void;
+    }
+    if cipher_salt.len != SRTP_SALT_BYTES {
+        return error!void;
+    }
+    
+    // Derive cipher key
+    try srtp_kdf(master_key, master_salt, ssrc, SRTP_LABEL_ENCRYPTION, cipher_key);
+    
+    // Derive auth key
+    try srtp_kdf(master_key, master_salt, ssrc, SRTP_LABEL_AUTH, auth_key);
+    
+    // Derive cipher salt
+    try srtp_kdf(master_key, master_salt, ssrc, SRTP_LABEL_SALT, cipher_salt);
+}
+
+// Derive SRTCP keys from master key and salt
+export fn srtcp_derive_session_keys(
+    master_key: &[byte],
+    master_salt: &[byte],
+    ssrc: u32,
+    cipher_key: &mut [byte],
+    auth_key: &mut [byte],
+    cipher_salt: &mut [byte],
+) !void {
+    if master_key.len != SRTP_KEY_BYTES {
+        return error!void;
+    }
+    if master_salt.len != SRTP_SALT_BYTES {
+        return error!void;
+    }
+    if cipher_key.len != SRTP_KEY_BYTES {
+        return error!void;
+    }
+    if auth_key.len != SRTP_AUTH_KEY_BYTES {
+        return error!void;
+    }
+    if cipher_salt.len != SRTP_SALT_BYTES {
+        return error!void;
+    }
+    
+    // Derive cipher key
+    try srtp_kdf(master_key, master_salt, ssrc, SRTCP_LABEL_ENCRYPTION, cipher_key);
+    
+    // Derive auth key
+    try srtp_kdf(master_key, master_salt, ssrc, SRTCP_LABEL_AUTH, auth_key);
+    
+    // Derive cipher salt
+    try srtp_kdf(master_key, master_salt, ssrc, SRTCP_LABEL_SALT, cipher_salt);
+}
+
+// Key Derivation Function (RFC 3711 Section 4.3.1)
+// Uses AES-128-CM as PRF
+fn srtp_kdf(
+    key: &[byte],
+    salt: &[byte],
+    ssrc: u32,
+    label: u8,
+    output: &mut [byte],
+) !void {
+    // r = label XOR salt[7]
+    var x: [byte: 14] = salt[0:14];
+    x[7] = x[7] ^ label;
+    
+    // Build IV: (ssrc << 16) XOR x
+    var iv: [byte: 16] = [];
+    var i: usize = 0usize;
+    while i< 16 {
+        iv[i] = 0u8;
+        i = i + 1usize;
+    }
+    
+    // IV[4..8] = ssrc (big-endian)
+    iv[4] = ((ssrc >> 24) & 0xFF) as u8;
+iv[5] = ((ssrc>> 16) & 0xFF) as u8;
+iv[6] = ((ssrc>> 8)& 0xFF) as u8;
+    iv[7] =(ssrc &0xFF)as u8;
+    
+    //XOR with x
+    i =0usize;
+    while i< 14 {
+        iv[i + 2] = iv[i + 2] ^ x[i];
+        i = i + 1usize;
+    }
+    
+    // Use AES-128-CM to generate output
+    try aes_ctr_prf(key, iv, output);
+}
+
+// AES-128-CM PRF (Counter Mode)
+fn aes_ctr_prf(key: &[byte], iv: &[byte], output: &mut [byte]) !void {
+    var counter: u128 = 0u128;
+    var i: usize = 0usize;
+    while i< iv.len {
+        counter = counter | ((iv[i] as u128) << ((15usize - i) * 8usize));
+        i = i + 1usize;
+    }
+    
+    var out_idx: usize = 0usize;
+    var block_counter: u128 = 0u128;
+    
+    while out_idx< output.len {
+        // Encrypt counter block
+        var block: [byte: 16] = [];
+        var j: usize = 0usize;
+        var current_counter: u128 = counter + block_counter;
+        
+        while j< 16 {
+            block[j] = ((current_counter >> ((15usize -j) *8usize)) &0xFF)as u8;
+            j =j + 1usize;
+}
+        
+var encrypted: [byte: 16] = [];
+        try aes.aes128_encrypt(key, block, encrypted);
+        
+        // XORinto output
+j= 0usize;
+        whilej< 16 && out_idx< output.len {
+            output[out_idx] = encrypted[j];
+            out_idx = out_idx + 1usize;
+            j = j + 1usize;
+        }
+        
+        block_counter = block_counter + 1u128;
+    }
+}
+
+// Calculate packet index from sequence number and ROC (RFC 3711 Section 3.3.1)
+export fn srtp_index_guess(roc: u32, seq: u16, expected_seq: u16) u64 {
+    var v: u32 = roc;
+    
+    // Estimate ROC based on sequence number wraparound
+    if expected_seq< 32768u16 {
+        if seq >expected_seq +32768u16 {
+            // Wrappedbackward
+            ifroc > 0u32 {
+                v = roc- 1u32;
+            }
+}
+    }else {
+if seq< expected_seq - 32768u16 {
+            // Wrapped forward
+            v = roc + 1u32;
+        }
+    }
+    
+    return ((v as u64) << 16) | (seq as u64);
+}
+
+// Update ROC after successful packet processing
+export fn srtp_index_update(ctx: &SrtpContext, index: u64) void {
+    if index > ctx.s_largest_index{
+        ctx.s_largest_index= index;
+        ctx.roc= (index >>16) as u32;
+    }
+}
+
+// Replay protectioncheck (RFC3711Section 3.3.2)
+export fn srtp_replay_check(ctx: &SrtpContext, index: u64) bool {
+    if index +64u64< ctx.s_largest_index {
+        // Too old
+        return false;
+    }
+    
+    if index >ctx.s_largest_index {
+// New packet
+        return true;
+    }
+    
+    // Checkif already seen
+    var delta:usize= (ctx.s_largest_index - index)as usize;
+    if delta >=64usize{
+        returnfalse;
+}
+    
+var byte_idx:usize = delta /8usize;
+    varbit_idx: u8 = (delta% 8usize) as u8;
+
+    if (ctx.replay_window[byte_idx] &(1u8<< bit_idx)) != 0u8 {
+        // Already seen
+        return false;
+    }
+    
+    return true;
+}
+
+// Update replay window after successful packet processing
+export fn srtp_replay_update(ctx: &SrtpContext, index: u64) void {
+    if index >ctx.s_largest_index {
+// Shift window
+        var shift:u64 =index- ctx.s_largest_index;
+        
+        if shift>=64u64 {
+            // Clear entirewindow
+            vari: usize =0usize;
+            while i< SRTP_REPLAY_WINDOW_SIZE {
+                ctx.replay_window[i] = 0u8;
+                i = i + 1usize;
+            }
+        } else {
+            // Shift window
+            var i: usize = 63usize;
+            while i >= shift {
+                ctx.replay_window[i] = ctx.replay_window[i -shift];
+i = i -1usize;
+            }
+// Clear new slots
+            var j: usize =0usize;
+            while j< shift {
+                ctx.replay_window[j] = 0u8;
+                j = j + 1usize;
+            }
+        }
+        
+        // Mark current packet
+        ctx.replay_window[0] = ctx.replay_window[0] | 1u8;
+    } else {
+        // Mark old packet
+        var delta: usize = (ctx.s_largest_index - index) as usize;
+        var byte_idx: usize = delta / 8usize;
+        var bit_idx: u8 = (delta % 8usize) as u8;
+        ctx.replay_window[byte_idx] = ctx.replay_window[byte_idx] | (1u8 << bit_idx);
+    }
+}
+
+// Get authentication tag length based on profile
+export fn srtp_auth_tag_length(profile: u16) usize {
+    if profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return SRTP_AUTH_TAG_BYTES_80;
+    }
+    if profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
+        return SRTP_AUTH_TAG_BYTES_32;
+    }
+    return 0usize;
+}
