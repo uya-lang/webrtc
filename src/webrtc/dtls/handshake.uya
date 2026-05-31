@@ -21,6 +21,9 @@ export const DTLS_ECDHE_KEY_SHARE_GENERATION_ATTEMPTS: usize = 16usize;
 export const DTLS_FINISHED_VERIFY_DATA_BYTES: usize = 12usize;
 export const DTLS_MASTER_SECRET_BYTES: usize = 48usize;
 export const DTLS_FINISHED_TRANSCRIPT_HASH_BYTES: usize = 32usize;
+export const DTLS_EXPORTER_RANDOM_BYTES: usize = 32usize;
+export const DTLS_EXPORTER_MAX_LABEL_BYTES: usize = 255usize;
+export const DTLS_EXPORTER_MAX_SEED_BYTES: usize = DTLS_EXPORTER_MAX_LABEL_BYTES + (2usize * DTLS_EXPORTER_RANDOM_BYTES);
 export const DTLS_EXTENSION_USE_SRTP: u16 = 14u16;
 export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80: u16 = 0x0001u16;
 export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32: u16 = 0x0002u16;
@@ -1009,6 +1012,40 @@ export fn dtls_use_srtp_negotiate(offer: &DtlsUseSrtpExtension, supported: &Dtls
         supported_index = supported_index + 1usize;
     }
     return error.UnsupportedProfile;
+}
+
+export fn dtls_exporter_compute(master_secret: &[byte], label: &[byte], client_random: &[byte], server_random: &[byte], out: &[byte]) !void {
+    if master_secret.len != DTLS_MASTER_SECRET_BYTES
+        || label.len > DTLS_EXPORTER_MAX_LABEL_BYTES
+        || client_random.len != DTLS_EXPORTER_RANDOM_BYTES
+        || server_random.len != DTLS_EXPORTER_RANDOM_BYTES {
+        return error.InvalidPacket;
+    }
+    if out.len == 0usize {
+        return;
+    }
+
+    var seed: [byte: DTLS_EXPORTER_MAX_SEED_BYTES] = [];
+    var cursor: usize = 0usize;
+    var index: usize = 0usize;
+    while index < label.len {
+        seed[cursor] = label[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < DTLS_EXPORTER_RANDOM_BYTES {
+        seed[cursor] = client_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < DTLS_EXPORTER_RANDOM_BYTES {
+        seed[cursor] = server_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    return dtls_tls12_p_hash_sha256(master_secret, seed[0:cursor], out);
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {

@@ -45,6 +45,7 @@ rg -Fq "dtls_test_check_use_srtp_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_use_srtp_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_use_srtp_negotiation" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_exporter_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsHandshakeReassemblyState" src/webrtc/dtls/handshake.uya
@@ -79,6 +80,7 @@ rg -Fq "export fn dtls_finished_verify" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_use_srtp_extension_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_use_srtp_extension_write" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_use_srtp_negotiate" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_exporter_compute" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 

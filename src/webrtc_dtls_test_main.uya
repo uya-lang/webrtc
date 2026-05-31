@@ -785,6 +785,65 @@ fn dtls_test_check_use_srtp_negotiation() i32 {
 }
 
 fn dtls_test_check_exporter_reference_cases() i32 {
+    var master_secret: [byte: 48] = [
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte,
+        0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte, 0x10 as byte,
+        0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte, 0x18 as byte,
+        0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte, 0x20 as byte,
+        0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte, 0x28 as byte,
+        0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte, 0x30 as byte,
+    ];
+    var client_random: [byte: 32] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+    ];
+    var server_random: [byte: 32] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var label: [byte: 19] = [
+        'E' as byte, 'X' as byte, 'T' as byte, 'R' as byte, 'A' as byte, 'C' as byte, 'T' as byte, 'O' as byte, 'R' as byte,
+        '-' as byte, 'd' as byte, 't' as byte, 'l' as byte, 's' as byte, '-' as byte, 't' as byte, 'e' as byte, 's' as byte, 't' as byte,
+    ];
+    var expected: [byte: 32] = [
+        0x56 as byte, 0x6f as byte, 0xc0 as byte, 0xa4 as byte, 0x11 as byte, 0x3c as byte, 0xf2 as byte, 0xd3 as byte,
+        0xfa as byte, 0x39 as byte, 0x97 as byte, 0x16 as byte, 0x3b as byte, 0xca as byte, 0x41 as byte, 0x60 as byte,
+        0x23 as byte, 0x94 as byte, 0xa6 as byte, 0xcd as byte, 0x31 as byte, 0xc9 as byte, 0x17 as byte, 0x71 as byte,
+        0x88 as byte, 0x0b as byte, 0x4b as byte, 0x22 as byte, 0xed as byte, 0x2a as byte, 0x18 as byte, 0x05 as byte,
+    ];
+    var actual: [byte: 32] = [];
+    if dtls_exporter_compute(master_secret[0:48], label[0:19], client_random[0:32], server_random[0:32], actual[0:32]).error_id != 0 {
+        return 150;
+    }
+    var index: usize = 0usize;
+    while index < 32usize {
+        if actual[index] != expected[index] {
+            return 151;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_exporter_invalid_cases() i32 {
+    var master_secret: [byte: 47] = [];
+    var label: [byte: 256] = [];
+    var client_random: [byte: 32] = [];
+    var server_random: [byte: 31] = [];
+    var out: [byte: 8] = [];
+    if dtls_exporter_compute(master_secret[0:47], label[0:1], client_random[0:32], client_random[0:32], out[0:8]).error_id == 0 {
+        return 152;
+    }
+    if dtls_exporter_compute(client_random[0:32], label[0:256], client_random[0:32], client_random[0:32], out[0:8]).error_id == 0 {
+        return 153;
+    }
+    if dtls_exporter_compute(out[0:8], label[0:1], client_random[0:32], server_random[0:31], out[0:8]).error_id == 0 {
+        return 154;
+    }
     return 0;
 }
 
@@ -919,6 +978,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_exporter_reference_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_exporter_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;
