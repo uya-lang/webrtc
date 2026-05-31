@@ -227,7 +227,7 @@
 - [x] 实现 SRTP protection profile negotiation。
 - [x] 实现 DTLS exporter。
 - [x] 实现 handshake retransmission timer。
-- [ ] 实现 alert。
+- [x] 实现 alert。
 - [ ] 实现 certificate fingerprint 校验。
 - [ ] 集成 ICE selected pair。
 - [ ] 增加 OpenSSL/浏览器互通测试脚本。

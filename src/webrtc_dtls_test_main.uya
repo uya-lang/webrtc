@@ -915,6 +915,46 @@ fn dtls_test_check_retransmission_timer_invalid_cases() i32 {
     return 0;
 }
 
+fn dtls_test_check_alert_roundtrip() i32 {
+    var body: [byte: 2] = [DTLS_ALERT_LEVEL_FATAL as byte, DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY as byte];
+    const parsed: !DtlsAlert = dtls_alert_parse(body[0:2]);
+    if parsed.error_id != 0 {
+        return 173;
+    }
+    if parsed.value.level != DTLS_ALERT_LEVEL_FATAL || parsed.value.description != DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY {
+        return 174;
+    }
+    var out: [byte: 4] = [];
+    const written: !usize = dtls_alert_write(&parsed.value, out[0:4]);
+    if written.error_id != 0 || written.value != 2usize {
+        return 175;
+    }
+    if out[0] != body[0] || out[1] != body[1] {
+        return 176;
+    }
+    return 0;
+}
+
+fn dtls_test_check_alert_invalid_cases() i32 {
+    var short_body: [byte: 1] = [DTLS_ALERT_LEVEL_WARNING as byte];
+    if dtls_alert_parse(short_body[0:1]).error_id == 0 {
+        return 177;
+    }
+    var bad_level: [byte: 2] = [3 as byte, DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY as byte];
+    if dtls_alert_parse(bad_level[0:2]).error_id == 0 {
+        return 178;
+    }
+    var invalid_alert: DtlsAlert = DtlsAlert{
+        level: 0u8,
+        description: DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY,
+    };
+    var out: [byte: 2] = [];
+    if dtls_alert_write(&invalid_alert, out[0:2]).error_id == 0 {
+        return 179;
+    }
+    return 0;
+}
+
 export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = argc;
     _ = argv;
@@ -1064,6 +1104,18 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_retransmission_timer_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_alert_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_alert_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;

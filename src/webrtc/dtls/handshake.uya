@@ -33,6 +33,19 @@ export const DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32: u16 = 0x0002u16;
 export const DTLS_SRTP_PROFILE_AEAD_AES_128_GCM: u16 = 0x0007u16;
 export const DTLS_SRTP_PROFILE_AEAD_AES_256_GCM: u16 = 0x0008u16;
 export const DTLS_USE_SRTP_MAX_PROFILES: usize = 8usize;
+export const DTLS_ALERT_LEVEL_WARNING: u8 = 1u8;
+export const DTLS_ALERT_LEVEL_FATAL: u8 = 2u8;
+export const DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY: u8 = 0u8;
+export const DTLS_ALERT_DESCRIPTION_UNEXPECTED_MESSAGE: u8 = 10u8;
+export const DTLS_ALERT_DESCRIPTION_BAD_RECORD_MAC: u8 = 20u8;
+export const DTLS_ALERT_DESCRIPTION_HANDSHAKE_FAILURE: u8 = 40u8;
+export const DTLS_ALERT_DESCRIPTION_BAD_CERTIFICATE: u8 = 42u8;
+export const DTLS_ALERT_DESCRIPTION_ILLEGAL_PARAMETER: u8 = 47u8;
+export const DTLS_ALERT_DESCRIPTION_DECODE_ERROR: u8 = 50u8;
+export const DTLS_ALERT_DESCRIPTION_DECRYPT_ERROR: u8 = 51u8;
+export const DTLS_ALERT_DESCRIPTION_PROTOCOL_VERSION: u8 = 70u8;
+export const DTLS_ALERT_DESCRIPTION_INTERNAL_ERROR: u8 = 80u8;
+export const DTLS_ALERT_BYTES: usize = 2usize;
 
 export struct DtlsClientHello {
     legacy_version: u16 = 0u16,
@@ -132,6 +145,11 @@ export fn dtls_handshake_retransmission_timer_make() DtlsHandshakeRetransmission
     return DtlsHandshakeRetransmissionTimer{};
 }
 
+export struct DtlsAlert {
+    level: u8 = 0u8,
+    description: u8 = 0u8,
+}
+
 export struct DtlsHandshakeFragment {
     handshake_type: u8 = 0u8,
     body_length: usize = 0usize,
@@ -222,6 +240,23 @@ fn dtls_u64_mul2_saturating(value: u64) u64 {
         return 0xffffffffffffffffu64;
     }
     return value * 2u64;
+}
+
+fn dtls_alert_level_supported(level: u8) bool {
+    return level == DTLS_ALERT_LEVEL_WARNING || level == DTLS_ALERT_LEVEL_FATAL;
+}
+
+fn dtls_alert_description_supported(description: u8) bool {
+    return description == DTLS_ALERT_DESCRIPTION_CLOSE_NOTIFY
+        || description == DTLS_ALERT_DESCRIPTION_UNEXPECTED_MESSAGE
+        || description == DTLS_ALERT_DESCRIPTION_BAD_RECORD_MAC
+        || description == DTLS_ALERT_DESCRIPTION_HANDSHAKE_FAILURE
+        || description == DTLS_ALERT_DESCRIPTION_BAD_CERTIFICATE
+        || description == DTLS_ALERT_DESCRIPTION_ILLEGAL_PARAMETER
+        || description == DTLS_ALERT_DESCRIPTION_DECODE_ERROR
+        || description == DTLS_ALERT_DESCRIPTION_DECRYPT_ERROR
+        || description == DTLS_ALERT_DESCRIPTION_PROTOCOL_VERSION
+        || description == DTLS_ALERT_DESCRIPTION_INTERNAL_ERROR;
 }
 
 fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
@@ -354,6 +389,14 @@ fn dtls_handshake_retransmission_timer_reschedule(timer: &DtlsHandshakeRetransmi
         return;
     }
     timer.next_deadline_us = dtls_u64_add_saturating(now_us, timer.current_timeout_us);
+}
+
+fn dtls_alert_validate(alert: &DtlsAlert) !void {
+    if alert == null
+        || !dtls_alert_level_supported(alert.level)
+        || !dtls_alert_description_supported(alert.description) {
+        return error.InvalidPacket;
+    }
 }
 
 fn dtls_use_srtp_profile_supported(profile: u16) bool {
@@ -1149,6 +1192,31 @@ export fn dtls_handshake_retransmission_timer_fire(timer: &DtlsHandshakeRetransm
     timer.current_timeout_us = next_timeout_us;
     dtls_handshake_retransmission_timer_reschedule(timer, now_us);
     return true;
+}
+
+export fn dtls_alert_parse(body: &[byte]) !DtlsAlert {
+    if body.len < DTLS_ALERT_BYTES {
+        return error.PacketTooShort;
+    }
+    if body.len != DTLS_ALERT_BYTES {
+        return error.InvalidPacket;
+    }
+    var alert: DtlsAlert = DtlsAlert{
+        level: body[0] as u8,
+        description: body[1] as u8,
+    };
+    try dtls_alert_validate(&alert);
+    return alert;
+}
+
+export fn dtls_alert_write(alert: &DtlsAlert, out: &[byte]) !usize {
+    try dtls_alert_validate(alert);
+    if out.len < DTLS_ALERT_BYTES {
+        return error.ByteWriterOutOfBounds;
+    }
+    out[0] = alert.level as byte;
+    out[1] = alert.description as byte;
+    return DTLS_ALERT_BYTES;
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {
