@@ -220,7 +220,7 @@
 - [~] 先准备 OpenSSL/浏览器握手 fixtures。
 - [x] 实现 DTLS record parser/writer。
 - [x] 实现 handshake message fragmentation/reassembly。
-- [ ] 实现 ClientHello / ServerHello。
+- [x] 实现 ClientHello / ServerHello。
 - [ ] 实现 certificate 解析和生成。
 - [ ] 实现 ECDHE key exchange。
 - [ ] 实现 Finished 校验。

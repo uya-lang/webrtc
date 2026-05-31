@@ -1,10 +1,33 @@
 // webrtc.dtls.handshake - DTLS handshake fragment parse / reassembly helpers
 // 模块路径：src/webrtc/dtls/handshake.uya → use webrtc.dtls.handshake;
 
+use webrtc.binary;
 use webrtc.dtls.model;
 use webrtc.errors;
 
 export const DTLS_HANDSHAKE_REASSEMBLY_MAX_BYTES: usize = DTLS_RECORD_MAX_PAYLOAD_BYTES;
+export const DTLS_HELLO_RANDOM_BYTES: usize = 32usize;
+export const DTLS_HELLO_SESSION_ID_MAX_BYTES: usize = 32usize;
+export const DTLS_HELLO_COOKIE_MAX_BYTES: usize = 255usize;
+
+export struct DtlsClientHello {
+    legacy_version: u16 = 0u16,
+    random: &[byte] = [],
+    session_id: &[byte] = [],
+    cookie: &[byte] = [],
+    cipher_suites: &[byte] = [],
+    compression_methods: &[byte] = [],
+    extensions: &[byte] = [],
+}
+
+export struct DtlsServerHello {
+    version: u16 = 0u16,
+    random: &[byte] = [],
+    session_id: &[byte] = [],
+    cipher_suite: u16 = 0u16,
+    compression_method: u8 = 0u8,
+    extensions: &[byte] = [],
+}
 
 export struct DtlsHandshakeFragment {
     handshake_type: u8 = 0u8,
@@ -46,6 +69,317 @@ export fn dtls_handshake_reassembly_init(state: &DtlsHandshakeReassemblyState) v
         state.received_mask[index] = 0 as byte;
         index = index + 1usize;
     }
+}
+
+fn dtls_hello_extensions_validate(extensions: &[byte]) !void {
+    var cursor: usize = 0usize;
+    while cursor < extensions.len {
+        if cursor + 4usize > extensions.len {
+            return error.InvalidPacket;
+        }
+        const extension_length: usize = (try read_be_u16(extensions[cursor + 2usize:2])) as usize;
+        cursor = cursor + 4usize;
+        if cursor + extension_length > extensions.len {
+            return error.InvalidPacket;
+        }
+        cursor = cursor + extension_length;
+    }
+}
+
+fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
+    if hello == null {
+        return error.InvalidPacket;
+    }
+    if hello.legacy_version != DTLS_VERSION_1_2 {
+        return error.UnsupportedCapability;
+    }
+    if hello.random.len != DTLS_HELLO_RANDOM_BYTES {
+        return error.InvalidPacket;
+    }
+    if hello.session_id.len > DTLS_HELLO_SESSION_ID_MAX_BYTES {
+        return error.InvalidPacket;
+    }
+    if hello.cookie.len > DTLS_HELLO_COOKIE_MAX_BYTES {
+        return error.InvalidPacket;
+    }
+    if hello.cipher_suites.len == 0usize || (hello.cipher_suites.len & 1usize) != 0usize {
+        return error.InvalidPacket;
+    }
+    if hello.cipher_suites.len > 0xffffusize {
+        return error.InvalidPacket;
+    }
+    if hello.compression_methods.len == 0usize || hello.compression_methods.len > 255usize {
+        return error.InvalidPacket;
+    }
+    if hello.extensions.len > 0xffffusize {
+        return error.InvalidPacket;
+    }
+    try dtls_hello_extensions_validate(hello.extensions);
+}
+
+fn dtls_server_hello_validate(hello: &DtlsServerHello) !void {
+    if hello == null {
+        return error.InvalidPacket;
+    }
+    if hello.version != DTLS_VERSION_1_2 {
+        return error.UnsupportedCapability;
+    }
+    if hello.random.len != DTLS_HELLO_RANDOM_BYTES {
+        return error.InvalidPacket;
+    }
+    if hello.session_id.len > DTLS_HELLO_SESSION_ID_MAX_BYTES {
+        return error.InvalidPacket;
+    }
+    if hello.extensions.len > 0xffffusize {
+        return error.InvalidPacket;
+    }
+    try dtls_hello_extensions_validate(hello.extensions);
+}
+
+export fn dtls_client_hello_parse(body: &[byte]) !DtlsClientHello {
+    if body.len < 34usize {
+        return error.PacketTooShort;
+    }
+
+    const legacy_version: u16 = try read_be_u16(body[0:2]);
+    if legacy_version != DTLS_VERSION_1_2 {
+        return error.UnsupportedCapability;
+    }
+
+    var cursor: usize = 34usize;
+    const session_id_length: usize = body[cursor] as usize;
+    cursor = cursor + 1usize;
+    if session_id_length > DTLS_HELLO_SESSION_ID_MAX_BYTES || cursor + session_id_length > body.len {
+        return error.InvalidPacket;
+    }
+    const session_id: &[byte] = body[cursor:session_id_length];
+    cursor = cursor + session_id_length;
+
+    if cursor >= body.len {
+        return error.InvalidPacket;
+    }
+    const cookie_length: usize = body[cursor] as usize;
+    cursor = cursor + 1usize;
+    if cookie_length > DTLS_HELLO_COOKIE_MAX_BYTES || cursor + cookie_length > body.len {
+        return error.InvalidPacket;
+    }
+    const cookie: &[byte] = body[cursor:cookie_length];
+    cursor = cursor + cookie_length;
+
+    if cursor + 2usize > body.len {
+        return error.InvalidPacket;
+    }
+    const cipher_suites_length: usize = (try read_be_u16(body[cursor:2])) as usize;
+    cursor = cursor + 2usize;
+    if cipher_suites_length == 0usize
+        || (cipher_suites_length & 1usize) != 0usize
+        || cursor + cipher_suites_length > body.len {
+        return error.InvalidPacket;
+    }
+    const cipher_suites: &[byte] = body[cursor:cipher_suites_length];
+    cursor = cursor + cipher_suites_length;
+
+    if cursor >= body.len {
+        return error.InvalidPacket;
+    }
+    const compression_methods_length: usize = body[cursor] as usize;
+    cursor = cursor + 1usize;
+    if compression_methods_length == 0usize || cursor + compression_methods_length > body.len {
+        return error.InvalidPacket;
+    }
+    const compression_methods: &[byte] = body[cursor:compression_methods_length];
+    cursor = cursor + compression_methods_length;
+
+    var extensions: &[byte] = body[cursor:0];
+    if cursor < body.len {
+        if cursor + 2usize > body.len {
+            return error.InvalidPacket;
+        }
+        const extensions_length: usize = (try read_be_u16(body[cursor:2])) as usize;
+        cursor = cursor + 2usize;
+        if cursor + extensions_length != body.len {
+            return error.InvalidPacket;
+        }
+        extensions = body[cursor:extensions_length];
+        try dtls_hello_extensions_validate(extensions);
+    }
+
+    return DtlsClientHello{
+        legacy_version: legacy_version,
+        random: body[2:DTLS_HELLO_RANDOM_BYTES],
+        session_id: session_id,
+        cookie: cookie,
+        cipher_suites: cipher_suites,
+        compression_methods: compression_methods,
+        extensions: extensions,
+    };
+}
+
+export fn dtls_client_hello_write(hello: &DtlsClientHello, out: &[byte]) !usize {
+    try dtls_client_hello_validate(hello);
+
+    var total_length: usize = 2usize + DTLS_HELLO_RANDOM_BYTES + 1usize + hello.session_id.len + 1usize + hello.cookie.len + 2usize + hello.cipher_suites.len + 1usize + hello.compression_methods.len;
+    if hello.extensions.len > 0usize {
+        total_length = total_length + 2usize + hello.extensions.len;
+    }
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    try write_be_u16(out[0:2], hello.legacy_version);
+    var index: usize = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        out[2usize + index] = hello.random[index];
+        index = index + 1usize;
+    }
+
+    var cursor: usize = 34usize;
+    out[cursor] = hello.session_id.len as byte;
+    cursor = cursor + 1usize;
+    index = 0usize;
+    while index < hello.session_id.len {
+        out[cursor + index] = hello.session_id[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + hello.session_id.len;
+
+    out[cursor] = hello.cookie.len as byte;
+    cursor = cursor + 1usize;
+    index = 0usize;
+    while index < hello.cookie.len {
+        out[cursor + index] = hello.cookie[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + hello.cookie.len;
+
+    try write_be_u16(out[cursor:2], hello.cipher_suites.len as u16);
+    cursor = cursor + 2usize;
+    index = 0usize;
+    while index < hello.cipher_suites.len {
+        out[cursor + index] = hello.cipher_suites[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + hello.cipher_suites.len;
+
+    out[cursor] = hello.compression_methods.len as byte;
+    cursor = cursor + 1usize;
+    index = 0usize;
+    while index < hello.compression_methods.len {
+        out[cursor + index] = hello.compression_methods[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + hello.compression_methods.len;
+
+    if hello.extensions.len > 0usize {
+        try write_be_u16(out[cursor:2], hello.extensions.len as u16);
+        cursor = cursor + 2usize;
+        index = 0usize;
+        while index < hello.extensions.len {
+            out[cursor + index] = hello.extensions[index];
+            index = index + 1usize;
+        }
+        cursor = cursor + hello.extensions.len;
+    }
+
+    return cursor;
+}
+
+export fn dtls_server_hello_parse(body: &[byte]) !DtlsServerHello {
+    if body.len < 38usize {
+        return error.PacketTooShort;
+    }
+
+    const version: u16 = try read_be_u16(body[0:2]);
+    if version != DTLS_VERSION_1_2 {
+        return error.UnsupportedCapability;
+    }
+
+    var cursor: usize = 34usize;
+    const session_id_length: usize = body[cursor] as usize;
+    cursor = cursor + 1usize;
+    if session_id_length > DTLS_HELLO_SESSION_ID_MAX_BYTES || cursor + session_id_length > body.len {
+        return error.InvalidPacket;
+    }
+    const session_id: &[byte] = body[cursor:session_id_length];
+    cursor = cursor + session_id_length;
+
+    if cursor + 3usize > body.len {
+        return error.InvalidPacket;
+    }
+    const cipher_suite: u16 = try read_be_u16(body[cursor:2]);
+    cursor = cursor + 2usize;
+    const compression_method: u8 = body[cursor] as u8;
+    cursor = cursor + 1usize;
+
+    var extensions: &[byte] = body[cursor:0];
+    if cursor < body.len {
+        if cursor + 2usize > body.len {
+            return error.InvalidPacket;
+        }
+        const extensions_length: usize = (try read_be_u16(body[cursor:2])) as usize;
+        cursor = cursor + 2usize;
+        if cursor + extensions_length != body.len {
+            return error.InvalidPacket;
+        }
+        extensions = body[cursor:extensions_length];
+        try dtls_hello_extensions_validate(extensions);
+    }
+
+    return DtlsServerHello{
+        version: version,
+        random: body[2:DTLS_HELLO_RANDOM_BYTES],
+        session_id: session_id,
+        cipher_suite: cipher_suite,
+        compression_method: compression_method,
+        extensions: extensions,
+    };
+}
+
+export fn dtls_server_hello_write(hello: &DtlsServerHello, out: &[byte]) !usize {
+    try dtls_server_hello_validate(hello);
+
+    var total_length: usize = 2usize + DTLS_HELLO_RANDOM_BYTES + 1usize + hello.session_id.len + 2usize + 1usize;
+    if hello.extensions.len > 0usize {
+        total_length = total_length + 2usize + hello.extensions.len;
+    }
+    if out.len < total_length {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    try write_be_u16(out[0:2], hello.version);
+    var index: usize = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        out[2usize + index] = hello.random[index];
+        index = index + 1usize;
+    }
+
+    var cursor: usize = 34usize;
+    out[cursor] = hello.session_id.len as byte;
+    cursor = cursor + 1usize;
+    index = 0usize;
+    while index < hello.session_id.len {
+        out[cursor + index] = hello.session_id[index];
+        index = index + 1usize;
+    }
+    cursor = cursor + hello.session_id.len;
+
+    try write_be_u16(out[cursor:2], hello.cipher_suite);
+    cursor = cursor + 2usize;
+    out[cursor] = hello.compression_method as byte;
+    cursor = cursor + 1usize;
+
+    if hello.extensions.len > 0usize {
+        try write_be_u16(out[cursor:2], hello.extensions.len as u16);
+        cursor = cursor + 2usize;
+        index = 0usize;
+        while index < hello.extensions.len {
+            out[cursor + index] = hello.extensions[index];
+            index = index + 1usize;
+        }
+        cursor = cursor + hello.extensions.len;
+    }
+
+    return cursor;
 }
 
 export fn dtls_handshake_fragment_parse(payload: &[byte]) !DtlsHandshakeFragment {

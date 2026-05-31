@@ -191,6 +191,181 @@ fn dtls_test_check_reassembly_two_fragment_roundtrip() i32 {
     return 0;
 }
 
+fn dtls_test_check_client_hello_roundtrip() i32 {
+    var body: [byte: 59] = [
+        0xfe as byte, 0xfd as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x04 as byte, 0xa1 as byte, 0xa2 as byte, 0xa3 as byte, 0xa4 as byte,
+        0x03 as byte, 0xc0 as byte, 0xc1 as byte, 0xc2 as byte,
+        0x00 as byte, 0x04 as byte, 0xc0 as byte, 0x2b as byte, 0xc0 as byte, 0x2f as byte,
+        0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x06 as byte, 0x00 as byte, 0x0d as byte, 0x00 as byte, 0x02 as byte, 0x04 as byte, 0x03 as byte,
+    ];
+    const parsed: !DtlsClientHello = dtls_client_hello_parse(body[0:59]);
+    if parsed.error_id != 0 {
+        return 70;
+    }
+    const random: &[byte] = parsed.value.random;
+    const session_id: &[byte] = parsed.value.session_id;
+    const cookie: &[byte] = parsed.value.cookie;
+    const cipher_suites: &[byte] = parsed.value.cipher_suites;
+    const compression_methods: &[byte] = parsed.value.compression_methods;
+    const extensions: &[byte] = parsed.value.extensions;
+    if parsed.value.legacy_version != DTLS_VERSION_1_2 {
+        return 71;
+    }
+    if random.len != 32usize || random[31] != 0x1f as byte {
+        return 72;
+    }
+    if session_id.len != 4usize || session_id[0] != 0xa1 as byte {
+        return 73;
+    }
+    if cookie.len != 3usize || cookie[2] != 0xc2 as byte {
+        return 74;
+    }
+    if cipher_suites.len != 4usize || cipher_suites[1] != 0x2b as byte {
+        return 75;
+    }
+    if compression_methods.len != 1usize || compression_methods[0] != 0x00 as byte {
+        return 76;
+    }
+    if extensions.len != 6usize || extensions[5] != 0x03 as byte {
+        return 77;
+    }
+    var out: [byte: 96] = [];
+    const written: !usize = dtls_client_hello_write(&parsed.value, out[0:96]);
+    if written.error_id != 0 || written.value != 59usize {
+        return 78;
+    }
+    var index: usize = 0usize;
+    while index < 59usize {
+        if out[index] != body[index] {
+            return 79;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_client_hello_invalid_cases() i32 {
+    var odd_cipher_suites: [byte: 48] = [
+        0xfe as byte, 0xfd as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x00 as byte, 0x03 as byte, 0xc0 as byte, 0x2b as byte, 0xc0 as byte,
+        0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+    ];
+    if dtls_client_hello_parse(odd_cipher_suites[0:48]).error_id == 0 {
+        return 80;
+    }
+
+    var out: [byte: 48] = [];
+    var hello: DtlsClientHello = DtlsClientHello{
+        legacy_version: DTLS_VERSION_1_2,
+        random: odd_cipher_suites[2:32],
+        session_id: odd_cipher_suites[34:0],
+        cookie: odd_cipher_suites[35:0],
+        cipher_suites: odd_cipher_suites[38:3],
+        compression_methods: odd_cipher_suites[41:1],
+        extensions: odd_cipher_suites[44:0],
+    };
+    if dtls_client_hello_write(&hello, out[0:48]).error_id == 0 {
+        return 81;
+    }
+    return 0;
+}
+
+fn dtls_test_check_server_hello_roundtrip() i32 {
+    var body: [byte: 46] = [
+        0xfe as byte, 0xfd as byte,
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+        0x02 as byte, 0xb1 as byte, 0xb2 as byte,
+        0xc0 as byte, 0x2b as byte,
+        0x00 as byte,
+        0x00 as byte, 0x04 as byte, 0x00 as byte, 0x0f as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const parsed: !DtlsServerHello = dtls_server_hello_parse(body[0:46]);
+    if parsed.error_id != 0 {
+        return 82;
+    }
+    const random: &[byte] = parsed.value.random;
+    const session_id: &[byte] = parsed.value.session_id;
+    const extensions: &[byte] = parsed.value.extensions;
+    if parsed.value.version != DTLS_VERSION_1_2 {
+        return 83;
+    }
+    if random.len != 32usize || random[0] != 0x20 as byte {
+        return 84;
+    }
+    if session_id.len != 2usize || session_id[1] != 0xb2 as byte {
+        return 85;
+    }
+    if parsed.value.cipher_suite != 0xc02bu16 {
+        return 86;
+    }
+    if parsed.value.compression_method != 0u8 {
+        return 87;
+    }
+    if extensions.len != 4usize || extensions[1] != 0x0f as byte {
+        return 88;
+    }
+    var out: [byte: 80] = [];
+    const written: !usize = dtls_server_hello_write(&parsed.value, out[0:80]);
+    if written.error_id != 0 || written.value != 46usize {
+        return 89;
+    }
+    var index: usize = 0usize;
+    while index < 46usize {
+        if out[index] != body[index] {
+            return 90;
+        }
+        index = index + 1usize;
+    }
+    return 0;
+}
+
+fn dtls_test_check_server_hello_invalid_cases() i32 {
+    var truncated_extensions: [byte: 45] = [
+        0xfe as byte, 0xfd as byte,
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+        0x00 as byte,
+        0xc0 as byte, 0x2b as byte,
+        0x00 as byte,
+        0x00 as byte, 0x04 as byte, 0x00 as byte, 0x0f as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    if dtls_server_hello_parse(truncated_extensions[0:45]).error_id == 0 {
+        return 91;
+    }
+
+    var out: [byte: 39] = [];
+    var hello: DtlsServerHello = DtlsServerHello{
+        version: DTLS_VERSION_1_2,
+        random: truncated_extensions[2:32],
+        session_id: truncated_extensions[34:0],
+        cipher_suite: 0xc02bu16,
+        compression_method: 0u8,
+        extensions: truncated_extensions[41:4],
+    };
+    if dtls_server_hello_write(&hello, out[0:39]).error_id == 0 {
+        return 92;
+    }
+    return 0;
+}
+
 fn dtls_test_check_exporter_reference_cases() i32 {
     return 0;
 }
@@ -230,6 +405,30 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     result = dtls_test_check_reassembly_two_fragment_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_client_hello_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_client_hello_invalid_cases();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_server_hello_roundtrip();
+    if result != 0 {
+        _ = printf("DTLS_TEST_FAIL %d\n", result);
+        return result;
+    }
+
+    result = dtls_test_check_server_hello_invalid_cases();
     if result != 0 {
         _ = printf("DTLS_TEST_FAIL %d\n", result);
         return result;

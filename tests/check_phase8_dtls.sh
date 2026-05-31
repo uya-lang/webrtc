@@ -27,13 +27,23 @@ rg -Fq "dtls_test_check_record_writer_roundtrip" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_handshake_fragment_length_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_reassembly_overlap_and_gap_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_reassembly_two_fragment_roundtrip" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_client_hello_roundtrip" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_client_hello_invalid_cases" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_server_hello_roundtrip" src/webrtc_dtls_test_main.uya
+rg -Fq "dtls_test_check_server_hello_invalid_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_exporter_reference_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "export struct DtlsRecordHeader" src/webrtc/dtls/model.uya
 rg -Fq "export struct DtlsHandshakeFragment" src/webrtc/dtls/handshake.uya
 rg -Fq "export struct DtlsHandshakeReassemblyState" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsClientHello" src/webrtc/dtls/handshake.uya
+rg -Fq "export struct DtlsServerHello" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_fragment_parse" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_absorb" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_handshake_reassembly_take_message" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_client_hello_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_client_hello_write" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_server_hello_parse" src/webrtc/dtls/handshake.uya
+rg -Fq "export fn dtls_server_hello_write" src/webrtc/dtls/handshake.uya
 rg -Fq "export fn dtls_record_parse" src/webrtc/dtls/record.uya
 rg -Fq "export fn dtls_record_write" src/webrtc/dtls/record.uya
 
