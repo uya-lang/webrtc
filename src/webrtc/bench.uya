@@ -10,8 +10,10 @@ export struct BenchmarkSample {
     suite: &[byte] = [],
     unit: &[byte] = [],
     value: u64 = 0u64,
+    throughput_mb_s: u64 = 0u64,
     allocations: u64 = 0u64,
     high_watermark: u64 = 0u64,
+    vectorized: bool = false,
 }
 
 fn benchmark_copy_bytes(dst: &byte, cursor: usize, src: &[byte]) usize {
@@ -40,18 +42,26 @@ export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !us
     }
 
     var cursor: usize = 0;
-    cursor = benchmark_copy_bytes(&dst[0], cursor, "{\"name\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "{\"name\":\"" as &[byte]);
     cursor = benchmark_copy_bytes(&dst[0], cursor, sample.name);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"suite\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"suite\":\"" as &[byte]);
     cursor = benchmark_copy_bytes(&dst[0], cursor, sample.suite);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"unit\":\"");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"unit\":\"" as &[byte]);
     cursor = benchmark_copy_bytes(&dst[0], cursor, sample.unit);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"value\":");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"value\":" as &[byte]);
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.value);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"allocations\":");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"throughput_mb_s\":" as &[byte]);
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.throughput_mb_s);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"allocations\":" as &[byte]);
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.allocations);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"high_watermark\":");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"high_watermark\":" as &[byte]);
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.high_watermark);
-    cursor = benchmark_copy_bytes(&dst[0], cursor, "}\n");
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"vectorized\":" as &[byte]);
+    if sample.vectorized {
+        cursor = benchmark_copy_bytes(&dst[0], cursor, "true" as &[byte]);
+    } else {
+        cursor = benchmark_copy_bytes(&dst[0], cursor, "false" as &[byte]);
+    }
+    cursor = benchmark_copy_bytes(&dst[0], cursor, "}\n" as &[byte]);
     return cursor;
 }

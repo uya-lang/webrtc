@@ -192,7 +192,7 @@
 
 - [x] 先收集官方 vectors 和 Wycheproof 风格负例。
 - [x] 先增加 constant-time 比较测试和随机源失败测试。
-- [~] 先建立 AES/GHASH/HMAC microbench 基线。
+- [x] 先建立 AES/GHASH/HMAC microbench 基线。
 - [x] 实现 SHA-1。
 - [x] 实现 SHA-256。
 - [x] 实现 HMAC-SHA1。

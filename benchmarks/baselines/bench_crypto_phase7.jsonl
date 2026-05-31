@@ -1,0 +1,9 @@
+{"name":"placeholder","suite":"phase0","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_arena_ring","suite":"phase1","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_udp_echo","suite":"phase2","unit":"qps","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_sdp_parse","suite":"phase3","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_stun_parse","suite":"phase4","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_hmac_sha1","suite":"phase7","unit":"ns/op","value":134200,"throughput_mb_s":7,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_hmac_sha256","suite":"phase7","unit":"ns/op","value":93046,"throughput_mb_s":11,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_aes_ctr","suite":"phase7","unit":"ns/op","value":798729,"throughput_mb_s":5,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_ghash","suite":"phase7","unit":"ns/op","value":737238,"throughput_mb_s":1,"allocations":0,"high_watermark":0,"vectorized":false}

@@ -1,0 +1,16 @@
+use webrtc.bench;
+
+// Phase 7 crypto microbench registry entry。实际测量由 src/webrtc_crypto_bench_main.uya 执行。
+export fn benchmark_main_emit_crypto_phase7_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_hmac_sha1" as &[byte],
+        suite: "phase7" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: 0u64,
+        throughput_mb_s: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+        vectorized: false,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

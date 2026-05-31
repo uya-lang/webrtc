@@ -102,6 +102,7 @@ bench: build
 	test -f benchmarks/bench_arena_ring.uya
 	test -f benchmarks/bench_sdp_parse.uya
 	test -f benchmarks/bench_stun_parse.uya
+	test -f benchmarks/bench_crypto_phase7.uya
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
 	test -s $(BENCH_FILE)
@@ -109,6 +110,10 @@ bench: build
 	rg -q '"name":"bench_arena_ring"' $(BENCH_FILE)
 	rg -q '"name":"bench_sdp_parse"' $(BENCH_FILE)
 	rg -q '"name":"bench_stun_parse"' $(BENCH_FILE)
+	rg -q '"name":"bench_hmac_sha1"' $(BENCH_FILE)
+	rg -q '"name":"bench_hmac_sha256"' $(BENCH_FILE)
+	rg -q '"name":"bench_aes_ctr"' $(BENCH_FILE)
+	rg -q '"name":"bench_ghash"' $(BENCH_FILE)
 
 clean:
 	rm -rf $(BUILD_DIR)
