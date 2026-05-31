@@ -1,0 +1,99 @@
+// webrtc.ice.agent - ICE agent、凭据与候选池运行期模型
+// 模块路径：src/webrtc/ice/agent.uya → use webrtc.ice.agent;
+
+use webrtc.ice.candidate;
+use webrtc.ice.checklist;
+
+export const ICE_MAX_LOCAL_CANDIDATES: usize = 16;
+export const ICE_MAX_REMOTE_CANDIDATES: usize = 32;
+export const ICE_MAX_CANDIDATE_PAIRS: usize = 128;
+export const ICE_MAX_UFRAG_BYTES: usize = 32;
+export const ICE_MAX_PASSWORD_BYTES: usize = 256;
+
+export const ICE_AGENT_ROLE_UNKNOWN: u8 = 0u8;
+export const ICE_AGENT_ROLE_CONTROLLING: u8 = 1u8;
+export const ICE_AGENT_ROLE_CONTROLLED: u8 = 2u8;
+
+export const ICE_AGENT_STATE_NEW: u8 = 0u8;
+export const ICE_AGENT_STATE_GATHERING: u8 = 1u8;
+export const ICE_AGENT_STATE_CHECKING: u8 = 2u8;
+export const ICE_AGENT_STATE_CONNECTED: u8 = 3u8;
+export const ICE_AGENT_STATE_COMPLETED: u8 = 4u8;
+export const ICE_AGENT_STATE_DISCONNECTED: u8 = 5u8;
+export const ICE_AGENT_STATE_FAILED: u8 = 6u8;
+export const ICE_AGENT_STATE_CLOSED: u8 = 7u8;
+
+export const ICE_GATHERING_STATE_NEW: u8 = 0u8;
+export const ICE_GATHERING_STATE_GATHERING: u8 = 1u8;
+export const ICE_GATHERING_STATE_COMPLETE: u8 = 2u8;
+
+export const ICE_NOMINATION_MODE_REGULAR: u8 = 1u8;
+export const ICE_NOMINATION_MODE_AGGRESSIVE: u8 = 2u8;
+
+export struct IceCredentials {
+    ufrag: [byte: ICE_MAX_UFRAG_BYTES] = [],
+    ufrag_len: usize = 0,
+    pwd: [byte: ICE_MAX_PASSWORD_BYTES] = [],
+    pwd_len: usize = 0,
+}
+
+export struct IceAgent {
+    role: u8 = ICE_AGENT_ROLE_UNKNOWN,
+    state: u8 = ICE_AGENT_STATE_NEW,
+    gathering_state: u8 = ICE_GATHERING_STATE_NEW,
+    nomination_mode: u8 = ICE_NOMINATION_MODE_REGULAR,
+    tie_breaker: u64 = 0u64,
+    generation: u32 = 0u32,
+    local_credentials: IceCredentials = IceCredentials{},
+    remote_credentials: IceCredentials = IceCredentials{},
+    local_candidates: [IceCandidate: ICE_MAX_LOCAL_CANDIDATES] = [],
+    local_candidate_count: usize = 0,
+    remote_candidates: [IceCandidate: ICE_MAX_REMOTE_CANDIDATES] = [],
+    remote_candidate_count: usize = 0,
+    checklist: [CandidatePair: ICE_MAX_CANDIDATE_PAIRS] = [],
+    checklist_count: usize = 0,
+    selected_pair_index: u16 = ICE_CANDIDATE_INDEX_NONE,
+    consent_interval_ms: u32 = 15000u32,
+    disconnected_timeout_ms: u32 = 5000u32,
+}
+
+export fn ice_credentials_init(credentials: &IceCredentials) void {
+    if credentials == null {
+        return;
+    }
+    credentials.ufrag_len = 0;
+    credentials.pwd_len = 0;
+}
+
+export fn ice_agent_init(agent: &IceAgent, role: u8, tie_breaker: u64) void {
+    if agent == null {
+        return;
+    }
+    agent.role = role;
+    agent.state = ICE_AGENT_STATE_NEW;
+    agent.gathering_state = ICE_GATHERING_STATE_NEW;
+    agent.nomination_mode = ICE_NOMINATION_MODE_REGULAR;
+    agent.tie_breaker = tie_breaker;
+    agent.generation = 0u32;
+    ice_credentials_init(&agent.local_credentials);
+    ice_credentials_init(&agent.remote_credentials);
+    agent.local_candidate_count = 0;
+    agent.remote_candidate_count = 0;
+    agent.checklist_count = 0;
+    agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
+    agent.consent_interval_ms = 15000u32;
+    agent.disconnected_timeout_ms = 5000u32;
+}
+
+export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {
+    if agent == null {
+        return false;
+    }
+    if agent.selected_pair_index == ICE_CANDIDATE_INDEX_NONE {
+        return false;
+    }
+    if (agent.selected_pair_index as usize) >= agent.checklist_count {
+        return false;
+    }
+    return candidate_pair_is_selected(&agent.checklist[agent.selected_pair_index as usize]);
+}

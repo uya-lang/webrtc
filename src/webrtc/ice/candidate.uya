@@ -1,0 +1,93 @@
+// webrtc.ice.candidate - ICE candidate 与传输地址运行期模型
+// 模块路径：src/webrtc/ice/candidate.uya → use webrtc.ice.candidate;
+
+export const ICE_MAX_FOUNDATION_BYTES: usize = 32;
+export const ICE_MAX_ADDRESS_BYTES: usize = 64;
+
+export const ICE_ADDRESS_FAMILY_NONE: u8 = 0u8;
+export const ICE_ADDRESS_FAMILY_IPV4: u8 = 1u8;
+export const ICE_ADDRESS_FAMILY_IPV6: u8 = 2u8;
+
+export const ICE_COMPONENT_RTP: u16 = 1u16;
+export const ICE_COMPONENT_RTCP: u16 = 2u16;
+
+export const ICE_CANDIDATE_TRANSPORT_UDP: u8 = 1u8;
+export const ICE_CANDIDATE_TRANSPORT_TCP_ACTIVE: u8 = 2u8;
+export const ICE_CANDIDATE_TRANSPORT_TCP_PASSIVE: u8 = 3u8;
+export const ICE_CANDIDATE_TRANSPORT_TCP_SO: u8 = 4u8;
+
+export const ICE_CANDIDATE_TYPE_UNKNOWN: u8 = 0u8;
+export const ICE_CANDIDATE_TYPE_HOST: u8 = 1u8;
+export const ICE_CANDIDATE_TYPE_SRFLX: u8 = 2u8;
+export const ICE_CANDIDATE_TYPE_PRFLX: u8 = 3u8;
+export const ICE_CANDIDATE_TYPE_RELAY: u8 = 4u8;
+
+export const ICE_CANDIDATE_INDEX_NONE: u16 = 0xFFFFu16;
+
+export struct IceTransportAddress {
+    family: u8 = ICE_ADDRESS_FAMILY_NONE,
+    host: [byte: ICE_MAX_ADDRESS_BYTES] = [],
+    host_len: usize = 0,
+    port: u16 = 0u16,
+}
+
+export struct IceCandidate {
+    foundation: [byte: ICE_MAX_FOUNDATION_BYTES] = [],
+    foundation_len: usize = 0,
+    component_id: u16 = ICE_COMPONENT_RTP,
+    transport: u8 = ICE_CANDIDATE_TRANSPORT_UDP,
+    candidate_type: u8 = ICE_CANDIDATE_TYPE_UNKNOWN,
+    priority: u32 = 0u32,
+    address: IceTransportAddress = IceTransportAddress{},
+    related_address: IceTransportAddress = IceTransportAddress{},
+    base_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE,
+    network_id: u16 = 0u16,
+    network_cost: u16 = 0u16,
+    generation: u32 = 0u32,
+}
+
+export fn ice_transport_address_init(address: &IceTransportAddress) void {
+    if address == null {
+        return;
+    }
+    address.family = ICE_ADDRESS_FAMILY_NONE;
+    address.host_len = 0;
+    address.port = 0u16;
+}
+
+export fn ice_transport_address_is_set(address: &IceTransportAddress) bool {
+    if address == null {
+        return false;
+    }
+    if address.family == ICE_ADDRESS_FAMILY_NONE {
+        return false;
+    }
+    if address.host_len == 0 {
+        return false;
+    }
+    return address.port != 0u16;
+}
+
+export fn ice_candidate_init(candidate: &IceCandidate) void {
+    if candidate == null {
+        return;
+    }
+    candidate.foundation_len = 0;
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_UNKNOWN;
+    candidate.priority = 0u32;
+    ice_transport_address_init(&candidate.address);
+    ice_transport_address_init(&candidate.related_address);
+    candidate.base_candidate_index = ICE_CANDIDATE_INDEX_NONE;
+    candidate.network_id = 0u16;
+    candidate.network_cost = 0u16;
+    candidate.generation = 0u32;
+}
+
+export fn ice_candidate_has_related_address(candidate: &IceCandidate) bool {
+    if candidate == null {
+        return false;
+    }
+    return ice_transport_address_is_set(&candidate.related_address);
+}

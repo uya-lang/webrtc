@@ -1,0 +1,44 @@
+use std.testing.expect;
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+use webrtc.ice.checklist;
+
+test "ice candidate model owns transport address and related address metadata" {
+    try expect(ICE_MAX_FOUNDATION_BYTES >= 16);
+    try expect(ICE_MAX_ADDRESS_BYTES >= 16);
+    try expect(@size_of(IceTransportAddress) > 0);
+    try expect(@size_of(IceCandidate) > 0);
+}
+
+test "candidate pair model tracks checklist state nomination and timing fields" {
+    try expect(ICE_CANDIDATE_PAIR_STATE_FROZEN != ICE_CANDIDATE_PAIR_STATE_SUCCEEDED);
+    try expect(ICE_CANDIDATE_PAIR_STATE_FAILED != ICE_CANDIDATE_PAIR_STATE_WAITING);
+    try expect(@size_of(CandidatePair) > 0);
+}
+
+test "ice agent model keeps owned credentials candidate pools and selected pair slot" {
+    try expect(ICE_MAX_LOCAL_CANDIDATES > 0);
+    try expect(ICE_MAX_REMOTE_CANDIDATES > 0);
+    try expect(ICE_MAX_CANDIDATE_PAIRS > 0);
+    try expect(@size_of(IceCredentials) > 0);
+    try expect(@size_of(IceAgent) > 0);
+}
+
+test "ice helpers expose stable default state for future gathering and checklist work" {
+    var candidate: IceCandidate = IceCandidate{};
+    ice_candidate_init(&candidate);
+    try expect(candidate.transport == ICE_CANDIDATE_TRANSPORT_UDP);
+    try expect(candidate.component_id == ICE_COMPONENT_RTP);
+    try expect(!ice_candidate_has_related_address(&candidate));
+
+    var pair: CandidatePair = CandidatePair{};
+    candidate_pair_init(&pair, 1u16, 2u16);
+    try expect(pair.state == ICE_CANDIDATE_PAIR_STATE_FROZEN);
+    try expect(!candidate_pair_is_selected(&pair));
+
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 7u64);
+    try expect(agent.state == ICE_AGENT_STATE_NEW);
+    try expect(agent.role == ICE_AGENT_ROLE_CONTROLLING);
+    try expect(!ice_agent_has_selected_pair(&agent));
+}
