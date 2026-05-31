@@ -25,6 +25,7 @@ rg -Fq 'test "regular nomination waits for a valid pair and marks a successful n
 rg -Fq 'test "connectivity check success response updates pair timing consent and validity"' src/webrtc_ice_test.uya
 rg -Fq 'test "aggressive nomination mode allows use-candidate on the first controlling check"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice state change events queue unique snapshots for nomination and trickle transitions"' src/webrtc_ice_test.uya
+rg -Fq 'test "dual agents complete selected pair across nomination request and success response"' src/webrtc_ice_test.uya
 rg -Fq 'test "local trickle candidate addition reopens completed state until checklist rebuild"' src/webrtc_ice_test.uya
 rg -Fq 'test "ice state change events track consent disconnect failure and recovery"' src/webrtc_ice_test.uya
 rg -Fq 'test "consent freshness on selected pair schedules periodic binding checks without leaving completed state"' src/webrtc_ice_test.uya

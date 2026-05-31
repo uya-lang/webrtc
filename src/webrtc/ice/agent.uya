@@ -526,11 +526,19 @@ fn ice_agent_selected_pair_is_active(agent: &IceAgent) bool {
         return false;
     }
 
-    const pair_slot: usize = agent.selected_pair_index as usize;
-    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS || pair_slot >= agent.checklist_count {
+    const pair_slot_result: !usize = ice_agent_selected_pair_slot(agent);
+    if pair_slot_result.error_id != 0 {
         return false;
     }
-    return agent.checklist[pair_slot].selected && agent.checklist[pair_slot].valid;
+    const pair_slot: usize = pair_slot_result.value;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return false;
+    }
+    if pair_slot >= agent.checklist_count {
+        return false;
+    }
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
+    return pair.valid;
 }
 
 export fn ice_agent_trickle_is_complete(agent: &IceAgent) bool {
@@ -600,7 +608,7 @@ export fn ice_agent_pop_state_change_event(agent: &IceAgent) !IceStateChangeEven
     if token_result.error_id != 0 {
         return error.RingQueueEmpty;
     }
-    return agent.state_event_slots[ice_agent_state_event_slot(token_result)];
+    return agent.state_event_slots[ice_agent_state_event_slot(token_result.value)];
 }
 
 fn ice_agent_selected_pair_reconcile_state(agent: &IceAgent) void {
@@ -608,8 +616,19 @@ fn ice_agent_selected_pair_reconcile_state(agent: &IceAgent) void {
         return;
     }
 
-    const pair_slot: usize = agent.selected_pair_index as usize;
-    if agent.checklist[pair_slot].nominated && ice_agent_trickle_is_complete(agent) {
+    const pair_slot_result: !usize = ice_agent_selected_pair_slot(agent);
+    if pair_slot_result.error_id != 0 {
+        return;
+    }
+    const pair_slot: usize = pair_slot_result.value;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return;
+    }
+    if pair_slot >= agent.checklist_count {
+        return;
+    }
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
+    if pair.nominated && ice_agent_trickle_is_complete(agent) {
         ice_agent_set_state(agent, ICE_AGENT_STATE_COMPLETED);
     } else {
         ice_agent_set_state(agent, ICE_AGENT_STATE_CONNECTED);
@@ -1197,7 +1216,13 @@ export fn ice_agent_rebuild_checklist(agent: &IceAgent) !usize {
     var selected_local_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE;
     var selected_remote_candidate_index: u16 = ICE_CANDIDATE_INDEX_NONE;
     if had_selected_pair {
-        const selected_pair_slot: usize = agent.selected_pair_index as usize;
+        const selected_pair_slot: usize = try ice_agent_selected_pair_slot(agent);
+        if selected_pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+            return error.InvalidPacket;
+        }
+        if selected_pair_slot >= agent.checklist_count {
+            return error.InvalidPacket;
+        }
         selected_pair_snapshot = agent.checklist[selected_pair_slot];
         selected_local_candidate_index = agent.checklist[selected_pair_slot].local_candidate_index;
         selected_remote_candidate_index = agent.checklist[selected_pair_slot].remote_candidate_index;

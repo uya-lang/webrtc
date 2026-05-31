@@ -104,8 +104,12 @@ export fn ring_queue_push(queue: &RingQueue, value: u64) !void {
         return error.RingQueueFull;
     }
 
-    queue.slots[queue.tail] = value;
-    queue.tail = ring_queue_next_index(queue, queue.tail);
+    const tail: usize = queue.tail;
+    if tail >= RING_QUEUE_MAX_CAPACITY {
+        return error.RingQueueConfigInvalid;
+    }
+    queue.slots[tail] = value;
+    queue.tail = ring_queue_next_index(queue, tail);
     queue.count = queue.count + 1;
     queue.push_count = queue.push_count + 1u64;
 
@@ -120,7 +124,11 @@ export fn ring_queue_peek(queue: &RingQueue) !u64 {
     if queue.count == 0 {
         return error.RingQueueEmpty;
     }
-    return queue.slots[queue.head];
+    const head: usize = queue.head;
+    if head >= RING_QUEUE_MAX_CAPACITY {
+        return error.RingQueueConfigInvalid;
+    }
+    return queue.slots[head];
 }
 
 export fn ring_queue_pop(queue: &RingQueue) !u64 {
@@ -129,8 +137,12 @@ export fn ring_queue_pop(queue: &RingQueue) !u64 {
         return error.RingQueueEmpty;
     }
 
-    const value: u64 = queue.slots[queue.head];
-    queue.head = ring_queue_next_index(queue, queue.head);
+    const head: usize = queue.head;
+    if head >= RING_QUEUE_MAX_CAPACITY {
+        return error.RingQueueConfigInvalid;
+    }
+    const value: u64 = queue.slots[head];
+    queue.head = ring_queue_next_index(queue, head);
     queue.count = queue.count - 1;
     queue.pop_count = queue.pop_count + 1u64;
     return value;
