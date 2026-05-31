@@ -7,6 +7,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,9 @@ TOOLCHAIN_BUG_SECTIONS = (
 )
 
 CODEX_CMD = os.environ.get("CODEX_CMD", "codex")
-CODEX_SANDBOX = os.environ.get("CODEX_SANDBOX", "").strip()
+# agent_loop expects child codex runs to be able to stage and commit work.
+DEFAULT_CODEX_SANDBOX = "danger-full-access"
+CODEX_SANDBOX = os.environ.get("CODEX_SANDBOX", DEFAULT_CODEX_SANDBOX).strip()
 VALID_CODEX_SANDBOXES = {
     "read-only",
     "workspace-write",
@@ -46,7 +49,10 @@ MAX_FAILS_PER_TASK = int(os.environ.get("MAX_FAILS_PER_TASK", "3"))
 RESULT_EXIT_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_EXIT_GRACE", "5")))
 RESULT_KILL_GRACE_SECONDS = max(1, int(os.environ.get("AGENT_RESULT_KILL_GRACE", "3")))
 
-if CODEX_SANDBOX and CODEX_SANDBOX not in VALID_CODEX_SANDBOXES:
+if not CODEX_SANDBOX:
+    CODEX_SANDBOX = DEFAULT_CODEX_SANDBOX
+
+if CODEX_SANDBOX not in VALID_CODEX_SANDBOXES:
     raise SystemExit(
         "unsupported CODEX_SANDBOX={!r}; expected one of: {}".format(
             CODEX_SANDBOX,
@@ -82,6 +88,11 @@ def parse_args():
         help="Show the current agent status for the selected project/todo and exit.",
     )
     parser.add_argument(
+        "--kill",
+        action="store_true",
+        help="Stop the running agent_loop.py process and its current child codex run, if any.",
+    )
+    parser.add_argument(
         "--status-lines",
         type=int,
         default=20,
@@ -91,6 +102,9 @@ def parse_args():
 
     if args.todo and args.todo_flag and args.todo != args.todo_flag:
         parser.error("use either the positional todo path or --todo, not both")
+
+    if args.status and args.kill:
+        parser.error("use either --status or --kill, not both")
 
     args.todo = args.todo_flag or args.todo
     return args
@@ -251,6 +265,7 @@ def empty_state(root, todo_file):
     return {
         "project_root": str(root),
         "todo_file": str(todo_file),
+        "runner": None,
         "done": [],
         "failed": {},
         "toolchain_bugs": [],
@@ -282,6 +297,7 @@ def load_state(state_file, root, todo_file):
     state.setdefault("failed", {})
     if "toolchain_bugs" not in state:
         state["toolchain_bugs"] = state.pop("compiler_bugs", [])
+    state.setdefault("runner", None)
     state.setdefault("commits", [])
     state.setdefault("pending_commit", None)
     state.setdefault("current", None)
@@ -331,6 +347,16 @@ def print_status(paths, state, status_lines):
     print(f"[agent] project root: {path_label(root, root)}")
     print(f"[agent] todo: {todo_label(root, resolve_path(root, state['todo_file']))}")
     print(f"[agent] updated at: {state.get('updated_at', '')}")
+    runner = state.get("runner")
+    runner_pid = runner.get("pid") if isinstance(runner, dict) else None
+    runner_alive = process_is_alive(runner_pid)
+    print(f"[agent] runner: {'running' if runner_alive else 'idle'}")
+    if runner_alive:
+        print(f"[agent] runner pid: {runner_pid}")
+        runner_started_at = runner.get("started_at")
+        if runner_started_at:
+            print(f"[agent] runner started at: {runner_started_at}")
+
     todo_summary = state.get("todo_summary", {})
     if isinstance(todo_summary, dict):
         total = todo_summary.get("total", 0)
@@ -422,7 +448,7 @@ def parse_todo(todo_file):
     支持 markdown checklist 格式：
 
     - [ ] 实现功能
-    - [~] 正在执行
+    - [~] 已开始执行，可能未完成或被中断，可恢复
     - [x] 已完成功能
     """
 
@@ -457,6 +483,20 @@ def parse_todo(todo_file):
 
 
 def choose_runnable_tasks(tasks, state):
+    candidate = preferred_pending_task(tasks, state)
+    if candidate is None:
+        return []
+
+    fails = state["failed"].get(candidate["id"], 0)
+    if fails >= MAX_FAILS_PER_TASK:
+        return []
+
+    return [candidate]
+
+
+def preferred_pending_task(tasks, state):
+    resumable_task = None
+
     for task in tasks:
         if task["done_in_file"]:
             continue
@@ -464,28 +504,24 @@ def choose_runnable_tasks(tasks, state):
         if task["id"] in state["done"]:
             continue
 
-        fails = state["failed"].get(task["id"], 0)
-        if fails >= MAX_FAILS_PER_TASK:
-            return []
+        if task["in_progress_in_file"]:
+            resumable_task = task
+            break
 
-        return [task]
+        if resumable_task is None:
+            resumable_task = task
 
-    return []
+    return resumable_task
 
 
 def choose_exhausted_tasks(tasks, state):
-    for task in tasks:
-        if task["done_in_file"]:
-            continue
-
-        if task["id"] in state["done"]:
-            continue
-
-        fails = state["failed"].get(task["id"], 0)
-        if fails >= MAX_FAILS_PER_TASK:
-            return [task]
-
+    candidate = preferred_pending_task(tasks, state)
+    if candidate is None:
         return []
+
+    fails = state["failed"].get(candidate["id"], 0)
+    if fails >= MAX_FAILS_PER_TASK:
+        return [candidate]
 
     return []
 
@@ -568,43 +604,6 @@ def set_tasks_marker(todo_file, tasks, marker):
     return previous_markers
 
 
-def restore_tasks_marker(todo_file, tasks, previous_markers):
-    if not tasks or not previous_markers:
-        return False
-
-    original_text = todo_file.read_text(encoding="utf-8")
-    lines = original_text.splitlines()
-    changed = False
-
-    for task in tasks:
-        previous_marker = previous_markers.get(task["id"])
-        if previous_marker is None:
-            continue
-
-        line_index = task["line_no"] - 1
-        if line_index < 0 or line_index >= len(lines):
-            continue
-
-        current_line = lines[line_index]
-        match = re.match(r"^(\s*-\s+\[)( |~|x|X)(\]\s+.*)$", current_line)
-        if match is None:
-            continue
-
-        current_marker = match.group(2)
-        if current_marker != "~":
-            continue
-
-        lines[line_index] = f"{match.group(1)}{previous_marker}{match.group(3)}"
-        changed = True
-
-    if not changed:
-        return False
-
-    trailing_newline = "\n" if original_text.endswith("\n") else ""
-    todo_file.write_text("\n".join(lines) + trailing_newline, encoding="utf-8")
-    return True
-
-
 def process_is_alive(pid):
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -618,21 +617,176 @@ def process_is_alive(pid):
     except OSError:
         return False
 
+    if process_is_zombie(pid):
+        return False
+
     return True
 
 
-def clear_stale_in_progress_tasks(todo_file, state):
+def process_is_zombie(pid):
+    stat_path = Path("/proc") / str(pid) / "stat"
+    try:
+        stat_text = stat_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    _head, _sep, tail = stat_text.rpartition(")")
+    if not tail:
+        return False
+
+    fields = tail.strip().split()
+    if not fields:
+        return False
+
+    return fields[0] == "Z"
+
+
+def runner_state():
+    return {
+        "pid": os.getpid(),
+        "started_at": now(),
+        "argv": [sys.executable, str(Path(__file__).resolve())],
+    }
+
+
+def register_runner(paths):
+    state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+    state["runner"] = runner_state()
+    save_state(paths["state_file"], state)
+
+
+def unregister_runner(paths):
+    state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+    runner = state.get("runner")
+    if not isinstance(runner, dict) or runner.get("pid") != os.getpid():
+        return
+
+    state["runner"] = None
+    save_state(paths["state_file"], state)
+
+
+def clear_stale_runner_state(state):
+    runner = state.get("runner")
+    if not isinstance(runner, dict):
+        return False
+
+    if process_is_alive(runner.get("pid")):
+        return False
+
+    state["runner"] = None
+    return True
+
+
+def clear_stale_current_state(state):
     current = state.get("current")
-    if isinstance(current, dict) and process_is_alive(current.get("pid")):
+    if not isinstance(current, dict):
         return False
 
-    tasks = parse_todo(todo_file)
-    in_progress_tasks = [task for task in tasks if task.get("in_progress_in_file")]
-    if not in_progress_tasks:
+    if process_is_alive(current.get("pid")):
         return False
 
-    set_tasks_marker(todo_file, in_progress_tasks, " ")
+    state["current"] = None
     return True
+
+
+def send_signal_to_pid(pid, sig):
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+
+
+def send_signal_to_pid_group(pid, sig):
+    try:
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+
+
+def wait_for_process_exit(pid, timeout_seconds):
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    while process_is_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+
+    return not process_is_alive(pid)
+
+
+def stop_tracked_process(pid, label, send_signal):
+    if not isinstance(pid, int) or pid <= 0:
+        print(f"[agent] {label}: not tracked")
+        return False
+
+    if not process_is_alive(pid):
+        print(f"[agent] {label}: already stopped (pid={pid})")
+        return False
+
+    print(f"[agent] {label}: sending SIGTERM (pid={pid})")
+    send_signal(pid, signal.SIGTERM)
+    if wait_for_process_exit(pid, RESULT_EXIT_GRACE_SECONDS):
+        print(f"[agent] {label}: stopped")
+        return True
+
+    print(f"[agent] {label}: still running, sending SIGKILL (pid={pid})")
+    send_signal(pid, signal.SIGKILL)
+    if wait_for_process_exit(pid, RESULT_KILL_GRACE_SECONDS):
+        print(f"[agent] {label}: stopped after SIGKILL")
+        return True
+
+    print(f"[agent] {label}: failed to stop (pid={pid})")
+    return False
+
+
+def kill_running_agent(paths):
+    state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+    runner = state.get("runner")
+    current = state.get("current")
+
+    runner_pid = runner.get("pid") if isinstance(runner, dict) else None
+    codex_pid = current.get("pid") if isinstance(current, dict) else None
+
+    if runner_pid == os.getpid():
+        runner_pid = None
+
+    print(f"[agent] kill request: root={path_label(paths['root'], paths['root'])}")
+
+    codex_stopped = stop_tracked_process(codex_pid, "codex process group", send_signal_to_pid_group)
+    runner_stopped = stop_tracked_process(runner_pid, "agent_loop process", send_signal_to_pid)
+
+    state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+    changed = False
+
+    current = state.get("current")
+    if isinstance(current, dict) and current.get("pid") == codex_pid and (
+        codex_stopped or not process_is_alive(codex_pid)
+    ):
+        state["current"] = None
+        changed = True
+
+    runner = state.get("runner")
+    if isinstance(runner, dict) and runner.get("pid") == runner_pid and (
+        runner_stopped or not process_is_alive(runner_pid)
+    ):
+        state["runner"] = None
+        changed = True
+
+    if changed:
+        save_state(paths["state_file"], state)
+
+    runner_alive = process_is_alive(runner_pid)
+    codex_alive = process_is_alive(codex_pid)
+    if runner_alive or codex_alive:
+        return 1
+
+    if not runner_stopped and not codex_stopped:
+        print("[agent] no running agent_loop.py or codex process found")
+
+    return 0
 
 
 def is_git_repo(root):
@@ -727,7 +881,7 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
 {git_repo_note}
 
 目标：
-严格按 todo 文件顺序执行；本次运行只处理当前排在最前面的 1 个未勾选任务。
+优先恢复 todo 中最前面的 `[~]` 任务；如果没有 `[~]`，再处理最前面的 `[ ]` 任务。本次运行只处理这 1 个当前任务。
 
 当前任务数：{len(runnable_tasks)}
 当前因失败次数达到上限而阻塞的前序任务数：{len(exhausted_tasks)}
@@ -741,11 +895,11 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
 要求：
 1. 直接读取并更新 `{todo_path}`，把它当作任务真实来源。
 2. 只处理上面列出的这个当前任务；不要顺手推进任何后续 todo 任务。
-3. 必须严格按 todo 文件顺序执行；如果当前任务阻塞、失败或暂时做不完，保持它为 `[ ]`，结束本轮，不得跳过到后续任务。
+3. 如果 todo 里存在 `[~]`，必须优先继续该恢复任务；只有没有 `[~]` 时，才处理新的 `[ ]` 任务。如果当前任务阻塞、失败或暂时做不完，保持它为 `[~]`，结束本轮，不得跳过到后续任务。
 4. 对代码实现类任务强制执行 TDD：先写或补最小 failing test，再运行它确认失败，然后实现最小改动让它通过，最后做必要的重构和回归。
 5. 优先复用项目里已有的测试、构建、lint、benchmark 入口；如果缺少测试基座而某个 todo 明确要求补齐，就先补最小可运行的项目级测试基座再继续。
 6. 只有在当前任务真正完成并且相关验证通过后，才把对应项改成 `[x]`，并且保留原任务文本，不要改写任务描述。
-7. 对当前任务暂时做不完时保持 `[ ]`，并在总结中说明阻塞原因。
+7. 对当前任务暂时做不完时保持 `[~]`，并在总结中说明阻塞原因。
 8. 修改代码后必须运行相关测试、构建或最小必要验证，并且这些验证必须实际通过；只有验证通过后才允许创建提交。输出里要说明执行了哪些验证，以及 TDD 的 red/green 分别用了什么命令。
 9. 如果怀疑遇到了项目工具链 bug（例如编译器、解释器、构建系统、测试运行器、包管理器本身的问题），必须在继续前把 bug 记录下来：
    - 先把问题缩减成最小可复现代码或最小可复现输入。
@@ -762,7 +916,7 @@ def build_prompt(root, todo_file, runnable_tasks, exhausted_tasks, toolchain_bug
      `## Notes`
    - `## Repro File` 小节下一行只放 repro 文件路径，并用反引号包起来。
    - `## Repro Code` 小节必须包含一个 fenced code block，内容要和 repro 文件内容一致；语言标记可按文件类型填写，也可以留空。
-   - 被该工具链 bug 阻塞的当前 todo 任务必须留在 `[ ]`，并写进 `blocked`。
+   - 被该工具链 bug 阻塞的当前 todo 任务必须留在 `[~]`，并写进 `blocked`。
 10. 如果当前目录是 git 仓库，并且你在本轮完成了当前任务或新增了当前任务相关的工具链 bug 记录，你必须在本轮结束前立即自己创建提交；不要依赖外层脚本代为提交，也不要把已勾选但未提交的当前任务留给下一轮。
 11. 提交要求：
    - 当前任务最多创建一个普通提交；不要把多个 todo 任务合并到同一次提交。
@@ -818,7 +972,7 @@ todo 文件：
 1. 先检查当前 git 状态和最近提交，确认哪些未提交改动属于上述任务或 bug 报告。
 2. 先重新运行与列表中第一个待补提交任务直接相关的验证命令，确认它们通过后，再只 stage 相关文件并立即创建一个清晰、自然的普通提交。
 3. 不要继续实现新的 todo 任务，不要扩大工作范围，不要把多个 todo 任务合并进同一个补提交，也不要把无关脏改动一起提交。
-4. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[ ]` 或修正相关文件，再把这次修正提交掉。
+4. 如果你发现上一个批次把 todo 勾选早了，先把错误勾选恢复成 `[~]` 或修正相关文件，再把这次修正提交掉。
 5. 结束前必须输出一行严格单行结果，要求：
    - 这一行必须以 `{RESULT_PREFIX}` 开头
    - 前缀后面紧跟一个单行 JSON
@@ -921,10 +1075,7 @@ def run_codex(
     if log_file is None:
         log_file = make_log_file(log_dir, runnable_tasks)
 
-    cmd = [CODEX_CMD, "exec"]
-    if CODEX_SANDBOX:
-        cmd.extend(["--sandbox", CODEX_SANDBOX])
-    cmd.extend(["--cd", str(root), prompt])
+    cmd = build_codex_exec_command(root, prompt)
 
     with log_file.open("w", encoding="utf-8") as handle:
         handle.write(f"[{now()}] START BATCH\n")
@@ -1046,6 +1197,18 @@ def run_codex(
     return returncode == 0, log_file
 
 
+def build_codex_exec_command(root, prompt):
+    return [
+        CODEX_CMD,
+        "exec",
+        "--sandbox",
+        CODEX_SANDBOX,
+        "--cd",
+        str(root),
+        prompt,
+    ]
+
+
 def normalize_string_list(value):
     if not isinstance(value, list):
         return []
@@ -1089,16 +1252,10 @@ def parse_agent_result(log_file):
 
 
 def send_signal_to_process_group(process, sig):
-    try:
-        os.killpg(process.pid, sig)
-        return True
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return False
+    return send_signal_to_pid_group(process.pid, sig)
 
 
-def restore_tasks_to_unchecked(todo_file, tasks):
+def restore_tasks_to_in_progress(todo_file, tasks):
     if not tasks:
         return False
 
@@ -1112,7 +1269,7 @@ def restore_tasks_to_unchecked(todo_file, tasks):
             continue
 
         current_line = lines[line_index]
-        updated_line = re.sub(r"^(\s*-\s+\[)(x|X)(\]\s+)", r"\1 \3", current_line, count=1)
+        updated_line = re.sub(r"^(\s*-\s+\[)(x|X)(\]\s+)", r"\1~\3", current_line, count=1)
         if updated_line == current_line:
             continue
 
@@ -1454,7 +1611,7 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
     for index, line in enumerate(dirty_lines[:10], start=1):
         print(f"[agent]   {index}. {line}")
 
-    previous_markers = set_tasks_marker(paths["todo_file"], recovery_tasks, "~")
+    set_tasks_marker(paths["todo_file"], recovery_tasks, "~")
     ok, log_file = run_codex(
         paths["root"],
         paths["todo_file"],
@@ -1474,8 +1631,6 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
             dirty_lines,
         ),
     )
-    restore_tasks_marker(paths["todo_file"], recovery_tasks, previous_markers)
-
     result = parse_agent_result(log_file)
     verification_commands = result.get("verification", [])
     verification_failed_command = None
@@ -1615,206 +1770,216 @@ def bump_failures(state, tasks):
 def main():
     args = parse_args()
     root = resolve_root(args.root)
-    ensure_gitignore(root)
     todo_file = resolve_todo_file(root, args.todo)
     paths = build_runtime_paths(root, todo_file)
 
+    if args.kill:
+        return kill_running_agent(paths)
+
     if args.status:
         state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
-        if clear_stale_in_progress_tasks(paths["todo_file"], state):
-            state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
+        if clear_stale_runner_state(state):
+            save_state(paths["state_file"], state)
+        if clear_stale_current_state(state):
+            save_state(paths["state_file"], state)
         tasks = parse_todo(paths["todo_file"])
         if reconcile_state_with_todo(state, tasks):
             save_state(paths["state_file"], state)
         print_status(paths, state, args.status_lines)
         return 0
 
+    ensure_gitignore(root)
+    register_runner(paths)
     print(f"[agent] start: root={path_label(root, root)} todo={todo_label(root, todo_file)}")
     git_repo = is_git_repo(paths["root"])
 
-    while True:
-        state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
-        if clear_stale_in_progress_tasks(paths["todo_file"], state):
+    try:
+        while True:
             state = load_state(paths["state_file"], paths["root"], paths["todo_file"])
-        tasks_before = parse_todo(paths["todo_file"])
-        if reconcile_state_with_todo(state, tasks_before):
+            if clear_stale_runner_state(state):
+                state["runner"] = runner_state()
+                save_state(paths["state_file"], state)
+            if clear_stale_current_state(state):
+                save_state(paths["state_file"], state)
+            tasks_before = parse_todo(paths["todo_file"])
+            if reconcile_state_with_todo(state, tasks_before):
+                save_state(paths["state_file"], state)
+
+            if git_repo and isinstance(state.get("pending_commit"), dict):
+                recovered = run_pending_commit_recovery(paths, state)
+                if recovered:
+                    continue
+
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            runnable_tasks = choose_runnable_tasks(tasks_before, state)
+            exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
+
+            recovery_tasks = list(runnable_tasks[:1])
+            current_state_task = task_for_text((state.get("current") or {}).get("current_task"), tasks_before)
+            if current_state_task is not None:
+                recovery_tasks = [current_state_task]
+
+            if git_repo and has_uncommitted_changes(paths["root"]) and recovery_tasks:
+                recovered = run_dirty_worktree_recovery(paths, state, recovery_tasks, exhausted_tasks)
+                if recovered:
+                    continue
+
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            if not runnable_tasks:
+                if exhausted_tasks:
+                    print(f"[agent] no runnable task left ({len(exhausted_tasks)} blocked by fail limit)")
+                else:
+                    print("[agent] no task left")
+                break
+
+            batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
+            batch_head_before = git_head_commit(paths["root"])
+            state["current"] = {
+                "project_root": path_label(paths["root"], paths["root"]),
+                "todo_file": todo_label(paths["root"], paths["todo_file"]),
+                "started_at": now(),
+                "task_count": len(runnable_tasks),
+                "current_task": runnable_tasks[0]["text"],
+                "tasks": [task["text"] for task in runnable_tasks[:20]],
+                "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
+                "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
+                "git_repo": git_repo,
+                "log_file": path_label(paths["root"], batch_log_file),
+                "pid": None,
+                "heartbeat_at": None,
+                "elapsed_seconds": 0,
+                "log_bytes": 0,
+                "log_updated_at": None,
+            }
             save_state(paths["state_file"], state)
 
-        if git_repo and isinstance(state.get("pending_commit"), dict):
-            recovered = run_pending_commit_recovery(paths, state)
-            if recovered:
-                continue
+            print(f"[agent] run batch: {len(runnable_tasks)} runnable tasks")
+            print(f"[agent] current task: {runnable_tasks[0]['text']}")
+            print_batch_preview(runnable_tasks)
+            set_tasks_marker(paths["todo_file"], runnable_tasks[:1], "~")
+            ok, log_file = run_codex(
+                paths["root"],
+                paths["todo_file"],
+                paths["log_dir"],
+                runnable_tasks,
+                exhausted_tasks,
+                paths["toolchain_bug_dir"],
+                paths["toolchain_bug_repro_dir"],
+                state_file=paths["state_file"],
+                state=state,
+                log_file=batch_log_file,
+            )
+            tasks_after = parse_todo(paths["todo_file"])
+            reconcile_state_with_todo(state, tasks_after)
+            result = parse_agent_result(log_file)
+            newly_completed = completed_tasks(tasks_before, tasks_after)
+            completed_candidates = list(newly_completed)
+            blocked_tasks = match_tasks_by_text(result.get("blocked", []), runnable_tasks)
+            blocked_tasks = exclude_tasks(blocked_tasks, newly_completed)
+            verification_commands = result.get("verification", [])
+            verification_failed_command = None
+            verification_invalid = False
+            toolchain_bug_reports = collect_valid_toolchain_bug_reports(
+                paths["root"],
+                result.get("toolchain_bugs", []),
+                paths["toolchain_bug_dir"],
+                paths["toolchain_bug_repro_dir"],
+            )
+            invalid_toolchain_bug_reports = len(result.get("toolchain_bugs", [])) - len(toolchain_bug_reports)
 
-            time.sleep(SLEEP_SECONDS)
-            continue
-
-        runnable_tasks = choose_runnable_tasks(tasks_before, state)
-        exhausted_tasks = choose_exhausted_tasks(tasks_before, state)
-
-        recovery_tasks = list(runnable_tasks[:1])
-        current_state_task = task_for_text((state.get("current") or {}).get("current_task"), tasks_before)
-        if current_state_task is not None:
-            recovery_tasks = [current_state_task]
-
-        if git_repo and has_uncommitted_changes(paths["root"]) and recovery_tasks:
-            recovered = run_dirty_worktree_recovery(paths, state, recovery_tasks, exhausted_tasks)
-            if recovered:
-                continue
-
-            time.sleep(SLEEP_SECONDS)
-            continue
-
-        if not runnable_tasks:
-            if exhausted_tasks:
-                print(f"[agent] no runnable task left ({len(exhausted_tasks)} blocked by fail limit)")
-            else:
-                print("[agent] no task left")
-            break
-
-        batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
-        batch_head_before = git_head_commit(paths["root"])
-        state["current"] = {
-            "project_root": path_label(paths["root"], paths["root"]),
-            "todo_file": todo_label(paths["root"], paths["todo_file"]),
-            "started_at": now(),
-            "task_count": len(runnable_tasks),
-            "current_task": runnable_tasks[0]["text"],
-            "tasks": [task["text"] for task in runnable_tasks[:20]],
-            "toolchain_bug_dir": path_label(paths["root"], paths["toolchain_bug_dir"]),
-            "toolchain_bug_repro_dir": path_label(paths["root"], paths["toolchain_bug_repro_dir"]),
-            "git_repo": git_repo,
-            "log_file": path_label(paths["root"], batch_log_file),
-            "pid": None,
-            "heartbeat_at": None,
-            "elapsed_seconds": 0,
-            "log_bytes": 0,
-            "log_updated_at": None,
-        }
-        save_state(paths["state_file"], state)
-
-        print(f"[agent] run batch: {len(runnable_tasks)} runnable tasks")
-        print(f"[agent] current task: {runnable_tasks[0]['text']}")
-        print_batch_preview(runnable_tasks)
-        previous_markers = set_tasks_marker(paths["todo_file"], runnable_tasks[:1], "~")
-        ok, log_file = run_codex(
-            paths["root"],
-            paths["todo_file"],
-            paths["log_dir"],
-            runnable_tasks,
-            exhausted_tasks,
-            paths["toolchain_bug_dir"],
-            paths["toolchain_bug_repro_dir"],
-            state_file=paths["state_file"],
-            state=state,
-            log_file=batch_log_file,
-        )
-        restore_tasks_marker(paths["todo_file"], runnable_tasks[:1], previous_markers)
-
-        tasks_after = parse_todo(paths["todo_file"])
-        reconcile_state_with_todo(state, tasks_after)
-        result = parse_agent_result(log_file)
-        newly_completed = completed_tasks(tasks_before, tasks_after)
-        completed_candidates = list(newly_completed)
-        blocked_tasks = match_tasks_by_text(result.get("blocked", []), runnable_tasks)
-        blocked_tasks = exclude_tasks(blocked_tasks, newly_completed)
-        verification_commands = result.get("verification", [])
-        verification_failed_command = None
-        verification_invalid = False
-        toolchain_bug_reports = collect_valid_toolchain_bug_reports(
-            paths["root"],
-            result.get("toolchain_bugs", []),
-            paths["toolchain_bug_dir"],
-            paths["toolchain_bug_repro_dir"],
-        )
-        invalid_toolchain_bug_reports = len(result.get("toolchain_bugs", [])) - len(toolchain_bug_reports)
-
-        if completed_candidates:
-            if not verification_commands:
-                print("[agent] completed task missing verification commands; restore todo to unchecked")
-                verification_invalid = True
-            else:
-                _passed_verification, verification_failed_command = run_verification_commands(
-                    paths["root"],
-                    verification_commands,
-                )
-                if verification_failed_command is not None:
-                    print("[agent] completed task failed external verification replay; restore todo to unchecked")
+            if completed_candidates:
+                if not verification_commands:
+                    print("[agent] completed task missing verification commands; keep task as in-progress")
                     verification_invalid = True
+                else:
+                    _passed_verification, verification_failed_command = run_verification_commands(
+                        paths["root"],
+                        verification_commands,
+                    )
+                    if verification_failed_command is not None:
+                        print("[agent] completed task failed external verification replay; keep task as in-progress")
+                        verification_invalid = True
+
+                if verification_invalid:
+                    if restore_tasks_to_in_progress(paths["todo_file"], completed_candidates):
+                        tasks_after = parse_todo(paths["todo_file"])
+                        reconcile_state_with_todo(state, tasks_after)
+                    newly_completed = []
+
+            reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
+            detected_commits = collect_new_commits(paths["root"], batch_head_before)
+            commits = list(reported_commits)
+            merge_unique_strings(commits, detected_commits)
+            invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+
+            if verification_invalid and commits:
+                print("[agent] ignore commits from batch because task completion was not verification-backed")
+                commits = []
+
+            commit_required = git_repo and (bool(newly_completed) or bool(toolchain_bug_reports))
+
+            if commit_required and not commits:
+                reasons = []
+                if newly_completed:
+                    reasons.append(f"{len(newly_completed)} completed task(s)")
+                if toolchain_bug_reports:
+                    reasons.append(f"{len(toolchain_bug_reports)} toolchain bug report(s)")
+                joined_reasons = " and ".join(reasons)
+                print(f"[agent] warning: batch produced {joined_reasons} but no new git commit was created")
+                print("[agent] queue recovery: agent will run a commit-only follow-up batch")
+                queue_pending_commit(state, newly_completed, toolchain_bug_reports)
+                state["current"] = None
+                save_state(paths["state_file"], state)
+                continue
+
+            if newly_completed:
+                print(f"[agent] completed: {len(newly_completed)} task(s)")
+                merge_done_ids(state, newly_completed)
+
+            if blocked_tasks:
+                print(f"[agent] blocked: {len(blocked_tasks)} task(s)")
+                bump_failures(state, blocked_tasks)
+
+            if toolchain_bug_reports:
+                print(f"[agent] recorded toolchain bug reports: {len(toolchain_bug_reports)}")
+                merge_unique_strings(state.setdefault("toolchain_bugs", []), toolchain_bug_reports)
+
+            if invalid_toolchain_bug_reports > 0:
+                print(f"[agent] ignored invalid toolchain bug reports: {invalid_toolchain_bug_reports}")
+
+            if commits:
+                print(f"[agent] recorded commits: {len(commits)}")
+                merge_unique_strings(state.setdefault("commits", []), commits)
+
+            if invalid_commits > 0:
+                print(f"[agent] ignored invalid commits: {invalid_commits}")
 
             if verification_invalid:
-                if restore_tasks_to_unchecked(paths["todo_file"], completed_candidates):
-                    tasks_after = parse_todo(paths["todo_file"])
-                    reconcile_state_with_todo(state, tasks_after)
-                newly_completed = []
+                first_task = runnable_tasks[0]
+                if verification_failed_command is None:
+                    print(f"[agent] verification required before commit: {first_task['text']}")
+                bump_failures(state, [first_task])
 
-        reported_commits = collect_valid_commits(paths["root"], result.get("commits", []))
-        detected_commits = collect_new_commits(paths["root"], batch_head_before)
-        commits = list(reported_commits)
-        merge_unique_strings(commits, detected_commits)
-        invalid_commits = len(result.get("commits", [])) - len(reported_commits)
+            if not newly_completed and not blocked_tasks and not ok and not verification_invalid:
+                first_task = runnable_tasks[0]
+                print(f"[agent] failed without progress: {first_task['text']}")
+                bump_failures(state, [first_task])
 
-        if verification_invalid and commits:
-            print("[agent] ignore commits from batch because task completion was not verification-backed")
-            commits = []
+            if not newly_completed and not blocked_tasks and ok and not verification_invalid:
+                first_task = runnable_tasks[0]
+                print(f"[agent] no explicit progress reported, mark failed once: {first_task['text']}")
+                bump_failures(state, [first_task])
 
-        commit_required = git_repo and (bool(newly_completed) or bool(toolchain_bug_reports))
-
-        if commit_required and not commits:
-            reasons = []
-            if newly_completed:
-                reasons.append(f"{len(newly_completed)} completed task(s)")
-            if toolchain_bug_reports:
-                reasons.append(f"{len(toolchain_bug_reports)} toolchain bug report(s)")
-            joined_reasons = " and ".join(reasons)
-            print(f"[agent] warning: batch produced {joined_reasons} but no new git commit was created")
-            print("[agent] queue recovery: agent will run a commit-only follow-up batch")
-            queue_pending_commit(state, newly_completed, toolchain_bug_reports)
             state["current"] = None
             save_state(paths["state_file"], state)
-            continue
 
-        if newly_completed:
-            print(f"[agent] completed: {len(newly_completed)} task(s)")
-            merge_done_ids(state, newly_completed)
-
-        if blocked_tasks:
-            print(f"[agent] blocked: {len(blocked_tasks)} task(s)")
-            bump_failures(state, blocked_tasks)
-
-        if toolchain_bug_reports:
-            print(f"[agent] recorded toolchain bug reports: {len(toolchain_bug_reports)}")
-            merge_unique_strings(state.setdefault("toolchain_bugs", []), toolchain_bug_reports)
-
-        if invalid_toolchain_bug_reports > 0:
-            print(f"[agent] ignored invalid toolchain bug reports: {invalid_toolchain_bug_reports}")
-
-        if commits:
-            print(f"[agent] recorded commits: {len(commits)}")
-            merge_unique_strings(state.setdefault("commits", []), commits)
-
-        if invalid_commits > 0:
-            print(f"[agent] ignored invalid commits: {invalid_commits}")
-
-        if verification_invalid:
-            first_task = runnable_tasks[0]
-            if verification_failed_command is None:
-                print(f"[agent] verification required before commit: {first_task['text']}")
-            bump_failures(state, [first_task])
-
-        if not newly_completed and not blocked_tasks and not ok and not verification_invalid:
-            first_task = runnable_tasks[0]
-            print(f"[agent] failed without progress: {first_task['text']}")
-            bump_failures(state, [first_task])
-
-        if not newly_completed and not blocked_tasks and ok and not verification_invalid:
-            first_task = runnable_tasks[0]
-            print(f"[agent] no explicit progress reported, mark failed once: {first_task['text']}")
-            bump_failures(state, [first_task])
-
-        state["current"] = None
-        save_state(paths["state_file"], state)
-
-        time.sleep(SLEEP_SECONDS)
+            time.sleep(SLEEP_SECONDS)
+    finally:
+        unregister_runner(paths)
 
     return 0
 
