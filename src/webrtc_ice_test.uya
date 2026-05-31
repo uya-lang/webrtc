@@ -3,6 +3,9 @@ use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
 use webrtc.ice.gather;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
 
 fn ice_test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
@@ -211,4 +214,228 @@ test "host candidate gathering skips unspecified addresses and zero-port binding
     try expect(agent.local_candidate_count == 1usize);
     try expect(agent.local_candidates[0].address.port == 3478u16);
     try expect(agent.local_candidates[0].network_id == 12u16);
+}
+
+test "srflx candidate gathering builds binding request and adds related base metadata from success response" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 19u64);
+    agent.generation = 4u32;
+
+    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    ice_host_interface_descriptor_init(&desc);
+    try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.10" as &[byte]);
+    desc.network_id = 4u16;
+    desc.is_up = true;
+
+    const base_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
+    );
+
+    var stun_server: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.1" as &[byte], 3478u16);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        1 as byte,
+        2 as byte,
+        3 as byte,
+        4 as byte,
+        5 as byte,
+        6 as byte,
+        7 as byte,
+        8 as byte,
+        9 as byte,
+        10 as byte,
+        11 as byte,
+        12 as byte,
+    ];
+    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var request: [byte: 128] = [];
+    const request_len: usize = try ice_srflx_build_binding_request(&transaction, request[0:128]);
+    try expect(request_len > STUN_HEADER_BYTES);
+
+    const request_header: StunMessageHeader = try stun_header_parse(request[0:request_len]);
+    try expect(request_header.method == STUN_METHOD_BINDING);
+    try expect(request_header.message_class == STUN_MESSAGE_CLASS_REQUEST);
+    try expect(ice_test_bytes_equal(
+        request_header.transaction_id[0:STUN_TRANSACTION_ID_BYTES],
+        txid[0:STUN_TRANSACTION_ID_BYTES],
+    ));
+    try stun_verify_fingerprint(request[0:request_len]);
+
+    var response: [byte: 128] = [];
+    var response_builder: StunMessageBuilder = StunMessageBuilder{};
+    var mapped_ipv4: [byte: 4] = [203 as byte, 0 as byte, 113 as byte, 40 as byte];
+    try stun_builder_init_binding_success_response(&response_builder, response[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 40000u16, mapped_ipv4[0:4]);
+    try stun_builder_append_fingerprint(&response_builder);
+    const response_len: usize = try stun_builder_finish(&response_builder);
+
+    const result: IceSrflxGatherResult = try ice_agent_gather_srflx_candidate_from_response(&agent, &transaction, response[0:response_len]);
+    try expect(result.candidate_count == 1usize);
+    try expect(result.duplicate_count == 0usize);
+    try expect(agent.local_candidate_count == 2usize);
+
+    const srflx: &IceCandidate = &agent.local_candidates[1];
+    try expect(srflx.candidate_type == ICE_CANDIDATE_TYPE_SRFLX);
+    try expect(srflx.base_candidate_index == base_index);
+    try expect(srflx.generation == 4u32);
+    try expect(srflx.foundation_len == 16usize);
+    try expect(ice_candidate_has_related_address(srflx));
+    try expect(ice_transport_address_equal(&srflx.related_address, &agent.local_candidates[base_index as usize].address));
+    try expect(ice_test_bytes_equal(srflx.address.host[0:srflx.address.host_len], "203.0.113.40" as &[byte]));
+    try expect(srflx.address.port == 40000u16);
+    try expect(srflx.network_id == 4u16);
+}
+
+test "srflx candidate gathering deduplicates repeated mapped addresses and host regather prunes stale srflx entries" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLED, 23u64);
+    agent.generation = 8u32;
+
+    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    ice_host_interface_descriptor_init(&desc);
+    try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "10.0.0.4" as &[byte]);
+    desc.network_id = 8u16;
+    desc.is_up = true;
+
+    const base_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5000u16 },
+    );
+
+    var stun_server: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.2" as &[byte], 3478u16);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        21 as byte,
+        22 as byte,
+        23 as byte,
+        24 as byte,
+        25 as byte,
+        26 as byte,
+        27 as byte,
+        28 as byte,
+        29 as byte,
+        30 as byte,
+        31 as byte,
+        32 as byte,
+    ];
+    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var response: [byte: 128] = [];
+    var response_builder: StunMessageBuilder = StunMessageBuilder{};
+    var mapped_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 44 as byte];
+    try stun_builder_init_binding_success_response(&response_builder, response[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_xor_mapped_address_ipv4(&response_builder, 41000u16, mapped_ipv4[0:4]);
+    const response_len: usize = try stun_builder_finish(&response_builder);
+
+    _ = try ice_agent_gather_srflx_candidate_from_response(&agent, &transaction, response[0:response_len]);
+    const duplicate_result: IceSrflxGatherResult = try ice_agent_gather_srflx_candidate_from_response(&agent, &transaction, response[0:response_len]);
+    try expect(duplicate_result.candidate_count == 0usize);
+    try expect(duplicate_result.duplicate_count == 1usize);
+    try expect(agent.local_candidate_count == 2usize);
+
+    var ports: [IceHostPortBinding: 1] = [
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 7000u16 },
+    ];
+    var next_descriptors: [IceHostInterfaceDescriptor: 1] = [];
+    ice_host_interface_descriptor_init(&next_descriptors[0]);
+    try ice_host_interface_descriptor_set_name(&next_descriptors[0], "eth1" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&next_descriptors[0], ICE_ADDRESS_FAMILY_IPV4, "10.0.0.9" as &[byte]);
+    next_descriptors[0].network_id = 9u16;
+    next_descriptors[0].is_up = true;
+
+    const host_result: IceHostGatherResult = try ice_agent_gather_host_candidates_from_descriptors(
+        &agent,
+        &next_descriptors[0],
+        1usize,
+        &ports[0],
+        1usize,
+    );
+    try expect(host_result.pruned_host_count == 1usize);
+    try expect(agent.local_candidate_count == 1usize);
+    try expect(agent.local_candidates[0].candidate_type == ICE_CANDIDATE_TYPE_HOST);
+    try expect(agent.local_candidates[0].address.port == 7000u16);
+}
+
+test "srflx candidate gathering rejects mismatched transaction ids and non-success responses" {
+    var agent: IceAgent = IceAgent{};
+    ice_agent_init(&agent, ICE_AGENT_ROLE_CONTROLLING, 31u64);
+
+    var desc: IceHostInterfaceDescriptor = IceHostInterfaceDescriptor{};
+    ice_host_interface_descriptor_init(&desc);
+    try ice_host_interface_descriptor_set_name(&desc, "eth0" as &[byte]);
+    try ice_host_interface_descriptor_set_host(&desc, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.20" as &[byte]);
+    desc.network_id = 5u16;
+    desc.is_up = true;
+
+    const base_index: u16 = try ice_agent_add_host_candidate(
+        &agent,
+        &desc,
+        IceHostPortBinding{ component_id: ICE_COMPONENT_RTP, port: 5500u16 },
+    );
+
+    var stun_server: IceTransportAddress = IceTransportAddress{};
+    try ice_transport_address_set(&stun_server, ICE_ADDRESS_FAMILY_IPV4, "198.51.100.9" as &[byte], 3478u16);
+
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        61 as byte,
+        62 as byte,
+        63 as byte,
+        64 as byte,
+        65 as byte,
+        66 as byte,
+        67 as byte,
+        68 as byte,
+        69 as byte,
+        70 as byte,
+        71 as byte,
+        72 as byte,
+    ];
+    var transaction: IceSrflxGatherTransaction = IceSrflxGatherTransaction{};
+    try ice_srflx_gather_transaction_init(&transaction, &agent, base_index, &stun_server, txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var mismatched_txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        81 as byte,
+        82 as byte,
+        83 as byte,
+        84 as byte,
+        85 as byte,
+        86 as byte,
+        87 as byte,
+        88 as byte,
+        89 as byte,
+        90 as byte,
+        91 as byte,
+        92 as byte,
+    ];
+    var success_packet: [byte: 128] = [];
+    var success_builder: StunMessageBuilder = StunMessageBuilder{};
+    var mapped_ipv4: [byte: 4] = [198 as byte, 51 as byte, 100 as byte, 77 as byte];
+    try stun_builder_init_binding_success_response(&success_builder, success_packet[0:128], mismatched_txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_xor_mapped_address_ipv4(&success_builder, 42000u16, mapped_ipv4[0:4]);
+    const success_len: usize = try stun_builder_finish(&success_builder);
+
+    const mismatched_result: !IceSrflxGatherResult =
+        ice_agent_gather_srflx_candidate_from_response(&agent, &transaction, success_packet[0:success_len]);
+    try expect(mismatched_result.error_id == @error_id(error.InvalidPacket));
+
+    var error_packet: [byte: 128] = [];
+    var error_builder: StunMessageBuilder = StunMessageBuilder{};
+    try stun_builder_init_binding_error_response(&error_builder, error_packet[0:128], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_error_code(&error_builder, 400u16, "bad request" as &[byte]);
+    try stun_builder_append_fingerprint(&error_builder);
+    const error_len: usize = try stun_builder_finish(&error_builder);
+
+    const error_result: !IceSrflxGatherResult =
+        ice_agent_gather_srflx_candidate_from_response(&agent, &transaction, error_packet[0:error_len]);
+    try expect(error_result.error_id == @error_id(error.InvalidPacket));
 }
