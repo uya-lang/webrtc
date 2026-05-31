@@ -24,6 +24,9 @@ rg -Fq 'test "role conflict request resolution follows RFC 8445 tie breaker rule
 rg -Fq 'test "regular nomination waits for a valid pair and marks a successful nomination"' src/webrtc_ice_test.uya
 rg -Fq 'test "connectivity check success response updates pair timing consent and validity"' src/webrtc_ice_test.uya
 rg -Fq 'test "aggressive nomination mode allows use-candidate on the first controlling check"' src/webrtc_ice_test.uya
+rg -Fq 'test "consent freshness on selected pair schedules periodic binding checks without leaving completed state"' src/webrtc_ice_test.uya
+rg -Fq 'test "consent freshness timeout transitions selected pair through disconnected and failed"' src/webrtc_ice_test.uya
+rg -Fq 'test "consent freshness recovery restores selected pair after disconnected retry succeeds"' src/webrtc_ice_test.uya
 rg -Fq 'test "role conflict error responses switch roles refresh tie breaker and requeue the pair"' src/webrtc_ice_test.uya
 rg -Fq 'test "non-role-conflict error responses fail the pair and stale checklist transactions are rejected"' src/webrtc_ice_test.uya
 rg -Fq 'test "candidate priority helpers follow RFC 8445 formula and reject invalid inputs"' src/webrtc_ice_test.uya
@@ -64,6 +67,7 @@ rg -Fq "export fn candidate_pair_sort_by_priority_desc" src/webrtc/ice/checklist
 rg -Fq "export fn candidate_pair_seed_initial_states" src/webrtc/ice/checklist.uya
 rg -Fq "export fn candidate_pair_note_check_sent" src/webrtc/ice/checklist.uya
 rg -Fq "export fn candidate_pair_note_check_succeeded" src/webrtc/ice/checklist.uya
+rg -Fq "export fn candidate_pair_note_consent_observed" src/webrtc/ice/checklist.uya
 rg -Fq "export fn candidate_pair_note_check_failed" src/webrtc/ice/checklist.uya
 rg -Fq "export fn candidate_pair_is_selected" src/webrtc/ice/checklist.uya
 
@@ -90,6 +94,8 @@ rg -Fq "export fn ice_agent_resolve_role_conflict_request" src/webrtc/ice/agent.
 rg -Fq "export fn ice_connectivity_check_transaction_init" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_connectivity_check_build_binding_request" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_connectivity_check_handle_response" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_consent_check_transaction_init" src/webrtc/ice/agent.uya
+rg -Fq "export fn ice_agent_consent_tick" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_select_checklist_pair" src/webrtc/ice/agent.uya
 rg -Fq "export fn ice_agent_has_selected_pair" src/webrtc/ice/agent.uya
 

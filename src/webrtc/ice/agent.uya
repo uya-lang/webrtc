@@ -469,6 +469,99 @@ fn ice_role_conflict_result_make(error_code: u16, role_changed: bool) IceRoleCon
     };
 }
 
+fn ice_agent_selected_pair_slot(agent: &IceAgent) !usize {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if agent.selected_pair_index == ICE_CANDIDATE_INDEX_NONE {
+        return error.InvalidPacket;
+    }
+
+    const pair_slot: usize = agent.selected_pair_index as usize;
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+    if !agent.checklist[pair_slot].selected {
+        return error.InvalidPacket;
+    }
+    return pair_slot;
+}
+
+fn ice_agent_selected_pair_restore_state(agent: &IceAgent, pair_slot: usize) void {
+    if agent == null {
+        return;
+    }
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return;
+    }
+    if pair_slot >= agent.checklist_count {
+        return;
+    }
+    if !agent.checklist[pair_slot].selected {
+        return;
+    }
+
+    if agent.checklist[pair_slot].nominated {
+        agent.state = ICE_AGENT_STATE_COMPLETED;
+    } else {
+        agent.state = ICE_AGENT_STATE_CONNECTED;
+    }
+}
+
+fn ice_agent_selected_pair_unselect(agent: &IceAgent, pair_slot: usize) void {
+    if agent == null {
+        return;
+    }
+    if pair_slot < ICE_MAX_CANDIDATE_PAIRS && pair_slot < agent.checklist_count {
+        agent.checklist[pair_slot].selected = false;
+    }
+    if agent.selected_pair_index == pair_slot as u16 {
+        agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
+    }
+}
+
+fn ice_agent_selected_pair_mark_disconnected(agent: &IceAgent, pair_slot: usize, now_us: u64) void {
+    if agent == null {
+        return;
+    }
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return;
+    }
+    if pair_slot >= agent.checklist_count {
+        return;
+    }
+
+    var pair: &CandidatePair = &agent.checklist[pair_slot];
+    if pair.consent_failures != 0xFFu8 {
+        pair.consent_failures = pair.consent_failures + 1u8;
+    }
+    pair.consent_inflight = false;
+    pair.valid = false;
+    pair.state = ICE_CANDIDATE_PAIR_STATE_IN_PROGRESS;
+    pair.consent_deadline_us = now_us;
+    agent.state = ICE_AGENT_STATE_DISCONNECTED;
+}
+
+fn ice_agent_selected_pair_fail(agent: &IceAgent, pair_slot: usize, now_us: u64) void {
+    if agent == null {
+        return;
+    }
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return;
+    }
+    if pair_slot >= agent.checklist_count {
+        return;
+    }
+
+    agent.checklist[pair_slot].consent_failures = 2u8;
+    candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
+    ice_agent_selected_pair_unselect(agent, pair_slot);
+    agent.state = ICE_AGENT_STATE_FAILED;
+}
+
 // RFC 8445 requires a fresh tie-breaker after a 487 role conflict.
 // Derive a different 64-bit value from the existing seed until a CSPRNG lands in Phase 7.
 fn ice_agent_next_tie_breaker(current: u64) u64 {
@@ -756,6 +849,7 @@ fn ice_agent_note_role_conflict(pair: &CandidatePair, response_at_us: u64) void 
         pair.response_count = pair.response_count + 1u32;
     }
     pair.last_response_received_at_us = response_at_us;
+    pair.consent_inflight = false;
     pair.nominated = false;
     pair.selected = false;
     pair.state = ICE_CANDIDATE_PAIR_STATE_WAITING;
@@ -990,6 +1084,66 @@ export fn ice_agent_has_selected_pair(agent: &IceAgent) bool {
     return candidate_pair_is_selected(&agent.checklist[selected_pair_slot]);
 }
 
+export fn ice_agent_consent_check_transaction_init(
+    transaction: &IceConnectivityCheckTransaction,
+    agent: &IceAgent,
+    transaction_id: &[byte],
+) !void {
+    if transaction == null || agent == null {
+        return error.InvalidPacket;
+    }
+
+    const pair_slot: usize = try ice_agent_selected_pair_slot(agent);
+    return ice_connectivity_check_transaction_init(
+        transaction,
+        agent,
+        pair_slot as u16,
+        transaction_id,
+        false,
+    );
+}
+
+export fn ice_agent_consent_tick(agent: &IceAgent, now_us: u64) !bool {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if agent.selected_pair_index == ICE_CANDIDATE_INDEX_NONE {
+        return false;
+    }
+
+    const pair_slot: usize = try ice_agent_selected_pair_slot(agent);
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+    var pair: &CandidatePair = &agent.checklist[pair_slot];
+    if pair.consent_deadline_us == 0u64 {
+        return false;
+    }
+
+    if pair.consent_inflight {
+        const timeout_at_us: u64 = ice_u64_add_saturating(
+            pair.last_request_sent_at_us,
+            (agent.disconnected_timeout_ms as u64) * 1000u64,
+        );
+        if now_us < timeout_at_us {
+            return false;
+        }
+
+        if pair.consent_failures == 0u8 {
+            ice_agent_selected_pair_mark_disconnected(agent, pair_slot, now_us);
+            return true;
+        }
+
+        ice_agent_selected_pair_fail(agent, pair_slot, now_us);
+        return false;
+    }
+
+    return now_us >= pair.consent_deadline_us;
+}
+
 export fn ice_agent_resolve_role_conflict_request(
     agent: &IceAgent,
     remote_role: u8,
@@ -1143,9 +1297,13 @@ export fn ice_connectivity_check_build_binding_request(
     if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
         return error.InvalidPacket;
     }
+    const is_selected_consent_check: bool =
+        agent.selected_pair_index == transaction.pair_index && agent.checklist[pair_slot].selected;
     candidate_pair_note_check_sent(&agent.checklist[pair_slot], now_us);
     transaction.sent_at_us = now_us;
-    agent.state = ICE_AGENT_STATE_CHECKING;
+    if !is_selected_consent_check {
+        agent.state = ICE_AGENT_STATE_CHECKING;
+    }
     return packet_len;
 }
 
@@ -1194,14 +1352,19 @@ export fn ice_agent_connectivity_check_handle_request(
         return error.InvalidPacket;
     }
 
-    agent.checklist[pair_slot].valid = true;
-    agent.checklist[pair_slot].state = ICE_CANDIDATE_PAIR_STATE_SUCCEEDED;
     agent.checklist[pair_slot].consent_deadline_us = ice_u64_add_saturating(
         now_us,
         (agent.consent_interval_ms as u64) * 1000u64,
     );
+    candidate_pair_note_consent_observed(
+        &agent.checklist[pair_slot],
+        now_us,
+        agent.checklist[pair_slot].consent_deadline_us,
+    );
     if request.use_candidate {
         try ice_agent_select_checklist_pair(agent, pair_index, true);
+    } else if agent.selected_pair_index == pair_index && agent.checklist[pair_slot].selected {
+        ice_agent_selected_pair_restore_state(agent, pair_slot);
     } else if agent.state == ICE_AGENT_STATE_NEW {
         agent.state = ICE_AGENT_STATE_CHECKING;
     }
@@ -1260,18 +1423,21 @@ export fn ice_agent_connectivity_check_handle_response(
         );
         if transaction.use_candidate {
             try ice_agent_select_checklist_pair(agent, transaction.pair_index, true);
+        } else if agent.selected_pair_index == transaction.pair_index
+            && agent.checklist[pair_slot].selected {
+            ice_agent_selected_pair_restore_state(agent, pair_slot);
         }
     } else if result.error_code == ICE_STUN_ERROR_ROLE_CONFLICT {
         try ice_agent_handle_role_conflict_response(agent, transaction, now_us);
         if agent.selected_pair_index == transaction.pair_index {
-            agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
+            ice_agent_selected_pair_unselect(agent, pair_slot);
             agent.state = ICE_AGENT_STATE_CHECKING;
         }
     } else {
-        candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
         if agent.selected_pair_index == transaction.pair_index {
-            agent.selected_pair_index = ICE_CANDIDATE_INDEX_NONE;
-            agent.state = ICE_AGENT_STATE_CHECKING;
+            ice_agent_selected_pair_fail(agent, pair_slot, now_us);
+        } else {
+            candidate_pair_note_check_failed(&agent.checklist[pair_slot], now_us);
         }
     }
 
