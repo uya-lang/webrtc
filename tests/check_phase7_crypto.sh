@@ -6,6 +6,7 @@ cd "$repo_root"
 
 test -f src/webrtc_crypto_test_main.uya
 test -d src/webrtc/crypto
+test -f src/webrtc/crypto/aes.uya
 test -f src/webrtc/crypto/hash.uya
 test -f src/webrtc/crypto/hmac.uya
 test -f src/webrtc/crypto/random.uya
@@ -25,6 +26,9 @@ rg -Fq "crypto_test_check_sha1_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_sha256_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_hmac_sha1_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_hmac_sha256_vectors" src/webrtc_crypto_test_main.uya
+rg -Fq "crypto_test_check_aes_ctr_vectors" src/webrtc_crypto_test_main.uya
+rg -Fq "export fn crypto_aes_key_schedule_init" src/webrtc/crypto/aes.uya
+rg -Fq "export fn crypto_aes_ctr_xor" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_sha1_digest" src/webrtc/crypto/hash.uya
 rg -Fq "export fn crypto_sha256_digest" src/webrtc/crypto/hash.uya
 rg -Fq "export fn crypto_hmac_sha1_digest" src/webrtc/crypto/hmac.uya
