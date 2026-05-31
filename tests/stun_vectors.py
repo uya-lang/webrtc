@@ -347,6 +347,7 @@ def build_message(
     attrs: list[tuple[int, bytes]],
     *,
     integrity_key: bytes | None = None,
+    integrity_attr_type: int = ATTR_MESSAGE_INTEGRITY,
     include_fingerprint: bool = False,
 ) -> bytes:
     if len(transaction_id) != 12:
@@ -358,7 +359,7 @@ def build_message(
         + body
     )
     if integrity_key is not None:
-        packet = append_message_integrity(packet, integrity_key)
+        packet = append_message_integrity(packet, integrity_key, attr_type=integrity_attr_type)
     if include_fingerprint:
         packet = append_fingerprint(packet)
     return packet
@@ -374,6 +375,7 @@ def build_binding_request(
     ice_controlling: int | None = None,
     software: str | None = None,
     integrity_key: bytes | None = None,
+    integrity_attr_type: int = ATTR_MESSAGE_INTEGRITY,
     include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
@@ -394,6 +396,7 @@ def build_binding_request(
         transaction_id,
         attrs,
         integrity_key=integrity_key,
+        integrity_attr_type=integrity_attr_type,
         include_fingerprint=include_fingerprint,
     )
 
@@ -405,6 +408,7 @@ def build_binding_success_response(
     *,
     software: str | None = None,
     integrity_key: bytes | None = None,
+    integrity_attr_type: int = ATTR_MESSAGE_INTEGRITY,
     include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
@@ -416,6 +420,7 @@ def build_binding_success_response(
         transaction_id,
         attrs,
         integrity_key=integrity_key,
+        integrity_attr_type=integrity_attr_type,
         include_fingerprint=include_fingerprint,
     )
 
@@ -427,6 +432,7 @@ def build_binding_error_response(
     *,
     software: str | None = None,
     integrity_key: bytes | None = None,
+    integrity_attr_type: int = ATTR_MESSAGE_INTEGRITY,
     include_fingerprint: bool = False,
 ) -> bytes:
     attrs: list[tuple[int, bytes]] = []
@@ -438,6 +444,7 @@ def build_binding_error_response(
         transaction_id,
         attrs,
         integrity_key=integrity_key,
+        integrity_attr_type=integrity_attr_type,
         include_fingerprint=include_fingerprint,
     )
 
@@ -561,6 +568,38 @@ def run_builder_tests() -> None:
     assert not verify_fingerprint(corrupted_request)
 
 
+def run_message_integrity_sha256_tests() -> None:
+    transaction_id = bytes(range(21, 33))
+    integrity_key = b"uya-secret-256"
+
+    request = build_binding_request(
+        transaction_id,
+        "demo",
+        0x6E0001FF,
+        use_candidate=True,
+        ice_controlled=0x0102030405060708,
+        software="uya-test",
+        integrity_key=integrity_key,
+        integrity_attr_type=ATTR_MESSAGE_INTEGRITY_SHA256,
+        include_fingerprint=True,
+    )
+    header, parsed_request = parse_binding_request(request)
+    assert header.raw_type == 0x0001
+    assert parsed_request["software"] == "uya-test"
+    assert parsed_request["username"] == "demo"
+    assert parsed_request["priority"] == 0x6E0001FF
+    assert parsed_request["use_candidate"] is True
+    assert parsed_request["ice_controlled"] == 0x0102030405060708
+    attr = find_first_attribute(request, ATTR_MESSAGE_INTEGRITY_SHA256)
+    assert len(attr.value) == hashlib.sha256().digest_size
+    assert verify_message_integrity(request, integrity_key, ATTR_MESSAGE_INTEGRITY_SHA256)
+    assert verify_fingerprint(request)
+
+    corrupted = bytearray(request)
+    corrupted[attr.offset + ATTRIBUTE_HEADER_BYTES] ^= 0x01
+    assert not verify_message_integrity(bytes(corrupted), integrity_key, ATTR_MESSAGE_INTEGRITY_SHA256)
+
+
 def run_fuzz_corpus_smoke() -> None:
     expected = {
         "truncated_header.hex",
@@ -588,6 +627,7 @@ def main() -> None:
     run_rfc_vector_tests()
     run_negative_tests()
     run_builder_tests()
+    run_message_integrity_sha256_tests()
     run_fuzz_corpus_smoke()
 
 

@@ -175,6 +175,24 @@ export fn stun_builder_append_message_integrity(builder: &StunMessageBuilder, ke
     }
 }
 
+export fn stun_builder_append_message_integrity_sha256(builder: &StunMessageBuilder, key: &[byte]) !void {
+    const attr_start: usize = try stun_builder_reserve(builder, STUN_ATTRIBUTE_HEADER_BYTES + 32usize);
+    const body_len: usize = builder.cursor - STUN_HEADER_BYTES;
+
+    try write_be_u16(builder.bytes[2:2], body_len as u16);
+
+    var digest: [byte: 32] = [];
+    try stun_message_integrity_sha256_compute(builder.bytes[0:attr_start], body_len as u16, key, digest[0:32]);
+    try write_be_u16(builder.bytes[attr_start:2], STUN_ATTRIBUTE_MESSAGE_INTEGRITY_SHA256);
+    try write_be_u16(builder.bytes[attr_start + 2:2], 32u16);
+
+    var i: usize = 0;
+    while i < 32usize {
+        builder.bytes[attr_start + STUN_ATTRIBUTE_HEADER_BYTES + i] = digest[i];
+        i = i + 1;
+    }
+}
+
 export fn stun_builder_append_fingerprint(builder: &StunMessageBuilder) !void {
     const attr_start: usize = try stun_builder_reserve(builder, STUN_ATTRIBUTE_HEADER_BYTES + 4usize);
     const body_len: usize = builder.cursor - STUN_HEADER_BYTES;
