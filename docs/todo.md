@@ -279,7 +279,7 @@
 - [x] 实现 RTCP NACK。
 - [x] 实现 RTCP PLI。
 - [x] 实现 RTCP FIR。
-- [ ] 实现 RTCP Transport-CC feedback。
+- [x] 实现 RTCP Transport-CC feedback。
 - [ ] 增加 RTP/RTCP fuzz corpus。
 
 验收标准：

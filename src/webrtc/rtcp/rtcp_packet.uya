@@ -23,6 +23,11 @@ export error RtcpNackTooManyEntries;
 export error RtcpPliInvalidFormat;
 export error RtcpFirInvalidFormat;
 export error RtcpFirTooManyEntries;
+export error RtcpTransportCcInvalidFormat;
+export error RtcpTransportCcTooManyStatuses;
+export error RtcpTransportCcTooManyChunks;
+export error RtcpTransportCcInvalidStatus;
+export error RtcpTransportCcDeltaOutOfRange;
 
 export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
 export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
@@ -38,8 +43,16 @@ export const RTCP_MAX_BYE_REASON_BYTES: usize = 255usize;
 export const RTCP_RTPFB_FMT_NACK: u8 = 1u8;
 export const RTCP_PSFB_FMT_PLI: u8 = 1u8;
 export const RTCP_PSFB_FMT_FIR: u8 = 4u8;
+export const RTCP_RTPFB_FMT_TRANSPORT_CC: u8 = 15u8;
 export const RTCP_MAX_NACK_ENTRIES: usize = 128usize;
 export const RTCP_MAX_FIR_ENTRIES: usize = 64usize;
+export const RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES: usize = 1024usize;
+export const RTCP_MAX_TRANSPORT_CC_PACKET_CHUNKS: usize = 1024usize;
+export const RTCP_MAX_TRANSPORT_CC_DELTAS: usize = 1024usize;
+export const RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED: u8 = 0u8;
+export const RTCP_TRANSPORT_CC_STATUS_SMALL_DELTA: u8 = 1u8;
+export const RTCP_TRANSPORT_CC_STATUS_LARGE_OR_NEG_DELTA: u8 = 2u8;
+export const RTCP_TRANSPORT_CC_STATUS_RECEIVED_NO_DELTA: u8 = 3u8;
 
 const RTCP_VERSION: u8 = 2u8;
 const RTCP_HEADER_BYTES: usize = 4usize;
@@ -49,6 +62,9 @@ const RTCP_REPORT_BLOCK_BYTES: usize = 24usize;
 const RTCP_RTPFB_BASE_BYTES: usize = 12usize;
 const RTCP_NACK_ENTRY_BYTES: usize = 4usize;
 const RTCP_FIR_ENTRY_BYTES: usize = 8usize;
+const RTCP_TRANSPORT_CC_BASE_BYTES: usize = 20usize;
+const RTCP_TRANSPORT_CC_CHUNK_BYTES: usize = 2usize;
+const RTCP_TRANSPORT_CC_RUN_LENGTH_MAX: usize = 8191usize;
 const RTCP_COMPACT_NTP_SCALE: u32 = 65536u32;
 const RTCP_SDES_ITEM_END: u8 = 0u8;
 const RTCP_SDES_ITEM_CNAME: u8 = 1u8;
@@ -133,6 +149,18 @@ export struct RtcpFirPacket {
     media_ssrc: u32 = 0u32,
     entry_count: usize = 0usize,
     entries: [RtcpFirEntry: RTCP_MAX_FIR_ENTRIES] = [],
+}
+
+export struct RtcpTransportCcPacket {
+    sender_ssrc: u32 = 0u32,
+    media_ssrc: u32 = 0u32,
+    base_sequence_number: u16 = 0u16,
+    packet_status_count: usize = 0usize,
+    reference_time: u32 = 0u32,
+    feedback_packet_count: u8 = 0u8,
+    status_symbols: [u8: RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES] = [],
+    delta_count: usize = 0usize,
+    recv_deltas: [i32: RTCP_MAX_TRANSPORT_CC_DELTAS] = [],
 }
 
 fn rtcp_read_u24(src: &[byte]) !u32 {
@@ -298,6 +326,100 @@ export fn rtcp_pli_packet_make() RtcpPliPacket {
 
 export fn rtcp_fir_packet_make() RtcpFirPacket {
     return RtcpFirPacket{};
+}
+
+export fn rtcp_transport_cc_packet_make() RtcpTransportCcPacket {
+    return RtcpTransportCcPacket{};
+}
+
+fn rtcp_transport_cc_status_delta_bytes(symbol: u8) !usize {
+    if symbol == RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED || symbol == RTCP_TRANSPORT_CC_STATUS_RECEIVED_NO_DELTA {
+        return 0usize;
+    }
+    if symbol == RTCP_TRANSPORT_CC_STATUS_SMALL_DELTA {
+        return 1usize;
+    }
+    if symbol == RTCP_TRANSPORT_CC_STATUS_LARGE_OR_NEG_DELTA {
+        return 2usize;
+    }
+    return error.RtcpTransportCcInvalidStatus;
+}
+
+fn rtcp_transport_cc_decode_chunk(
+    chunk: u16,
+    statuses: &[u8],
+    status_count: usize,
+    packet_status_count: usize,
+) !usize {
+    if status_count >= packet_status_count {
+        return status_count;
+    }
+
+    var out_count: usize = status_count;
+    if (chunk & 0x8000u16) == 0u16 {
+        const symbol: u8 = ((chunk >> 13i32) & 0x03u16) as u8;
+        const run_len: usize = (chunk & 0x1FFFu16) as usize;
+        if run_len == 0usize {
+            return error.RtcpInvalidLength;
+        }
+
+        var emit_len: usize = run_len;
+        const remaining: usize = packet_status_count - out_count;
+        if emit_len > remaining {
+            emit_len = remaining;
+        }
+        if out_count + emit_len > statuses.len {
+            return error.RtcpTransportCcTooManyStatuses;
+        }
+
+        var run_index: usize = 0usize;
+        while run_index < emit_len {
+            statuses[out_count + run_index] = symbol;
+            run_index = run_index + 1usize;
+        }
+        return out_count + emit_len;
+    }
+
+    const is_two_bit_vector: bool = (chunk & 0x4000u16) != 0u16;
+    if !is_two_bit_vector {
+        var bit_index: usize = 0usize;
+        var remaining: usize = packet_status_count - out_count;
+        if remaining > 14usize {
+            remaining = 14usize;
+        }
+        if out_count + remaining > statuses.len {
+            return error.RtcpTransportCcTooManyStatuses;
+        }
+
+        while bit_index < remaining {
+            const shift: i32 = 13i32 - (bit_index as i32);
+            const bit: u16 = (chunk >> shift) & 0x0001u16;
+            if bit == 0u16 {
+                statuses[out_count + bit_index] = RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED;
+            } else {
+                statuses[out_count + bit_index] = RTCP_TRANSPORT_CC_STATUS_SMALL_DELTA;
+            }
+            bit_index = bit_index + 1usize;
+        }
+        return out_count + remaining;
+    }
+
+    var symbol_index: usize = 0usize;
+    var remaining: usize = packet_status_count - out_count;
+    if remaining > 7usize {
+        remaining = 7usize;
+    }
+    if out_count + remaining > statuses.len {
+        return error.RtcpTransportCcTooManyStatuses;
+    }
+
+    while symbol_index < remaining {
+        const shift: i32 = 12i32 - ((symbol_index as i32) * 2i32);
+        statuses[out_count + symbol_index] = ((chunk >> shift) & 0x0003u16) as u8;
+        symbol_index = symbol_index + 1usize;
+    }
+
+    return out_count + remaining;
 }
 
 export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
@@ -847,6 +969,241 @@ export fn rtcp_fir_write(fir: &RtcpFirPacket, buffer: &[byte]) !usize {
         buffer[offset + 7usize] = 0u8;
         offset = offset + RTCP_FIR_ENTRY_BYTES;
         index = index + 1usize;
+    }
+
+    return offset;
+}
+
+export fn rtcp_transport_cc_parse(packet: &[byte]) !RtcpTransportCcPacket {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_RTPFB);
+    if header.count != RTCP_RTPFB_FMT_TRANSPORT_CC {
+        return error.RtcpTransportCcInvalidFormat;
+    }
+    if header.effective_len < RTCP_TRANSPORT_CC_BASE_BYTES {
+        return error.RtcpInvalidLength;
+    }
+
+    var transport_cc: RtcpTransportCcPacket = rtcp_transport_cc_packet_make();
+    transport_cc.sender_ssrc = try read_be_u32(packet[4:4]);
+    transport_cc.media_ssrc = try read_be_u32(packet[8:4]);
+    transport_cc.base_sequence_number = try read_be_u16(packet[12:2]);
+    transport_cc.packet_status_count = (try read_be_u16(packet[14:2])) as usize;
+    transport_cc.reference_time = try rtcp_read_u24(packet[16:3]);
+    transport_cc.feedback_packet_count = packet[19];
+
+    if transport_cc.packet_status_count > RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES {
+        return error.RtcpTransportCcTooManyStatuses;
+    }
+
+    var offset: usize = RTCP_TRANSPORT_CC_BASE_BYTES;
+    var status_count: usize = 0usize;
+    var chunk_count: usize = 0usize;
+    while status_count < transport_cc.packet_status_count {
+        if offset + RTCP_TRANSPORT_CC_CHUNK_BYTES > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+        if chunk_count >= RTCP_MAX_TRANSPORT_CC_PACKET_CHUNKS {
+            return error.RtcpTransportCcTooManyChunks;
+        }
+
+        const chunk: u16 = try read_be_u16(packet[offset:2]);
+        status_count = try rtcp_transport_cc_decode_chunk(
+            chunk,
+            transport_cc.status_symbols[0:RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES],
+            status_count,
+            transport_cc.packet_status_count,
+        );
+        offset = offset + RTCP_TRANSPORT_CC_CHUNK_BYTES;
+        chunk_count = chunk_count + 1usize;
+    }
+
+    var delta_index: usize = 0usize;
+    var status_index: usize = 0usize;
+    while status_index < transport_cc.packet_status_count {
+        const symbol: u8 = transport_cc.status_symbols[status_index];
+        const delta_bytes: usize = try rtcp_transport_cc_status_delta_bytes(symbol);
+        if delta_bytes == 0usize {
+            status_index = status_index + 1usize;
+            continue;
+        }
+
+        if delta_index >= RTCP_MAX_TRANSPORT_CC_DELTAS {
+            return error.RtcpTransportCcTooManyStatuses;
+        }
+        if offset + delta_bytes > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+
+        if delta_bytes == 1usize {
+            transport_cc.recv_deltas[delta_index] = packet[offset] as i32;
+        } else {
+            const raw_delta: u16 = try read_be_u16(packet[offset:2]);
+            if raw_delta >= 0x8000u16 {
+                transport_cc.recv_deltas[delta_index] = (raw_delta as i32) - 65536i32;
+            } else {
+                transport_cc.recv_deltas[delta_index] = raw_delta as i32;
+            }
+        }
+
+        delta_index = delta_index + 1usize;
+        offset = offset + delta_bytes;
+        status_index = status_index + 1usize;
+    }
+
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+
+    transport_cc.delta_count = delta_index;
+    return transport_cc;
+}
+
+export fn rtcp_transport_cc_write(transport_cc: &RtcpTransportCcPacket, buffer: &[byte]) !usize {
+    if transport_cc == null {
+        return error.RtcpInvalidLength;
+    }
+    if transport_cc.packet_status_count > RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES {
+        return error.RtcpTransportCcTooManyStatuses;
+    }
+    if transport_cc.delta_count > RTCP_MAX_TRANSPORT_CC_DELTAS {
+        return error.RtcpTransportCcTooManyStatuses;
+    }
+    if transport_cc.packet_status_count > 65535usize {
+        return error.RtcpTransportCcTooManyStatuses;
+    }
+    if transport_cc.reference_time > 0x00FFFFFFu32 {
+        return error.RtcpInvalidLength;
+    }
+
+    var expected_delta_count: usize = 0usize;
+    var delta_bytes_total: usize = 0usize;
+    var status_index: usize = 0usize;
+    while status_index < transport_cc.packet_status_count {
+        const symbol: u8 = transport_cc.status_symbols[status_index];
+        const delta_bytes: usize = try rtcp_transport_cc_status_delta_bytes(symbol);
+        if delta_bytes == 0usize {
+            status_index = status_index + 1usize;
+            continue;
+        }
+
+        if expected_delta_count >= transport_cc.delta_count {
+            return error.RtcpInvalidLength;
+        }
+
+        const delta_value: i32 = transport_cc.recv_deltas[expected_delta_count];
+        if delta_bytes == 1usize {
+            if delta_value < 0i32 || delta_value > 255i32 {
+                return error.RtcpTransportCcDeltaOutOfRange;
+            }
+        } else if delta_value < -32768i32 || delta_value > 32767i32 {
+            return error.RtcpTransportCcDeltaOutOfRange;
+        }
+
+        expected_delta_count = expected_delta_count + 1usize;
+        delta_bytes_total = delta_bytes_total + delta_bytes;
+        status_index = status_index + 1usize;
+    }
+    if expected_delta_count != transport_cc.delta_count {
+        return error.RtcpInvalidLength;
+    }
+
+    var chunk_words: [u16: RTCP_MAX_TRANSPORT_CC_PACKET_CHUNKS] = [];
+    var chunk_count: usize = 0usize;
+    status_index = 0usize;
+    while status_index < transport_cc.packet_status_count {
+        if chunk_count >= RTCP_MAX_TRANSPORT_CC_PACKET_CHUNKS {
+            return error.RtcpTransportCcTooManyChunks;
+        }
+
+        const run_symbol: u8 = transport_cc.status_symbols[status_index];
+        _ = try rtcp_transport_cc_status_delta_bytes(run_symbol);
+
+        var run_len: usize = 1usize;
+        while status_index + run_len < transport_cc.packet_status_count
+            && run_len < RTCP_TRANSPORT_CC_RUN_LENGTH_MAX
+            && transport_cc.status_symbols[status_index + run_len] == run_symbol {
+            run_len = run_len + 1usize;
+        }
+
+        if run_len >= 7usize {
+            chunk_words[chunk_count] = ((run_symbol as u16) << 13i32) | (run_len as u16);
+            chunk_count = chunk_count + 1usize;
+            status_index = status_index + run_len;
+            continue;
+        }
+
+        var vector_len: usize = transport_cc.packet_status_count - status_index;
+        if vector_len > 7usize {
+            vector_len = 7usize;
+        }
+
+        var vector_chunk: u16 = 0xC000u16;
+        var vector_index: usize = 0usize;
+        while vector_index < vector_len {
+            const symbol: u8 = transport_cc.status_symbols[status_index + vector_index];
+            _ = try rtcp_transport_cc_status_delta_bytes(symbol);
+            const shift: i32 = 12i32 - ((vector_index as i32) * 2i32);
+            vector_chunk = vector_chunk | ((symbol as u16) << shift);
+            vector_index = vector_index + 1usize;
+        }
+
+        chunk_words[chunk_count] = vector_chunk;
+        chunk_count = chunk_count + 1usize;
+        status_index = status_index + vector_len;
+    }
+
+    const total_len: usize = RTCP_TRANSPORT_CC_BASE_BYTES
+        + (chunk_count * RTCP_TRANSPORT_CC_CHUNK_BYTES)
+        + delta_bytes_total;
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (RTCP_RTPFB_FMT_TRANSPORT_CC & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_RTPFB;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+    try write_be_u32(buffer[4:4], transport_cc.sender_ssrc);
+    try write_be_u32(buffer[8:4], transport_cc.media_ssrc);
+    try write_be_u16(buffer[12:2], transport_cc.base_sequence_number);
+    try write_be_u16(buffer[14:2], transport_cc.packet_status_count as u16);
+    try rtcp_write_u24(buffer[16:3], transport_cc.reference_time);
+    buffer[19] = transport_cc.feedback_packet_count;
+
+    var offset: usize = RTCP_TRANSPORT_CC_BASE_BYTES;
+    var chunk_index: usize = 0usize;
+    while chunk_index < chunk_count {
+        try write_be_u16(buffer[offset:2], chunk_words[chunk_index]);
+        offset = offset + RTCP_TRANSPORT_CC_CHUNK_BYTES;
+        chunk_index = chunk_index + 1usize;
+    }
+
+    var delta_index: usize = 0usize;
+    status_index = 0usize;
+    while status_index < transport_cc.packet_status_count {
+        const symbol: u8 = transport_cc.status_symbols[status_index];
+        const delta_bytes: usize = try rtcp_transport_cc_status_delta_bytes(symbol);
+        if delta_bytes == 0usize {
+            status_index = status_index + 1usize;
+            continue;
+        }
+
+        const delta_value: i32 = transport_cc.recv_deltas[delta_index];
+        if delta_bytes == 1usize {
+            buffer[offset] = delta_value as u8;
+            offset = offset + 1usize;
+        } else {
+            if delta_value < 0i32 {
+                const encoded: u16 = (delta_value + 65536i32) as u16;
+                try write_be_u16(buffer[offset:2], encoded);
+            } else {
+                try write_be_u16(buffer[offset:2], delta_value as u16);
+            }
+            offset = offset + 2usize;
+        }
+
+        delta_index = delta_index + 1usize;
+        status_index = status_index + 1usize;
     }
 
     return offset;

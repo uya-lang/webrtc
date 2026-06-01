@@ -276,6 +276,53 @@ fn check_fir_parse_and_roundtrip() i32 {
     return 0i32;
 }
 
+fn check_transport_cc_parse_and_roundtrip() i32 {
+    var transport_cc_packet: [byte: 24] = [
+        0x8F as byte, 0xCD as byte, 0x00 as byte, 0x05 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x03 as byte, 0xE8 as byte, 0x00 as byte, 0x04 as byte,
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x09 as byte,
+        0xC8 as byte, 0xC0 as byte,
+        0xFF as byte, 0x06 as byte,
+    ];
+
+    const parsed: !RtcpTransportCcPacket = rtcp_transport_cc_parse(transport_cc_packet[0:24]);
+    if parsed.error_id != 0 {
+        return 90i32;
+    }
+    if parsed.value.sender_ssrc != 0x11223344u32 || parsed.value.media_ssrc != 0x55667788u32 {
+        return 91i32;
+    }
+    if parsed.value.base_sequence_number != 1000u16 || parsed.value.packet_status_count != 4usize {
+        return 92i32;
+    }
+    if parsed.value.reference_time != 0x010203u32 || parsed.value.feedback_packet_count != 9u8 {
+        return 93i32;
+    }
+    if parsed.value.status_symbols[0] != RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED
+        || parsed.value.status_symbols[1] != RTCP_TRANSPORT_CC_STATUS_LARGE_OR_NEG_DELTA
+        || parsed.value.status_symbols[2] != RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED
+        || parsed.value.status_symbols[3] != RTCP_TRANSPORT_CC_STATUS_RECEIVED_NO_DELTA {
+        return 94i32;
+    }
+    if parsed.value.delta_count != 1usize || parsed.value.recv_deltas[0] != -250i32 {
+        return 95i32;
+    }
+
+    var out: [byte: 64] = [];
+    const written: !usize = rtcp_transport_cc_write(&parsed.value, out[0:64]);
+    if written.error_id != 0 || written.value != 24usize {
+        return 96i32;
+    }
+    const reparsed: !RtcpTransportCcPacket = rtcp_transport_cc_parse(out[0:written.value]);
+    if reparsed.error_id != 0 || reparsed.value.delta_count != 1usize || reparsed.value.recv_deltas[0] != -250i32 {
+        return 97i32;
+    }
+
+    return 0i32;
+}
+
 fn check_error_and_rtt_paths() i32 {
     var bad_version_sr: [byte: 28] = [
         0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
@@ -400,6 +447,39 @@ fn check_error_and_rtt_paths() i32 {
         return 52i32;
     }
 
+    var bad_transport_format: [byte: 24] = [
+        0x8E as byte, 0xCD as byte, 0x00 as byte, 0x05 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x03 as byte, 0xE8 as byte, 0x00 as byte, 0x04 as byte,
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x09 as byte,
+        0xC8 as byte, 0xC0 as byte,
+        0xFF as byte, 0x06 as byte,
+    ];
+    const bad_transport: !RtcpTransportCcPacket = rtcp_transport_cc_parse(bad_transport_format[0:24]);
+    if bad_transport.error_id != @error_id(error.RtcpTransportCcInvalidFormat) {
+        return 53i32;
+    }
+
+    var bad_transport_small_delta: RtcpTransportCcPacket = rtcp_transport_cc_packet_make();
+    bad_transport_small_delta.packet_status_count = 1usize;
+    bad_transport_small_delta.status_symbols[0] = RTCP_TRANSPORT_CC_STATUS_SMALL_DELTA;
+    bad_transport_small_delta.delta_count = 1usize;
+    bad_transport_small_delta.recv_deltas[0] = 300i32;
+    var transport_out: [byte: 64] = [];
+    const bad_small_write: !usize = rtcp_transport_cc_write(&bad_transport_small_delta, transport_out[0:64]);
+    if bad_small_write.error_id != @error_id(error.RtcpTransportCcDeltaOutOfRange) {
+        return 54i32;
+    }
+
+    var bad_transport_status: RtcpTransportCcPacket = rtcp_transport_cc_packet_make();
+    bad_transport_status.packet_status_count = 1usize;
+    bad_transport_status.status_symbols[0] = 4u8;
+    const bad_status_write: !usize = rtcp_transport_cc_write(&bad_transport_status, transport_out[0:64]);
+    if bad_status_write.error_id != @error_id(error.RtcpTransportCcInvalidStatus) {
+        return 55i32;
+    }
+
     return 0i32;
 }
 
@@ -446,12 +526,18 @@ fn main() i32 {
         return 1i32;
     }
 
-    result = check_error_and_rtt_paths();
+    result = check_transport_cc_parse_and_roundtrip();
     if result != 0i32 {
-        printf("RTCP SR/RR/SDES/BYE/NACK/PLI/FIR tests failed: %d\n", result);
+        printf("RTCP Transport-CC tests failed: %d\n", result);
         return 1i32;
     }
 
-    printf("RTCP SR/RR/SDES/BYE/NACK/PLI/FIR tests passed\n");
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR/SDES/BYE/NACK/PLI/FIR/Transport-CC tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR/SDES/BYE/NACK/PLI/FIR/Transport-CC tests passed\n");
     return 0i32;
 }
