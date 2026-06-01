@@ -1,0 +1,41 @@
+use libc.printf;
+use webrtc.srtp.core;
+
+fn assert_guess(current_roc: u32, highest_index: u64, seq: u16, expected: u64, code: i32) i32 {
+    const actual: u64 = srtp_index_guess(current_roc, highest_index, seq);
+    if actual != expected {
+        return code;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = 0i32;
+
+    result = assert_guess(0u32, 0x00000000ffffu64, 0x0000u16, 0x000000010000u64, 10i32);
+    if result != 0i32 {
+        printf("SRTP index guess failed: %d\n", result);
+        return result;
+    }
+
+    result = assert_guess(5u32, 0x000000050100u64, 0x0101u16, 0x000000050101u64, 11i32);
+    if result != 0i32 {
+        printf("SRTP index guess failed: %d\n", result);
+        return result;
+    }
+
+    result = assert_guess(1u32, 0x000000010005u64, 0xfffeu16, 0x00000000fffeu64, 12i32);
+    if result != 0i32 {
+        printf("SRTP index guess failed: %d\n", result);
+        return result;
+    }
+
+    result = assert_guess(1u32, 0x000000018010u64, 0x7fffu16, 0x000000017fffu64, 13i32);
+    if result != 0i32 {
+        printf("SRTP index guess failed: %d\n", result);
+        return result;
+    }
+
+    printf("SRTP index guess tests passed\n");
+    return 0i32;
+}
