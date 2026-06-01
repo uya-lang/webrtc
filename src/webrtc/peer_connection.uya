@@ -1,0 +1,147 @@
+// webrtc.peer_connection - PeerConnection 生命周期
+// 模块路径：src/webrtc/peer_connection.uya → use webrtc.peer_connection;
+
+use webrtc.runtime;
+export const PEER_CONNECTION_STATE_NEW: u8 = 0u8;
+export const PEER_CONNECTION_STATE_CLOSED: u8 = 1u8;
+
+export struct PeerConnection {
+    id: u64 = 0u64,
+    runtime: &RtcRuntime = null,
+    config: RtcConfiguration = RtcConfiguration{},
+    state: u8 = PEER_CONNECTION_STATE_CLOSED,
+    has_local_description: bool = false,
+    has_remote_description: bool = false,
+}
+
+fn peer_connection_clear_descriptions(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+
+    pc.has_local_description = false;
+    pc.has_remote_description = false;
+}
+
+fn peer_connection_make_default() PeerConnection {
+    return PeerConnection{};
+}
+
+/// Create an empty PeerConnection shell.
+export fn peer_connection_make() PeerConnection {
+    return peer_connection_make_default();
+}
+
+/// Create a PeerConnection and register it with the runtime.
+export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !PeerConnection {
+    if runtime == null || config == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if !rtc_runtime_is_initialized(runtime) {
+        return error.RtcRuntimeInvalidState;
+    }
+
+    try rtc_configuration_validate(config);
+    const peer_connection_id: u64 = try rtc_runtime_register_peer_connection(runtime);
+
+    var pc: PeerConnection = peer_connection_make_default();
+    pc.id = peer_connection_id;
+    pc.runtime = runtime;
+    pc.config = *config;
+    pc.state = PEER_CONNECTION_STATE_NEW;
+    peer_connection_clear_descriptions(&pc);
+    return pc;
+}
+
+/// Return the PeerConnection id.
+export fn peer_connection_id(pc: &PeerConnection) u64 {
+    if pc == null {
+        return 0u64;
+    }
+    return pc.id;
+}
+
+/// Return the current lifecycle state.
+export fn peer_connection_state(pc: &PeerConnection) u8 {
+    if pc == null {
+        return PEER_CONNECTION_STATE_CLOSED;
+    }
+    return pc.state;
+}
+
+/// Return whether the PeerConnection is open.
+export fn peer_connection_is_open(pc: &PeerConnection) bool {
+    return peer_connection_state(pc) == PEER_CONNECTION_STATE_NEW;
+}
+
+/// Return whether the PeerConnection has already been closed.
+export fn peer_connection_is_closed(pc: &PeerConnection) bool {
+    return peer_connection_state(pc) == PEER_CONNECTION_STATE_CLOSED;
+}
+
+/// Return whether a local description has been attached yet.
+export fn peer_connection_has_local_description(pc: &PeerConnection) bool {
+    if pc == null {
+        return false;
+    }
+    return pc.has_local_description;
+}
+
+/// Return whether a remote description has been attached yet.
+export fn peer_connection_has_remote_description(pc: &PeerConnection) bool {
+    if pc == null {
+        return false;
+    }
+    return pc.has_remote_description;
+}
+
+/// Return a borrowed runtime reference.
+export fn peer_connection_runtime(pc: &PeerConnection) &RtcRuntime {
+    if pc == null {
+        return null;
+    }
+    return pc.runtime;
+}
+
+/// Return the frozen configuration snapshot used at construction.
+export fn peer_connection_config(pc: &PeerConnection) &RtcConfiguration {
+    if pc == null {
+        return null;
+    }
+    return &pc.config;
+}
+
+/// Close the PeerConnection and unregister it from the runtime.
+export fn peer_connection_close(pc: &PeerConnection) bool {
+    if pc == null {
+        return false;
+    }
+    if pc.state == PEER_CONNECTION_STATE_CLOSED {
+        return true;
+    }
+
+    if pc.runtime != null && pc.id != 0u64 && rtc_runtime_has_peer_connection(pc.runtime, pc.id) {
+        _ = rtc_runtime_unregister_peer_connection(pc.runtime, pc.id);
+    }
+
+    pc.state = PEER_CONNECTION_STATE_CLOSED;
+    peer_connection_clear_descriptions(pc);
+    return true;
+}
+
+/// Reset the PeerConnection back to its default closed shell.
+export fn peer_connection_reset(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+
+    if pc.runtime != null && pc.id != 0u64 && rtc_runtime_has_peer_connection(pc.runtime, pc.id) {
+        _ = rtc_runtime_unregister_peer_connection(pc.runtime, pc.id);
+    }
+
+    pc.id = 0u64;
+    pc.runtime = null;
+    pc.config = RtcConfiguration{};
+    pc.state = PEER_CONNECTION_STATE_CLOSED;
+    peer_connection_clear_descriptions(pc);
+}

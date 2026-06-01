@@ -1,0 +1,137 @@
+use libc.printf;
+use webrtc.peer_connection;
+use webrtc.runtime;
+
+fn check_default_shell() i32 {
+    var pc: PeerConnection = peer_connection_make();
+    if !peer_connection_is_closed(&pc) {
+        return 10i32;
+    }
+    if peer_connection_id(&pc) != 0u64 {
+        return 11i32;
+    }
+    if peer_connection_runtime(&pc) != null {
+        return 12i32;
+    }
+    if peer_connection_has_local_description(&pc) || peer_connection_has_remote_description(&pc) {
+        return 13i32;
+    }
+
+    if !peer_connection_close(&pc) {
+        return 14i32;
+    }
+    if !peer_connection_is_closed(&pc) {
+        return 15i32;
+    }
+
+    return 0i32;
+}
+
+fn check_create_close_and_reset() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 2i32;
+
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 20i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+    if rtc_runtime_peer_connection_count(&runtime) != 0usize {
+        return 21i32;
+    }
+
+    const first_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if first_result.error_id != 0 {
+        return 22i32;
+    }
+    var first: PeerConnection = first_result.value;
+    if peer_connection_id(&first) != 1u64 || !peer_connection_is_open(&first) {
+        return 23i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 1usize {
+        return 24i32;
+    }
+
+    const second_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if second_result.error_id != 0 {
+        return 25i32;
+    }
+    var second: PeerConnection = second_result.value;
+    if peer_connection_id(&second) != 2u64 || !peer_connection_is_open(&second) {
+        return 26i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 2usize {
+        return 27i32;
+    }
+
+    if !peer_connection_close(&first) {
+        return 28i32;
+    }
+    if !peer_connection_is_closed(&first) || peer_connection_is_open(&first) {
+        return 29i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 1usize {
+        return 30i32;
+    }
+    if !peer_connection_close(&first) {
+        return 31i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 1usize {
+        return 32i32;
+    }
+
+    peer_connection_reset(&second);
+    if peer_connection_id(&second) != 0u64 {
+        return 33i32;
+    }
+    if peer_connection_runtime(&second) != null {
+        return 34i32;
+    }
+    if !peer_connection_is_closed(&second) {
+        return 35i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 0usize {
+        return 36i32;
+    }
+
+    if !peer_connection_close(&second) {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
+fn check_invalid_runtime_rejected() i32 {
+    var runtime: RtcRuntime = rtc_runtime_make();
+    var config: RtcConfiguration = rtc_configuration_make();
+
+    const invalid_runtime: !PeerConnection = peer_connection_new(&runtime, &config);
+    if invalid_runtime.error_id != @error_id(error.RtcRuntimeInvalidState) {
+        return 40i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_default_shell();
+    if result != 0i32 {
+        printf("PeerConnection default shell tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_create_close_and_reset();
+    if result != 0i32 {
+        printf("PeerConnection lifecycle tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_invalid_runtime_rejected();
+    if result != 0i32 {
+        printf("PeerConnection invalid runtime tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("PeerConnection lifecycle tests passed\n");
+    return 0i32;
+}

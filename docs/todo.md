@@ -372,7 +372,7 @@
 ## Phase 14：PeerConnection 集成
 
 - [x] 实现 `RtcRuntime`。
-- [ ] 实现 `PeerConnection` 生命周期。
+- [x] 实现 `PeerConnection` 生命周期。
 - [ ] 实现 `set_local_description`。
 - [ ] 实现 `set_remote_description`。
 - [ ] 实现 `create_offer`。
