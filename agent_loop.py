@@ -2069,6 +2069,14 @@ def run_codex(
                         synced_current_task = current_task
                         if state is not None:
                             sync_current_in_progress_tasks_from_todo(state, todo_file)
+                            try:
+                                heartbeat_tasks = parse_todo(todo_file)
+                            except FileNotFoundError:
+                                heartbeat_tasks = None
+
+                            if heartbeat_tasks is not None:
+                                reconcile_state_with_todo(state, heartbeat_tasks)
+
                             current_state = state.get("current")
                             if isinstance(current_state, dict):
                                 synced_task = current_state.get("current_task")
@@ -2321,6 +2329,20 @@ def sync_current_in_progress_tasks_from_todo(state, todo_file):
 
     in_progress_tasks = [task for task in tasks if task["in_progress_in_file"]]
     if not in_progress_tasks:
+        tracked_tasks = current_state_tasks(state, tasks)
+        if tracked_tasks and all(task["done_in_file"] for task in tracked_tasks):
+            if current.get("current_task") is not None:
+                current["current_task"] = None
+                changed = True
+
+            if normalize_string_list(current.get("tasks", [])):
+                current["tasks"] = []
+                changed = True
+
+            if normalize_string_list(current.get("task_ids", [])):
+                current["task_ids"] = []
+                changed = True
+
         return changed
 
     current_task = in_progress_tasks[0]["text"]
