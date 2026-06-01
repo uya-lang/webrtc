@@ -1,0 +1,334 @@
+// webrtc.media.av1_rtp - AV1 RTP payload descriptor / frame metadata
+// Module: src/webrtc/media/av1_rtp.uya -> use webrtc.media.av1_rtp;
+// AV1 RTP payload format follows RFC 9364.
+
+use webrtc.media.model;
+
+export error Av1RtpDescriptorTooShort;
+export error Av1RtpBufferTooSmall;
+export error Av1RtpInvalidAggregationHeader;
+export error Av1RtpInvalidLeb128;
+export error Av1RtpInvalidObuHeader;
+export error Av1RtpInvalidObuLength;
+export error Av1RtpInvalidLayerId;
+
+export struct Av1RtpDescriptor {
+    first_obu_fragment: bool = false,
+    last_obu_fragment: bool = false,
+    obu_count_hint: u8 = 0u8,
+    new_coded_video_sequence: bool = false,
+    has_layer_ids: bool = false,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+    spatial_id: i32 = ENCODED_FRAME_NO_SPATIAL_ID,
+    payload_offset: usize = 0usize,
+    payload: &[byte] = [],
+}
+
+export struct Av1RtpFrameMetadata {
+    codec_id: u16 = CODEC_ID_AV1,
+    media_kind: u8 = MEDIA_KIND_VIDEO,
+    is_keyframe: bool = false,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+    spatial_id: i32 = ENCODED_FRAME_NO_SPATIAL_ID,
+    marker: bool = false,
+    payload: &[byte] = [],
+}
+
+struct Av1RtpLeb128Result {
+    ok: bool = false,
+    value: usize = 0usize,
+    bytes_read: usize = 0usize,
+}
+
+struct Av1RtpLayerIdState {
+    has_layer_ids: bool = false,
+    temporal_id: u8 = 0u8,
+    spatial_id: u8 = 0u8,
+}
+
+fn av1_rtp_descriptor_header_make() Av1RtpDescriptor {
+    return Av1RtpDescriptor{};
+}
+
+fn av1_rtp_frame_metadata_header_make() Av1RtpFrameMetadata {
+    return Av1RtpFrameMetadata{};
+}
+
+fn av1_rtp_layer_id_state_make() Av1RtpLayerIdState {
+    return Av1RtpLayerIdState{};
+}
+
+fn av1_rtp_read_leb128(data: &[byte], offset: usize) Av1RtpLeb128Result {
+    var result: Av1RtpLeb128Result = Av1RtpLeb128Result{};
+    if offset >= data.len {
+        return result;
+    }
+
+    var shift: usize = 0usize;
+    var value: usize = 0usize;
+    while true {
+        if offset + result.bytes_read >= data.len {
+            return result;
+        }
+        if result.bytes_read >= 10usize {
+            return result;
+        }
+
+        const current: u8 = data[offset + result.bytes_read] as u8;
+        const chunk: usize = (current & 0x7Fu8) as usize;
+
+        if shift >= 63usize && chunk > 1usize {
+            return result;
+        }
+
+        value = value | (chunk << (shift as i32));
+        result.bytes_read = result.bytes_read + 1usize;
+
+        if (current & 0x80u8) == 0u8 {
+            result.ok = true;
+            result.value = value;
+            return result;
+        }
+
+        shift = shift + 7usize;
+        if shift >= 70usize {
+            return result;
+        }
+    }
+}
+
+fn av1_rtp_validate_obu_element(
+    element: &[byte],
+    layer_ids: &Av1RtpLayerIdState,
+) !void {
+    if element.len < 1usize {
+        return error.Av1RtpInvalidObuLength;
+    }
+
+    const header: u8 = element[0] as u8;
+    if (header & 0x80u8) != 0u8 {
+        return error.Av1RtpInvalidObuHeader;
+    }
+    if (header & 0x01u8) != 0u8 {
+        return error.Av1RtpInvalidObuHeader;
+    }
+
+    const has_extension: bool = (header & 0x04u8) != 0u8;
+    const has_size_field: bool = (header & 0x02u8) != 0u8;
+    var cursor: usize = 1usize;
+
+    if has_extension {
+        if element.len < 2usize {
+            return error.Av1RtpInvalidObuHeader;
+        }
+
+        const extension_header: u8 = element[1] as u8;
+        if (extension_header & 0x07u8) != 0u8 {
+            return error.Av1RtpInvalidLayerId;
+        }
+
+        const temporal_id: u8 = (extension_header >> 5i32) & 0x07u8;
+        const spatial_id: u8 = (extension_header >> 3i32) & 0x03u8;
+        if !layer_ids.has_layer_ids {
+            layer_ids.has_layer_ids = true;
+            layer_ids.temporal_id = temporal_id;
+            layer_ids.spatial_id = spatial_id;
+        } else if layer_ids.temporal_id != temporal_id || layer_ids.spatial_id != spatial_id {
+            return error.Av1RtpInvalidLayerId;
+        }
+        cursor = 2usize;
+    }
+
+    if has_size_field {
+        const size_result: Av1RtpLeb128Result = av1_rtp_read_leb128(element, cursor);
+        if !size_result.ok {
+            return error.Av1RtpInvalidLeb128;
+        }
+        cursor = cursor + size_result.bytes_read;
+        if cursor + size_result.value != element.len {
+            return error.Av1RtpInvalidObuLength;
+        }
+    }
+}
+
+export fn av1_rtp_descriptor_make() Av1RtpDescriptor {
+    return av1_rtp_descriptor_header_make();
+}
+
+export fn av1_rtp_frame_metadata_make() Av1RtpFrameMetadata {
+    return av1_rtp_frame_metadata_header_make();
+}
+
+export fn av1_rtp_descriptor_is_frame_start(descriptor: &Av1RtpDescriptor) bool {
+    if descriptor == null {
+        return false;
+    }
+    return !descriptor.first_obu_fragment;
+}
+
+export fn av1_rtp_descriptor_is_frame_end(descriptor: &Av1RtpDescriptor) bool {
+    if descriptor == null {
+        return false;
+    }
+    return !descriptor.last_obu_fragment;
+}
+
+export fn av1_rtp_descriptor_is_keyframe(descriptor: &Av1RtpDescriptor) bool {
+    if descriptor == null {
+        return false;
+    }
+    return descriptor.new_coded_video_sequence;
+}
+
+export fn av1_rtp_frame_metadata_from_descriptor(descriptor: &Av1RtpDescriptor) Av1RtpFrameMetadata {
+    var metadata: Av1RtpFrameMetadata = av1_rtp_frame_metadata_make();
+    if descriptor == null {
+        return metadata;
+    }
+
+    metadata.is_keyframe = descriptor.new_coded_video_sequence;
+    metadata.marker = !descriptor.last_obu_fragment;
+    metadata.payload = descriptor.payload;
+    if descriptor.has_layer_ids {
+        metadata.temporal_id = descriptor.temporal_id;
+        metadata.spatial_id = descriptor.spatial_id;
+    }
+    return metadata;
+}
+
+export fn av1_rtp_frame_metadata_from_packet(packet: &[byte]) !Av1RtpFrameMetadata {
+    const descriptor: Av1RtpDescriptor = try av1_rtp_descriptor_parse(packet);
+    return av1_rtp_frame_metadata_from_descriptor(&descriptor);
+}
+
+export fn av1_rtp_packet_is_keyframe(packet: &[byte]) !bool {
+    const descriptor: Av1RtpDescriptor = try av1_rtp_descriptor_parse(packet);
+    return descriptor.new_coded_video_sequence;
+}
+
+export fn av1_rtp_descriptor_parse(packet: &[byte]) !Av1RtpDescriptor {
+    if packet.len < 1usize {
+        return error.Av1RtpDescriptorTooShort;
+    }
+
+    const aggregation_header: u8 = packet[0] as u8;
+    if (aggregation_header & 0x07u8) != 0u8 {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+
+    var descriptor: Av1RtpDescriptor = av1_rtp_descriptor_make();
+    descriptor.first_obu_fragment = (aggregation_header & 0x80u8) != 0u8;
+    descriptor.last_obu_fragment = (aggregation_header & 0x40u8) != 0u8;
+    descriptor.obu_count_hint = (aggregation_header >> 4i32) & 0x03u8;
+    descriptor.new_coded_video_sequence = (aggregation_header & 0x08u8) != 0u8;
+    descriptor.payload_offset = 1usize;
+
+    if descriptor.new_coded_video_sequence && descriptor.first_obu_fragment {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+
+    if packet.len == 1usize {
+        if descriptor.obu_count_hint != 1u8 {
+            return error.Av1RtpDescriptorTooShort;
+        }
+        descriptor.payload = packet[1usize:0usize];
+        return descriptor;
+    }
+
+    var offset: usize = 1usize;
+    var obu_index: usize = 0usize;
+    var layer_ids: Av1RtpLayerIdState = av1_rtp_layer_id_state_make();
+    const expected_obu_count: usize = descriptor.obu_count_hint as usize;
+
+    while offset < packet.len {
+        var obu_length: usize = 0usize;
+        if descriptor.obu_count_hint == 0u8 || (obu_index + 1usize) < expected_obu_count {
+            const size_result: Av1RtpLeb128Result = av1_rtp_read_leb128(packet, offset);
+            if !size_result.ok {
+                return error.Av1RtpInvalidLeb128;
+            }
+            obu_length = size_result.value;
+            offset = offset + size_result.bytes_read;
+        } else {
+            obu_length = packet.len - offset;
+        }
+
+        if obu_length == 0usize {
+            return error.Av1RtpInvalidObuLength;
+        }
+        if offset + obu_length > packet.len {
+            return error.Av1RtpInvalidObuLength;
+        }
+
+        const obu_element: &[byte] = packet[offset:obu_length];
+        try av1_rtp_validate_obu_element(obu_element, &layer_ids);
+        offset = offset + obu_length;
+        obu_index = obu_index + 1usize;
+    }
+
+    if descriptor.obu_count_hint != 0u8 && obu_index != expected_obu_count {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+
+    descriptor.has_layer_ids = layer_ids.has_layer_ids;
+    if layer_ids.has_layer_ids {
+        descriptor.temporal_id = layer_ids.temporal_id as i32;
+        descriptor.spatial_id = layer_ids.spatial_id as i32;
+    }
+
+    descriptor.payload = packet[1usize:packet.len - 1usize];
+    return descriptor;
+}
+
+export fn av1_rtp_descriptor_write(
+    descriptor: &Av1RtpDescriptor,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    if descriptor == null {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+    if descriptor.obu_count_hint > 3u8 {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+    if descriptor.new_coded_video_sequence && descriptor.first_obu_fragment {
+        return error.Av1RtpInvalidAggregationHeader;
+    }
+    if descriptor.has_layer_ids {
+        if descriptor.temporal_id < 0i32 || descriptor.temporal_id > 7i32 {
+            return error.Av1RtpInvalidLayerId;
+        }
+        if descriptor.spatial_id < 0i32 || descriptor.spatial_id > 3i32 {
+            return error.Av1RtpInvalidLayerId;
+        }
+    }
+    if payload.len == 0usize && descriptor.obu_count_hint != 1u8 {
+        return error.Av1RtpDescriptorTooShort;
+    }
+
+    const total_len: usize = 1usize + payload.len;
+    if out_packet.len < total_len {
+        return error.Av1RtpBufferTooSmall;
+    }
+
+    var aggregation_header: u8 = 0u8;
+    if descriptor.first_obu_fragment {
+        aggregation_header = aggregation_header | 0x80u8;
+    }
+    if descriptor.last_obu_fragment {
+        aggregation_header = aggregation_header | 0x40u8;
+    }
+    aggregation_header = aggregation_header | ((descriptor.obu_count_hint & 0x03u8) << 4i32);
+    if descriptor.new_coded_video_sequence {
+        aggregation_header = aggregation_header | 0x08u8;
+    }
+    out_packet[0] = aggregation_header as byte;
+
+    var index: usize = 0usize;
+    while index < payload.len {
+        out_packet[1usize + index] = payload[index];
+        index = index + 1usize;
+    }
+
+    return total_len;
+}

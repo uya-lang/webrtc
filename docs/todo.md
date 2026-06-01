@@ -306,10 +306,10 @@
 - [x] 实现 H264 STAP-A。
 - [x] 实现 H264 FU-A。
 - [x] 实现 Annex-B / AVCC 转换 helper。
-- [ ] 实现 AV1 RTP payload descriptor。
-- [ ] 实现 keyframe 检测。
-- [ ] 实现 frame metadata。
-- [ ] 增加 payload format golden tests。
+- [x] 实现 AV1 RTP payload descriptor。
+- [x] 实现 keyframe 检测。
+- [x] 实现 frame metadata。
+- [x] 增加 payload format golden tests。
 
 验收标准：
 
