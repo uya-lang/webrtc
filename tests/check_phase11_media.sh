@@ -21,8 +21,11 @@ rg -q "export fn codec_bridge_register_vp8_adapter" src/webrtc/media/codec_bridg
 rg -q "export fn codec_bridge_clear" src/webrtc/media/codec_bridge.uya
 rg -q "export fn codec_bridge_require_enabled" src/webrtc/media/codec_bridge.uya
 rg -q "export struct OpusRtpPacketizeConfig" src/webrtc/media/opus_rtp.uya
+rg -q "export struct OpusRtpSemantics" src/webrtc/media/opus_rtp.uya
 rg -q "export fn opus_rtp_packetize" src/webrtc/media/opus_rtp.uya
 rg -q "export fn opus_rtp_depacketize" src/webrtc/media/opus_rtp.uya
+rg -q "export fn opus_rtp_validate_clock_rate_hz" src/webrtc/media/opus_rtp.uya
+rg -q "export fn opus_rtp_semantics_apply_fmtp_param" src/webrtc/media/opus_rtp.uya
 rg -q "export struct CodecCapability" src/webrtc/media/model.uya
 rg -q "export struct CodecCapabilitySet" src/webrtc/media/model.uya
 rg -q "export struct CodecNegotiationResult" src/webrtc/media/model.uya

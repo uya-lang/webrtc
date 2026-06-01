@@ -296,7 +296,7 @@
 - [x] 定义 `CodecId` / `MediaKind` / clock-rate / payload-type 映射。
 - [x] 定义 optional `media/codec_bridge.uya` 边界，默认 transport build 不依赖 decoder/encoder。
 - [x] 实现 Opus RTP packetize/depacketize。
-- [ ] 对齐 `../opus` 的 RTP Opus 语义：48 kHz clock、ptime/maxptime、stereo/sprop-stereo、useinbandfec、usedtx。
+- [x] 对齐 `../opus` 的 RTP Opus 语义：48 kHz clock、ptime/maxptime、stereo/sprop-stereo、useinbandfec、usedtx。
 - [ ] 增加 Opus single-packet、多 frame、DTX/空 payload、maxptime 超限 golden tests。
 - [ ] 实现 VP8 RTP payload descriptor。
 - [ ] 支持 VP8 X/N/S/PartID、PictureID、TL0PICIDX、TID、KEYIDX 字段。

@@ -65,6 +65,58 @@ fn check_packetize_limits() i32 {
     return 0i32;
 }
 
+fn check_opus_semantics_alignment() i32 {
+    const good_rate: !void = opus_rtp_validate_clock_rate_hz(48000u32);
+    if good_rate.error_id != 0 {
+        return 30i32;
+    }
+
+    const bad_rate: !void = opus_rtp_validate_clock_rate_hz(44100u32);
+    if bad_rate.error_id != @error_id(error.OpusRtpInvalidClockRate) {
+        return 31i32;
+    }
+
+    var semantics: OpusRtpSemantics = opus_rtp_semantics_make();
+    if semantics.clock_rate_hz != 48000u32 {
+        return 32i32;
+    }
+
+    const ptime_set: !void = opus_rtp_semantics_set_ptime_ms(&semantics, 40u32);
+    if ptime_set.error_id != 0 {
+        return 33i32;
+    }
+    const maxptime_set: !void = opus_rtp_semantics_set_maxptime_ms(&semantics, 60u32);
+    if maxptime_set.error_id != 0 {
+        return 34i32;
+    }
+    if semantics.ptime_ms != 40u32 || semantics.maxptime_ms != 60u32 {
+        return 35i32;
+    }
+
+    if (opus_rtp_semantics_apply_fmtp_param(&semantics, "stereo" as &[byte], "1" as &[byte])).error_id != 0 {
+        return 36i32;
+    }
+    if (opus_rtp_semantics_apply_fmtp_param(&semantics, "sprop-stereo" as &[byte], "1" as &[byte])).error_id != 0 {
+        return 37i32;
+    }
+    if (opus_rtp_semantics_apply_fmtp_param(&semantics, "useinbandfec" as &[byte], "1" as &[byte])).error_id != 0 {
+        return 38i32;
+    }
+    if (opus_rtp_semantics_apply_fmtp_param(&semantics, "usedtx" as &[byte], "1" as &[byte])).error_id != 0 {
+        return 39i32;
+    }
+    if !semantics.stereo || !semantics.sprop_stereo || !semantics.use_inband_fec || !semantics.use_dtx {
+        return 40i32;
+    }
+
+    const invalid_maxptime: !void = opus_rtp_semantics_set_maxptime_ms(&semantics, 200u32);
+    if invalid_maxptime.error_id != @error_id(error.OpusRtpInvalidPtime) {
+        return 41i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_packetize_roundtrip();
     if result != 0i32 {
@@ -75,6 +127,12 @@ fn main() i32 {
     result = check_packetize_limits();
     if result != 0i32 {
         printf("opus rtp limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_opus_semantics_alignment();
+    if result != 0i32 {
+        printf("opus rtp semantics tests failed: %d\n", result);
         return 1i32;
     }
 

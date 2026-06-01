@@ -5,8 +5,15 @@ export error OpusRtpInvalidConfig;
 export error OpusRtpPayloadRequired;
 export error OpusRtpPayloadTooLarge;
 export error OpusRtpBufferTooSmall;
+export error OpusRtpInvalidClockRate;
+export error OpusRtpInvalidPtime;
+export error OpusRtpInvalidFmtpValue;
+export error OpusRtpUnsupportedFmtpKey;
 
 export const OPUS_RTP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1200usize;
+export const OPUS_RTP_CLOCK_RATE_HZ: u32 = 48000u32;
+export const OPUS_RTP_DEFAULT_PTIME_MS: u32 = 20u32;
+export const OPUS_RTP_MAX_PTIME_MS: u32 = 120u32;
 
 export struct OpusRtpPacketizeConfig {
     max_payload_bytes: usize = OPUS_RTP_DEFAULT_MAX_PAYLOAD_BYTES,
@@ -15,6 +22,38 @@ export struct OpusRtpPacketizeConfig {
 
 export struct OpusRtpDepacketizeConfig {
     allow_empty_payload: bool = false,
+}
+
+export struct OpusRtpSemantics {
+    clock_rate_hz: u32 = OPUS_RTP_CLOCK_RATE_HZ,
+    ptime_ms: u32 = OPUS_RTP_DEFAULT_PTIME_MS,
+    maxptime_ms: u32 = OPUS_RTP_MAX_PTIME_MS,
+    stereo: bool = false,
+    sprop_stereo: bool = false,
+    use_inband_fec: bool = false,
+    use_dtx: bool = false,
+}
+
+fn opus_rtp_ascii_lower(ch: byte) byte {
+    if ch >= ('A' as byte) && ch <= ('Z' as byte) {
+        return ch + 32u8;
+    }
+    return ch;
+}
+
+fn opus_rtp_bytes_equal_fold(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if opus_rtp_ascii_lower(lhs[i]) != opus_rtp_ascii_lower(rhs[i]) {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
 }
 
 fn opus_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
@@ -35,6 +74,78 @@ export fn opus_rtp_packetize_config_make() OpusRtpPacketizeConfig {
 
 export fn opus_rtp_depacketize_config_make() OpusRtpDepacketizeConfig {
     return OpusRtpDepacketizeConfig{};
+}
+
+export fn opus_rtp_semantics_make() OpusRtpSemantics {
+    return OpusRtpSemantics{};
+}
+
+fn opus_rtp_parse_bool_01(value: &[byte]) !bool {
+    if value.len != 1usize {
+        return error.OpusRtpInvalidFmtpValue;
+    }
+    if value[0] == ('1' as byte) {
+        return true;
+    }
+    if value[0] == ('0' as byte) {
+        return false;
+    }
+    return error.OpusRtpInvalidFmtpValue;
+}
+
+export fn opus_rtp_validate_clock_rate_hz(clock_rate_hz: u32) !void {
+    if clock_rate_hz != OPUS_RTP_CLOCK_RATE_HZ {
+        return error.OpusRtpInvalidClockRate;
+    }
+}
+
+export fn opus_rtp_semantics_set_ptime_ms(semantics: &OpusRtpSemantics, ptime_ms: u32) !void {
+    if semantics == null {
+        return error.OpusRtpInvalidConfig;
+    }
+    if ptime_ms == 0u32 || ptime_ms > OPUS_RTP_MAX_PTIME_MS || ptime_ms > semantics.maxptime_ms {
+        return error.OpusRtpInvalidPtime;
+    }
+    semantics.ptime_ms = ptime_ms;
+}
+
+export fn opus_rtp_semantics_set_maxptime_ms(semantics: &OpusRtpSemantics, maxptime_ms: u32) !void {
+    if semantics == null {
+        return error.OpusRtpInvalidConfig;
+    }
+    if maxptime_ms == 0u32 || maxptime_ms > OPUS_RTP_MAX_PTIME_MS || maxptime_ms < semantics.ptime_ms {
+        return error.OpusRtpInvalidPtime;
+    }
+    semantics.maxptime_ms = maxptime_ms;
+}
+
+export fn opus_rtp_semantics_apply_fmtp_param(
+    semantics: &OpusRtpSemantics,
+    key: &[byte],
+    value: &[byte],
+) !void {
+    if semantics == null {
+        return error.OpusRtpInvalidConfig;
+    }
+
+    if opus_rtp_bytes_equal_fold(key, "stereo" as &[byte]) {
+        semantics.stereo = try opus_rtp_parse_bool_01(value);
+        return;
+    }
+    if opus_rtp_bytes_equal_fold(key, "sprop-stereo" as &[byte]) {
+        semantics.sprop_stereo = try opus_rtp_parse_bool_01(value);
+        return;
+    }
+    if opus_rtp_bytes_equal_fold(key, "useinbandfec" as &[byte]) {
+        semantics.use_inband_fec = try opus_rtp_parse_bool_01(value);
+        return;
+    }
+    if opus_rtp_bytes_equal_fold(key, "usedtx" as &[byte]) {
+        semantics.use_dtx = try opus_rtp_parse_bool_01(value);
+        return;
+    }
+
+    return error.OpusRtpUnsupportedFmtpKey;
 }
 
 export fn opus_rtp_packetize(
