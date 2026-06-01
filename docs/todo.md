@@ -301,7 +301,7 @@
 - [x] 实现 VP8 RTP payload descriptor。
 - [x] 支持 VP8 X/N/S/PartID、PictureID、TL0PICIDX、TID、KEYIDX 字段。
 - [x] 实现 VP8 frame reassembly。
-- [ ] 对齐 `../vp8` 的 VP8 RTP malformed 错误、keyframe 检测和 frame boundary 语义。
+- [x] 对齐 `../vp8` 的 VP8 RTP malformed 错误、keyframe 检测和 frame boundary 语义。
 - [ ] 增加 VP8 keyframe、inter frame、partition start、picture id wrap、丢包重组失败 golden tests。
 - [ ] 实现 H264 STAP-A。
 - [ ] 实现 H264 FU-A。

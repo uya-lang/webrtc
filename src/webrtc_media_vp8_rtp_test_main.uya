@@ -178,6 +178,53 @@ fn check_reassembly_picture_id_mismatch() i32 {
     return 0i32;
 }
 
+fn check_frame_boundary_semantics() i32 {
+    var frame_start_packet: [byte: 2] = [0x10 as byte, 0x55 as byte];
+    const is_start: !bool = vp8_rtp_packet_is_frame_start(frame_start_packet[0:2]);
+    if is_start.error_id != 0 || !is_start.value {
+        return 50i32;
+    }
+
+    var not_start_packet: [byte: 2] = [0x00 as byte, 0x66 as byte];
+    const not_start: !bool = vp8_rtp_packet_is_frame_start(not_start_packet[0:2]);
+    if not_start.error_id != 0 || not_start.value {
+        return 51i32;
+    }
+
+    if !vp8_rtp_marker_is_frame_end(true) || vp8_rtp_marker_is_frame_end(false) {
+        return 52i32;
+    }
+    return 0i32;
+}
+
+fn check_keyframe_and_malformed_semantics() i32 {
+    var keyframe_packet: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const is_keyframe: !bool = vp8_rtp_packet_is_keyframe(keyframe_packet[0:2]);
+    if is_keyframe.error_id != 0 || !is_keyframe.value {
+        return 53i32;
+    }
+
+    var inter_packet: [byte: 2] = [0x10 as byte, 0x01 as byte];
+    const is_inter: !bool = vp8_rtp_packet_is_keyframe(inter_packet[0:2]);
+    if is_inter.error_id != 0 || is_inter.value {
+        return 54i32;
+    }
+
+    var non_start_packet: [byte: 2] = [0x00 as byte, 0x00 as byte];
+    const non_start: !bool = vp8_rtp_packet_is_keyframe(non_start_packet[0:2]);
+    if non_start.error_id != @error_id(error.Vp8RtpFrameStartRequired) {
+        return 55i32;
+    }
+
+    var empty_payload: [byte: 1] = [];
+    const short_check: !bool = vp8_rtp_payload_is_keyframe(empty_payload[0:0]);
+    if short_check.error_id != @error_id(error.Vp8RtpFramePayloadTooShort) {
+        return 56i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_parse_minimal_descriptor();
     if result != 0i32 {
@@ -218,6 +265,18 @@ fn main() i32 {
     result = check_reassembly_picture_id_mismatch();
     if result != 0i32 {
         printf("vp8 reassembly picture-id tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_frame_boundary_semantics();
+    if result != 0i32 {
+        printf("vp8 frame boundary tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_keyframe_and_malformed_semantics();
+    if result != 0i32 {
+        printf("vp8 keyframe tests failed: %d\n", result);
         return 1i32;
     }
 

@@ -12,6 +12,8 @@ export error Vp8RtpReassemblyStateRequired;
 export error Vp8RtpReassemblyFrameNotStarted;
 export error Vp8RtpReassemblyUnexpectedFrameStart;
 export error Vp8RtpReassemblyPictureIdMismatch;
+export error Vp8RtpFrameStartRequired;
+export error Vp8RtpFramePayloadTooShort;
 
 export struct Vp8RtpDescriptor {
     extension: bool = false,
@@ -201,6 +203,39 @@ export fn vp8_rtp_frame_reassembly_absorb(
         return frame_len;
     }
     return 0usize;
+}
+
+export fn vp8_rtp_descriptor_is_frame_start(descriptor: &Vp8RtpDescriptor) bool {
+    if descriptor == null {
+        return false;
+    }
+    return descriptor.start_of_partition && descriptor.partition_index == 0u8;
+}
+
+export fn vp8_rtp_packet_is_frame_start(packet: &[byte]) !bool {
+    const descriptor: Vp8RtpDescriptor = try vp8_rtp_descriptor_parse(packet);
+    const is_start: bool = vp8_rtp_descriptor_is_frame_start(&descriptor);
+    return is_start;
+}
+
+export fn vp8_rtp_marker_is_frame_end(marker: bool) bool {
+    return marker;
+}
+
+export fn vp8_rtp_payload_is_keyframe(payload: &[byte]) !bool {
+    if payload.len < 1usize {
+        return error.Vp8RtpFramePayloadTooShort;
+    }
+    return ((payload[0] as u8) & 0x01u8) == 0u8;
+}
+
+export fn vp8_rtp_packet_is_keyframe(packet: &[byte]) !bool {
+    const descriptor: Vp8RtpDescriptor = try vp8_rtp_descriptor_parse(packet);
+    if !vp8_rtp_descriptor_is_frame_start(&descriptor) {
+        return error.Vp8RtpFrameStartRequired;
+    }
+    const is_keyframe: bool = try vp8_rtp_payload_is_keyframe(descriptor.payload);
+    return is_keyframe;
 }
 
 export fn vp8_rtp_descriptor_write(
