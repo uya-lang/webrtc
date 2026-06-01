@@ -1,0 +1,281 @@
+use libc.printf;
+use webrtc.rtp.rtp_extension;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+
+    return true;
+}
+
+fn init_extension_slots(slots: &[RtpExtension]) void {
+    var i: usize = 0usize;
+    while i < slots.len {
+        slots[i] = rtp_extension_make();
+        i = i + 1usize;
+    }
+}
+
+fn check_one_byte_parse() i32 {
+    var slots: [RtpExtension: 4] = [];
+    init_extension_slots(slots[0:4]);
+
+    var raw: [byte: 7] = [
+        0x21 as byte,
+        0xaa as byte,
+        0xbb as byte,
+        0x00 as byte,
+        0xf0 as byte,
+        0xff as byte,
+        0xff as byte,
+    ];
+
+    const parsed: !usize = rtp_extension_parse_one_byte(raw[0:7], slots[0:4]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value != 1usize {
+        return 11i32;
+    }
+    if slots[0].id != 2u8 {
+        return 12i32;
+    }
+
+    var expected_payload: [byte: 2] = [0xaa as byte, 0xbb as byte];
+    if !bytes_equal(slots[0].data, expected_payload[0:2]) {
+        return 13i32;
+    }
+
+    var empty: [byte: 1] = [];
+    const empty_parsed: !usize = rtp_extension_parse_one_byte(empty[0:0], slots[0:4]);
+    if empty_parsed.error_id != 0 || empty_parsed.value != 0usize {
+        return 14i32;
+    }
+
+    return 0i32;
+}
+
+fn check_one_byte_errors() i32 {
+    var slots: [RtpExtension: 2] = [];
+    init_extension_slots(slots[0:2]);
+
+    var truncated: [byte: 4] = [0x23 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte];
+    const truncated_result: !usize = rtp_extension_parse_one_byte(truncated[0:4], slots[0:2]);
+    if truncated_result.error_id != @error_id(error.RtpExtensionInvalidLength) {
+        return 20i32;
+    }
+
+    var bad_id: [byte: 1] = [0x0f as byte];
+    const bad_id_result: !usize = rtp_extension_parse_one_byte(bad_id[0:1], slots[0:2]);
+    if bad_id_result.error_id != @error_id(error.RtpExtensionInvalidId) {
+        return 21i32;
+    }
+
+    return 0i32;
+}
+
+fn check_one_byte_write() i32 {
+    var exts: [RtpExtension: 2] = [];
+
+    var first_data: [byte: 1] = [0xaa as byte];
+    exts[0] = RtpExtension{ id: 1u8, data: first_data[0:1] };
+
+    var second_data: [byte: 3] = [0x01 as byte, 0x02 as byte, 0x03 as byte];
+    exts[1] = RtpExtension{ id: 3u8, data: second_data[0:3] };
+
+    var out: [byte: 16] = [];
+    const written: !usize = rtp_extension_write_one_byte(exts[0:2], out[0:16]);
+    if written.error_id != 0 {
+        return 30i32;
+    }
+    if written.value != 8usize {
+        return 31i32;
+    }
+
+    var expected: [byte: 8] = [
+        0x10 as byte,
+        0xaa as byte,
+        0x32 as byte,
+        0x01 as byte,
+        0x02 as byte,
+        0x03 as byte,
+        0x00 as byte,
+        0x00 as byte,
+    ];
+    if !bytes_equal(out[0:8], expected[0:8]) {
+        return 32i32;
+    }
+
+    var parsed_exts: [RtpExtension: 2] = [];
+    init_extension_slots(parsed_exts[0:2]);
+    const parsed: !usize = rtp_extension_parse_one_byte(out[0:written.value], parsed_exts[0:2]);
+    if parsed.error_id != 0 || parsed.value != 2usize {
+        return 33i32;
+    }
+    if parsed_exts[0].id != 1u8 || parsed_exts[1].id != 3u8 {
+        return 34i32;
+    }
+    if !bytes_equal(parsed_exts[1].data, second_data[0:3]) {
+        return 35i32;
+    }
+
+    var bad_id_exts: [RtpExtension: 1] = [];
+    bad_id_exts[0] = RtpExtension{ id: 15u8, data: first_data[0:1] };
+    const bad_id_write: !usize = rtp_extension_write_one_byte(bad_id_exts[0:1], out[0:16]);
+    if bad_id_write.error_id != @error_id(error.RtpExtensionInvalidId) {
+        return 36i32;
+    }
+
+    var long_data: [byte: 17] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte,
+        0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte,
+    ];
+    var bad_len_exts: [RtpExtension: 1] = [];
+    bad_len_exts[0] = RtpExtension{ id: 1u8, data: long_data[0:17] };
+    const bad_len_write: !usize = rtp_extension_write_one_byte(bad_len_exts[0:1], out[0:16]);
+    if bad_len_write.error_id != @error_id(error.RtpExtensionInvalidLength) {
+        return 37i32;
+    }
+
+    var small_out: [byte: 2] = [];
+    const small_write: !usize = rtp_extension_write_one_byte(exts[0:2], small_out[0:2]);
+    if small_write.error_id != @error_id(error.RtpExtensionBufferTooSmall) {
+        return 38i32;
+    }
+
+    return 0i32;
+}
+
+fn check_two_byte_parse_and_write() i32 {
+    var slots: [RtpExtension: 3] = [];
+    init_extension_slots(slots[0:3]);
+
+    var raw: [byte: 5] = [0x00 as byte, 0x05 as byte, 0x01 as byte, 0xff as byte, 0x00 as byte];
+    const parsed: !usize = rtp_extension_parse_two_byte(raw[0:5], slots[0:3]);
+    if parsed.error_id != 0 || parsed.value != 1usize {
+        return 40i32;
+    }
+    if slots[0].id != 5u8 || slots[0].data.len != 1usize || slots[0].data[0] != 0xff as byte {
+        return 41i32;
+    }
+
+    var truncated_header: [byte: 1] = [0x04 as byte];
+    const truncated_header_result: !usize = rtp_extension_parse_two_byte(truncated_header[0:1], slots[0:3]);
+    if truncated_header_result.error_id != @error_id(error.RtpExtensionInvalidLength) {
+        return 42i32;
+    }
+
+    var truncated_payload: [byte: 3] = [0x04 as byte, 0x02 as byte, 0xaa as byte];
+    const truncated_payload_result: !usize = rtp_extension_parse_two_byte(truncated_payload[0:3], slots[0:3]);
+    if truncated_payload_result.error_id != @error_id(error.RtpExtensionInvalidLength) {
+        return 43i32;
+    }
+
+    var exts: [RtpExtension: 2] = [];
+    var first_data: [byte: 2] = [0x11 as byte, 0x22 as byte];
+    var second_data: [byte: 1] = [];
+    exts[0] = RtpExtension{ id: 3u8, data: first_data[0:2] };
+    exts[1] = RtpExtension{ id: 7u8, data: second_data[0:0] };
+
+    var out: [byte: 16] = [];
+    const written: !usize = rtp_extension_write_two_byte(exts[0:2], out[0:16]);
+    if written.error_id != 0 {
+        return 44i32;
+    }
+    if written.value != 8usize {
+        return 45i32;
+    }
+
+    var expected: [byte: 8] = [
+        0x03 as byte,
+        0x02 as byte,
+        0x11 as byte,
+        0x22 as byte,
+        0x07 as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x00 as byte,
+    ];
+    if !bytes_equal(out[0:8], expected[0:8]) {
+        return 46i32;
+    }
+
+    var parsed_roundtrip: [RtpExtension: 2] = [];
+    init_extension_slots(parsed_roundtrip[0:2]);
+    const parsed_roundtrip_count: !usize = rtp_extension_parse_two_byte(out[0:8], parsed_roundtrip[0:2]);
+    if parsed_roundtrip_count.error_id != 0 || parsed_roundtrip_count.value != 2usize {
+        return 47i32;
+    }
+    if parsed_roundtrip[1].id != 7u8 || parsed_roundtrip[1].data.len != 0usize {
+        return 48i32;
+    }
+
+    var bad_id_ext: [RtpExtension: 1] = [];
+    bad_id_ext[0] = RtpExtension{ id: 0u8, data: first_data[0:2] };
+    const bad_id_result: !usize = rtp_extension_write_two_byte(bad_id_ext[0:1], out[0:16]);
+    if bad_id_result.error_id != @error_id(error.RtpExtensionInvalidId) {
+        return 49i32;
+    }
+
+    var long_data: [byte: 256] = [];
+    var i: usize = 0usize;
+    while i < 256usize {
+        long_data[i] = (i & 0xffusize) as byte;
+        i = i + 1usize;
+    }
+    var bad_len_ext: [RtpExtension: 1] = [];
+    bad_len_ext[0] = RtpExtension{ id: 1u8, data: long_data[0:256] };
+    const bad_len_result: !usize = rtp_extension_write_two_byte(bad_len_ext[0:1], out[0:16]);
+    if bad_len_result.error_id != @error_id(error.RtpExtensionInvalidLength) {
+        return 50i32;
+    }
+
+    var small_out: [byte: 3] = [];
+    const small_result: !usize = rtp_extension_write_two_byte(exts[0:2], small_out[0:3]);
+    if small_result.error_id != @error_id(error.RtpExtensionBufferTooSmall) {
+        return 51i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_one_byte_parse();
+    if result != 0i32 {
+        printf("RTP extension tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_one_byte_errors();
+    if result != 0i32 {
+        printf("RTP extension tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_one_byte_write();
+    if result != 0i32 {
+        printf("RTP extension tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_two_byte_parse_and_write();
+    if result != 0i32 {
+        printf("RTP extension tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP extension one-byte/two-byte tests passed\n");
+    return 0i32;
+}
