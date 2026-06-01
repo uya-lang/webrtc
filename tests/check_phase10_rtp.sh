@@ -56,6 +56,8 @@ rg -q "export fn rtcp_bye_parse" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_bye_write" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_nack_parse" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_nack_write" src/webrtc/rtcp/rtcp_packet.uya
+rg -q "export fn rtcp_pli_parse" src/webrtc/rtcp/rtcp_packet.uya
+rg -q "export fn rtcp_pli_write" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_report_rtt_ms" src/webrtc/rtcp/rtcp_packet.uya
 rg -q '"bench_rtp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtp_extension_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl

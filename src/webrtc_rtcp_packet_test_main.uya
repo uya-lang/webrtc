@@ -214,6 +214,33 @@ fn check_nack_parse_and_roundtrip() i32 {
     return 0i32;
 }
 
+fn check_pli_parse_and_roundtrip() i32 {
+    var pli_packet: [byte: 12] = [
+        0x81 as byte, 0xCE as byte, 0x00 as byte, 0x02 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+    ];
+    const parsed: !RtcpPliPacket = rtcp_pli_parse(pli_packet[0:12]);
+    if parsed.error_id != 0 {
+        return 70i32;
+    }
+    if parsed.value.sender_ssrc != 0x11223344u32 || parsed.value.media_ssrc != 0x55667788u32 {
+        return 71i32;
+    }
+
+    var out: [byte: 16] = [];
+    const written: !usize = rtcp_pli_write(&parsed.value, out[0:16]);
+    if written.error_id != 0 || written.value != 12usize {
+        return 72i32;
+    }
+    const reparsed: !RtcpPliPacket = rtcp_pli_parse(out[0:written.value]);
+    if reparsed.error_id != 0 || reparsed.value.media_ssrc != 0x55667788u32 {
+        return 73i32;
+    }
+
+    return 0i32;
+}
+
 fn check_error_and_rtt_paths() i32 {
     var bad_version_sr: [byte: 28] = [
         0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
@@ -305,6 +332,16 @@ fn check_error_and_rtt_paths() i32 {
         return 49i32;
     }
 
+    var bad_pli_format: [byte: 12] = [
+        0x82 as byte, 0xCE as byte, 0x00 as byte, 0x02 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+    ];
+    const bad_pli: !RtcpPliPacket = rtcp_pli_parse(bad_pli_format[0:12]);
+    if bad_pli.error_id != @error_id(error.RtcpPliInvalidFormat) {
+        return 50i32;
+    }
+
     return 0i32;
 }
 
@@ -339,12 +376,18 @@ fn main() i32 {
         return 1i32;
     }
 
-    result = check_error_and_rtt_paths();
+    result = check_pli_parse_and_roundtrip();
     if result != 0i32 {
-        printf("RTCP SR/RR/SDES/BYE/NACK tests failed: %d\n", result);
+        printf("RTCP PLI tests failed: %d\n", result);
         return 1i32;
     }
 
-    printf("RTCP SR/RR/SDES/BYE/NACK tests passed\n");
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR/SDES/BYE/NACK/PLI tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR/SDES/BYE/NACK/PLI tests passed\n");
     return 0i32;
 }
