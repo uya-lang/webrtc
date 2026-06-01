@@ -13,9 +13,11 @@ test -f src/webrtc/srtp/protect.uya
 # Check fixtures
 test -f tests/fixtures/srtp/rfc3711_vectors.json
 test -x tests/srtp_vectors.py
+test -x tests/srtp_sequence_replay_tests.py
 
 # Validate vectors
 python3 tests/srtp_vectors.py
+python3 tests/srtp_sequence_replay_tests.py
 
 # Check key exports
 rg -q "export struct SrtpContext" src/webrtc/srtp/model.uya

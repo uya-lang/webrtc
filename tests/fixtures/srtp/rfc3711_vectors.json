@@ -91,6 +91,39 @@
       }
     ]
   },
+  "roc_transitions": {
+    "description": "ROC guess transitions based on RFC 3711 Section 3.3.1",
+    "vectors": [
+      {
+        "name": "forward_wrap_to_next_roc",
+        "current_roc_hex": "00000000",
+        "highest_index_hex": "00000000ffff",
+        "seq_hex": "0000",
+        "expected_index_hex": "000000010000"
+      },
+      {
+        "name": "in_order_same_roc",
+        "current_roc_hex": "00000005",
+        "highest_index_hex": "000000050100",
+        "seq_hex": "0101",
+        "expected_index_hex": "000000050101"
+      },
+      {
+        "name": "late_packet_previous_roc",
+        "current_roc_hex": "00000001",
+        "highest_index_hex": "000000010005",
+        "seq_hex": "fffe",
+        "expected_index_hex": "00000000fffe"
+      },
+      {
+        "name": "older_packet_same_roc",
+        "current_roc_hex": "00000001",
+        "highest_index_hex": "000000018010",
+        "seq_hex": "7fff",
+        "expected_index_hex": "000000017fff"
+      }
+    ]
+  },
   "replay_window": {
     "description": "SRTP replay window test vectors",
     "vectors": [
