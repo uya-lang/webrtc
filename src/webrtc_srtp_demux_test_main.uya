@@ -1,0 +1,221 @@
+use libc.printf;
+use webrtc.srtp.core;
+use webrtc.srtp.demux;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.srtp.srtcp;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn check_demux_rtp_and_rtcp() i32 {
+    var master_key: [byte: SRTP_KEY_BYTES] = [
+        0xe1 as byte, 0xf9 as byte, 0x7a as byte, 0x0d as byte,
+        0x3e as byte, 0x01 as byte, 0x8b as byte, 0xe0 as byte,
+        0xd6 as byte, 0x4f as byte, 0xa3 as byte, 0x2c as byte,
+        0x06 as byte, 0xde as byte, 0x41 as byte, 0x39 as byte,
+    ];
+    var master_salt: [byte: SRTP_SALT_BYTES] = [
+        0x0e as byte, 0xc6 as byte, 0x75 as byte, 0xad as byte,
+        0x49 as byte, 0x8a as byte, 0xfe as byte, 0xeb as byte,
+        0xb6 as byte, 0x96 as byte, 0x0b as byte, 0x3a as byte,
+        0xab as byte, 0xe6 as byte,
+    ];
+
+    var tx_srtp: SrtpContext = srtp_context_make();
+    var rx_srtp: SrtpContext = srtp_context_make();
+    var tx_srtcp: SrtcpContext = srtcp_context_make();
+    var rx_srtcp: SrtcpContext = srtcp_context_make();
+    if srtp_context_init(
+        &tx_srtp,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 10i32;
+    }
+    if srtp_context_init(
+        &rx_srtp,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 11i32;
+    }
+    if srtcp_context_init(
+        &tx_srtcp,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 12i32;
+    }
+    if srtcp_context_init(
+        &rx_srtcp,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 13i32;
+    }
+
+    if srtp_derive_session_keys(&tx_srtp).error_id != 0 {
+        return 14i32;
+    }
+    if srtp_derive_session_keys(&rx_srtp).error_id != 0 {
+        return 15i32;
+    }
+    if srtcp_derive_session_keys(&tx_srtcp).error_id != 0 {
+        return 16i32;
+    }
+    if srtcp_derive_session_keys(&rx_srtcp).error_id != 0 {
+        return 17i32;
+    }
+
+    var rtp_packet: [byte: 172] = [];
+    rtp_packet[0] = 0x80 as byte;
+    rtp_packet[1] = 0x6f as byte;
+    rtp_packet[2] = 0x00 as byte;
+    rtp_packet[3] = 0x01 as byte;
+    rtp_packet[4] = 0x11 as byte;
+    rtp_packet[5] = 0x22 as byte;
+    rtp_packet[6] = 0x33 as byte;
+    rtp_packet[7] = 0x44 as byte;
+    rtp_packet[8] = 0x22 as byte;
+    rtp_packet[9] = 0x33 as byte;
+    rtp_packet[10] = 0x44 as byte;
+    rtp_packet[11] = 0x55 as byte;
+
+    var i: usize = 12usize;
+    while i < 172usize {
+        rtp_packet[i] = (i & 0xffusize) as byte;
+        i = i + 1usize;
+    }
+
+    var srtp_packet: [byte: 192] = [];
+    const srtp_len: !usize = srtp_protect(&tx_srtp, rtp_packet[0:172], srtp_packet[0:192]);
+    if srtp_len.error_id != 0 {
+        return 18i32;
+    }
+
+    var recovered: [byte: 256] = [];
+    const rtp_result: !SrtpDemuxResult = srtp_demux_unprotect_packet(
+        srtp_packet[0:srtp_len.value],
+        &rx_srtp,
+        &rx_srtcp,
+        recovered[0:256],
+    );
+    if rtp_result.error_id != 0 {
+        return 19i32;
+    }
+    if rtp_result.value.packet_kind != SRTP_DEMUX_PACKET_KIND_RTP {
+        return 20i32;
+    }
+    if rtp_result.value.plaintext_len != 172usize {
+        return 21i32;
+    }
+    if !bytes_equal(recovered[0:172], rtp_packet[0:172]) {
+        return 22i32;
+    }
+
+    var rtcp_packet: [byte: 32] = [];
+    rtcp_packet[0] = 0x80 as byte;
+    rtcp_packet[1] = 200 as byte;
+    rtcp_packet[2] = 0x00 as byte;
+    rtcp_packet[3] = 0x07 as byte;
+    i = 4usize;
+    while i < 32usize {
+        rtcp_packet[i] = (i & 0xffusize) as byte;
+        i = i + 1usize;
+    }
+
+    var srtcp_packet: [byte: 64] = [];
+    const srtcp_len: !usize = srtcp_protect(&tx_srtcp, rtcp_packet[0:32], srtcp_packet[0:64]);
+    if srtcp_len.error_id != 0 {
+        return 23i32;
+    }
+
+    const rtcp_result: !SrtpDemuxResult = srtp_demux_unprotect_packet(
+        srtcp_packet[0:srtcp_len.value],
+        &rx_srtp,
+        &rx_srtcp,
+        recovered[0:256],
+    );
+    if rtcp_result.error_id != 0 {
+        return 24i32;
+    }
+    if rtcp_result.value.packet_kind != SRTP_DEMUX_PACKET_KIND_RTCP {
+        return 25i32;
+    }
+    if rtcp_result.value.plaintext_len != 32usize {
+        return 26i32;
+    }
+    if !bytes_equal(recovered[0:32], rtcp_packet[0:32]) {
+        return 27i32;
+    }
+    return 0i32;
+}
+
+fn check_demux_invalid_cases() i32 {
+    var srtp_ctx: SrtpContext = srtp_context_make();
+    var srtcp_ctx: SrtcpContext = srtcp_context_make();
+    var out: [byte: 64] = [];
+
+    var stun_packet: [byte: 20] = [];
+    stun_packet[0] = 0x00 as byte;
+    const stun_result: !SrtpDemuxResult = srtp_demux_unprotect_packet(
+        stun_packet[0:20],
+        &srtp_ctx,
+        &srtcp_ctx,
+        out[0:64],
+    );
+    if stun_result.error_id != @error_id(error.UnsupportedCapability) {
+        return 30i32;
+    }
+
+    var short_rtp: [byte: 11] = [];
+    short_rtp[0] = 0x80 as byte;
+    short_rtp[1] = 0x6f as byte;
+    const short_result: !SrtpDemuxResult = srtp_demux_unprotect_packet(
+        short_rtp[0:11],
+        &srtp_ctx,
+        &srtcp_ctx,
+        out[0:64],
+    );
+    if short_result.error_id != @error_id(error.PacketTooShort) {
+        return 31i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_demux_rtp_and_rtcp();
+    if result != 0i32 {
+        printf("SRTP demux tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_demux_invalid_cases();
+    if result != 0i32 {
+        printf("SRTP demux tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("SRTP demux tests passed\n");
+    return 0i32;
+}

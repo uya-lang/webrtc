@@ -252,7 +252,7 @@
 - [x] 实现 `SRTP_AES128_CM_HMAC_SHA1_32`。
 - [x] 实现 SRTCP protect/unprotect。
 - [x] 集成 DTLS exporter keys。
-- [ ] 集成 RTP/RTCP demux。
+- [x] 集成 RTP/RTCP demux。
 
 验收标准：
 

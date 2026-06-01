@@ -1,0 +1,44 @@
+// webrtc.srtp.demux - RTP/RTCP demux integration with SRTP/SRTCP unprotect
+// 模块路径：src/webrtc/srtp/demux.uya → use webrtc.srtp.demux;
+
+use webrtc.errors;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.srtp.srtcp;
+use webrtc.udp;
+
+export const SRTP_DEMUX_PACKET_KIND_RTP: u8 = UDP_PACKET_KIND_RTP;
+export const SRTP_DEMUX_PACKET_KIND_RTCP: u8 = UDP_PACKET_KIND_RTCP;
+
+export struct SrtpDemuxResult {
+    packet_kind: u8 = UDP_PACKET_KIND_UNKNOWN,
+    plaintext_len: usize = 0usize,
+}
+
+export fn srtp_demux_unprotect_packet(
+    encrypted_packet: &[byte],
+    srtp_ctx: &SrtpContext,
+    srtcp_ctx: &SrtcpContext,
+    plaintext_out: &[byte],
+) !SrtpDemuxResult {
+    if srtp_ctx == null || srtcp_ctx == null {
+        return error.InvalidPacket;
+    }
+
+    const packet_kind: u8 = try udp_classify_packet(encrypted_packet);
+    if packet_kind == UDP_PACKET_KIND_RTP {
+        const plaintext_len: usize = try srtp_unprotect(srtp_ctx, encrypted_packet, plaintext_out);
+        return SrtpDemuxResult{
+            packet_kind: SRTP_DEMUX_PACKET_KIND_RTP,
+            plaintext_len: plaintext_len,
+        };
+    }
+    if packet_kind == UDP_PACKET_KIND_RTCP {
+        const plaintext_len: usize = try srtcp_unprotect(srtcp_ctx, encrypted_packet, plaintext_out);
+        return SrtpDemuxResult{
+            packet_kind: SRTP_DEMUX_PACKET_KIND_RTCP,
+            plaintext_len: plaintext_len,
+        };
+    }
+    return error.UnsupportedCapability;
+}
