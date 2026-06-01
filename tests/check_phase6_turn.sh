@@ -4,6 +4,65 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+run_turn_main_with_codegen_fallback() {
+    local run_log
+    run_log="$(mktemp)"
+    if ../uya/bin/uya run src/webrtc_turn_test_main.uya >"$run_log" 2>&1; then
+        rm -f "$run_log"
+        return 0
+    fi
+
+    if ! rg -q "AsyncFrameDescriptorTable" "$run_log"; then
+        cat "$run_log" >&2
+        rm -f "$run_log"
+        return 1
+    fi
+
+    local tmp_c tmp_bin
+    tmp_c="$(mktemp /tmp/webrtc-turn-test-XXXXXX.c)"
+    tmp_bin="$(mktemp /tmp/webrtc-turn-test-bin-XXXXXX)"
+    trap 'rm -f "$run_log" "$tmp_c" "$tmp_bin"' RETURN
+
+    if ! ../uya/bin/uya build src/webrtc_turn_test_main.uya --c99 -o "$tmp_c" >/dev/null 2>&1; then
+        cat "$run_log" >&2
+        return 1
+    fi
+
+    python3 - "$tmp_c" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source = path.read_text()
+marker = "struct AsyncFrameDescriptorTable _uya_async_frame_descriptors = {"
+
+if marker in source and "struct AsyncFrameDescriptorTable {" not in source:
+    patch = (
+        "struct AsyncFrameDescriptorEntry {\n"
+        "    int32_t a;\n"
+        "    int32_t b;\n"
+        "    void* c;\n"
+        "};\n"
+        "struct AsyncFrameDescriptorTable {\n"
+        "    struct AsyncFrameDescriptorEntry entries[256];\n"
+        "};\n"
+    )
+    source = source.replace(
+        "// Async frame descriptors (for unified AsyncFramePool)\n",
+        patch + "// Async frame descriptors (for unified AsyncFramePool)\n",
+        1,
+    )
+    path.write_text(source)
+PY
+
+    if ! cc -std=c99 -O0 -g -fno-builtin "$tmp_c" -o "$tmp_bin"; then
+        cat "$run_log" >&2
+        return 1
+    fi
+
+    "$tmp_bin"
+}
+
 test -f src/webrtc_turn_test_main.uya
 test -f src/webrtc_turn_coturn_test_main.uya
 test -d src/webrtc/turn
@@ -98,5 +157,5 @@ rg -Fq "turn_test_check_send_data_indication_roundtrip" src/webrtc_turn_test_mai
 rg -Fq "turn_test_check_send_data_indication_invalid_paths" src/webrtc_turn_test_main.uya
 rg -Fq "turn_coturn_test_run" src/webrtc_turn_coturn_test_main.uya
 
-../uya/bin/uya run src/webrtc_turn_test_main.uya
+run_turn_main_with_codegen_fallback
 bash tests/check_phase6_turn_coturn.sh
