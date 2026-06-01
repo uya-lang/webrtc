@@ -225,6 +225,63 @@ fn check_keyframe_and_malformed_semantics() i32 {
     return 0i32;
 }
 
+fn check_golden_wrap_and_loss() i32 {
+    var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
+    descriptor.start_of_partition = true;
+    descriptor.partition_index = 0u8;
+    descriptor.has_picture_id = true;
+
+    var payload: [byte: 1] = [0x00 as byte];
+    var packet_max: [byte: 8] = [];
+    descriptor.picture_id = 0x7FFFu16;
+    const write_max: !usize = vp8_rtp_descriptor_write(&descriptor, payload[0:1], packet_max[0:8]);
+    if write_max.error_id != 0 {
+        return 62i32;
+    }
+    const parse_max: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet_max[0:write_max.value]);
+    if parse_max.error_id != 0 || !parse_max.value.has_picture_id || parse_max.value.picture_id != 0x7FFFu16 {
+        return 63i32;
+    }
+
+    var packet_zero: [byte: 8] = [];
+    descriptor.picture_id = 0u16;
+    const write_zero: !usize = vp8_rtp_descriptor_write(&descriptor, payload[0:1], packet_zero[0:8]);
+    if write_zero.error_id != 0 {
+        return 64i32;
+    }
+    const parse_zero: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet_zero[0:write_zero.value]);
+    if parse_zero.error_id != 0 || !parse_zero.value.has_picture_id || parse_zero.value.picture_id != 0u16 {
+        return 65i32;
+    }
+
+    var state: Vp8RtpFrameReassemblyState = vp8_rtp_frame_reassembly_state_make();
+    var frame: [byte: 8] = [];
+
+    var start_packet: [byte: 2] = [0x10 as byte, 0x11 as byte];
+    const first: !usize = vp8_rtp_frame_reassembly_absorb(&state, start_packet[0:2], false, frame[0:8]);
+    if first.error_id != 0 || first.value != 0usize {
+        return 66i32;
+    }
+
+    var next_frame_start: [byte: 2] = [0x10 as byte, 0x22 as byte];
+    const lost_tail: !usize = vp8_rtp_frame_reassembly_absorb(&state, next_frame_start[0:2], true, frame[0:8]);
+    if lost_tail.error_id != @error_id(error.Vp8RtpReassemblyUnexpectedFrameStart) {
+        return 67i32;
+    }
+
+    const reset_state: !void = vp8_rtp_frame_reassembly_reset(&state);
+    if reset_state.error_id != 0 {
+        return 69i32;
+    }
+    var continuation_only: [byte: 2] = [0x00 as byte, 0x33 as byte];
+    const lost_head: !usize = vp8_rtp_frame_reassembly_absorb(&state, continuation_only[0:2], true, frame[0:8]);
+    if lost_head.error_id != @error_id(error.Vp8RtpReassemblyFrameNotStarted) {
+        return 68i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_parse_minimal_descriptor();
     if result != 0i32 {
@@ -277,6 +334,12 @@ fn main() i32 {
     result = check_keyframe_and_malformed_semantics();
     if result != 0i32 {
         printf("vp8 keyframe tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_golden_wrap_and_loss();
+    if result != 0i32 {
+        printf("vp8 golden wrap/loss tests failed: %d\n", result);
         return 1i32;
     }
 
