@@ -34,6 +34,35 @@ fn check_parse_minimal_descriptor() i32 {
     return 0i32;
 }
 
+fn check_parse_extended_fields() i32 {
+    var packet: [byte: 8] = [
+        0x90 as byte, 0xF0 as byte,
+        0x81 as byte, 0x23 as byte,
+        0x45 as byte, 0xBF as byte,
+        0x11 as byte, 0x22 as byte,
+    ];
+    const parsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet[0:8]);
+    if parsed.error_id != 0 {
+        return 14i32;
+    }
+    if !parsed.value.extension || !parsed.value.has_picture_id || parsed.value.picture_id != 0x0123u16 {
+        return 15i32;
+    }
+    if !parsed.value.has_tl0_pic_idx || parsed.value.tl0_pic_idx != 0x45u8 {
+        return 16i32;
+    }
+    if !parsed.value.has_tid || parsed.value.tid != 2u8 || !parsed.value.layer_sync {
+        return 17i32;
+    }
+    if !parsed.value.has_key_idx || parsed.value.key_idx != 31u8 {
+        return 18i32;
+    }
+    if parsed.value.payload_offset != 6usize || !bytes_equal(parsed.value.payload, packet[6:2]) {
+        return 19i32;
+    }
+    return 0i32;
+}
+
 fn check_write_minimal_descriptor() i32 {
     var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
     descriptor.start_of_partition = true;
@@ -60,12 +89,41 @@ fn check_write_minimal_descriptor() i32 {
     return 0i32;
 }
 
-fn check_extension_not_supported_yet() i32 {
-    var packet: [byte: 2] = [0x80 as byte, 0x00 as byte];
-    const parsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet[0:2]);
-    if parsed.error_id != @error_id(error.Vp8RtpExtensionNotSupported) {
+fn check_write_extended_descriptor() i32 {
+    var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
+    descriptor.extension = true;
+    descriptor.start_of_partition = true;
+    descriptor.partition_index = 0u8;
+    descriptor.has_picture_id = true;
+    descriptor.picture_id = 0x0123u16;
+    descriptor.has_tl0_pic_idx = true;
+    descriptor.tl0_pic_idx = 0x45u8;
+    descriptor.has_tid = true;
+    descriptor.tid = 2u8;
+    descriptor.layer_sync = true;
+    descriptor.has_key_idx = true;
+    descriptor.key_idx = 31u8;
+
+    var payload: [byte: 2] = [0x11 as byte, 0x22 as byte];
+    var out: [byte: 16] = [];
+    const written: !usize = vp8_rtp_descriptor_write(&descriptor, payload[0:2], out[0:16]);
+    if written.error_id != 0 || written.value != 8usize {
         return 30i32;
     }
+    if out[0] != 0x90u8 || out[1] != 0xF0u8 || out[5] != 0xBFu8 {
+        return 31i32;
+    }
+    const reparsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(out[0:written.value]);
+    if reparsed.error_id != 0 || reparsed.value.picture_id != 0x0123u16 || !reparsed.value.has_key_idx {
+        return 32i32;
+    }
+
+    var bad_packet: [byte: 2] = [0x80 as byte, 0x80 as byte];
+    const bad_parse: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(bad_packet[0:2]);
+    if bad_parse.error_id != @error_id(error.Vp8RtpDescriptorTooShort) {
+        return 33i32;
+    }
+
     return 0i32;
 }
 
@@ -76,13 +134,19 @@ fn main() i32 {
         return 1i32;
     }
 
+    result = check_parse_extended_fields();
+    if result != 0i32 {
+        printf("vp8 descriptor extended parse tests failed: %d\n", result);
+        return 1i32;
+    }
+
     result = check_write_minimal_descriptor();
     if result != 0i32 {
         printf("vp8 descriptor write tests failed: %d\n", result);
         return 1i32;
     }
 
-    result = check_extension_not_supported_yet();
+    result = check_write_extended_descriptor();
     if result != 0i32 {
         printf("vp8 descriptor extension tests failed: %d\n", result);
         return 1i32;

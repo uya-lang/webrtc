@@ -299,7 +299,7 @@
 - [x] 对齐 `../opus` 的 RTP Opus 语义：48 kHz clock、ptime/maxptime、stereo/sprop-stereo、useinbandfec、usedtx。
 - [x] 增加 Opus single-packet、多 frame、DTX/空 payload、maxptime 超限 golden tests。
 - [x] 实现 VP8 RTP payload descriptor。
-- [ ] 支持 VP8 X/N/S/PartID、PictureID、TL0PICIDX、TID、KEYIDX 字段。
+- [x] 支持 VP8 X/N/S/PartID、PictureID、TL0PICIDX、TID、KEYIDX 字段。
 - [ ] 实现 VP8 frame reassembly。
 - [ ] 对齐 `../vp8` 的 VP8 RTP malformed 错误、keyframe 检测和 frame boundary 语义。
 - [ ] 增加 VP8 keyframe、inter frame、partition start、picture id wrap、丢包重组失败 golden tests。

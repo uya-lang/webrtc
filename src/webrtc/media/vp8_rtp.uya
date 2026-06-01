@@ -5,12 +5,24 @@ export error Vp8RtpDescriptorTooShort;
 export error Vp8RtpBufferTooSmall;
 export error Vp8RtpInvalidPartitionIndex;
 export error Vp8RtpExtensionNotSupported;
+export error Vp8RtpInvalidPictureId;
+export error Vp8RtpInvalidTemporalLayerId;
+export error Vp8RtpInvalidKeyIndex;
 
 export struct Vp8RtpDescriptor {
     extension: bool = false,
     non_reference: bool = false,
     start_of_partition: bool = false,
     partition_index: u8 = 0u8,
+    has_picture_id: bool = false,
+    picture_id: u16 = 0u16,
+    has_tl0_pic_idx: bool = false,
+    tl0_pic_idx: u8 = 0u8,
+    has_tid: bool = false,
+    tid: u8 = 0u8,
+    layer_sync: bool = false,
+    has_key_idx: bool = false,
+    key_idx: u8 = 0u8,
     payload_offset: usize = 0usize,
     payload: &[byte] = [],
 }
@@ -36,19 +48,82 @@ export fn vp8_rtp_descriptor_parse(packet: &[byte]) !Vp8RtpDescriptor {
         return error.Vp8RtpDescriptorTooShort;
     }
 
+    var offset: usize = 0usize;
     const first: u8 = packet[0] as u8;
+    offset = offset + 1usize;
+
     const extension: bool = (first & 0x80u8) != 0u8;
-    if extension {
-        return error.Vp8RtpExtensionNotSupported;
-    }
 
     var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
     descriptor.extension = extension;
     descriptor.non_reference = (first & 0x20u8) != 0u8;
     descriptor.start_of_partition = (first & 0x10u8) != 0u8;
     descriptor.partition_index = first & 0x0Fu8;
-    descriptor.payload_offset = 1usize;
-    descriptor.payload = packet[1:packet.len - 1usize];
+
+    if extension {
+        if offset >= packet.len {
+            return error.Vp8RtpDescriptorTooShort;
+        }
+        const extension_flags: u8 = packet[offset] as u8;
+        offset = offset + 1usize;
+
+        const has_picture_id: bool = (extension_flags & 0x80u8) != 0u8;
+        const has_tl0_pic_idx: bool = (extension_flags & 0x40u8) != 0u8;
+        const has_tid: bool = (extension_flags & 0x20u8) != 0u8;
+        const has_key_idx: bool = (extension_flags & 0x10u8) != 0u8;
+
+        if has_picture_id {
+            if offset >= packet.len {
+                return error.Vp8RtpDescriptorTooShort;
+            }
+
+            const picture_id_0: u8 = packet[offset] as u8;
+            offset = offset + 1usize;
+
+            descriptor.has_picture_id = true;
+            if (picture_id_0 & 0x80u8) != 0u8 {
+                if offset >= packet.len {
+                    return error.Vp8RtpDescriptorTooShort;
+                }
+                const picture_id_1: u16 = packet[offset] as u16;
+                offset = offset + 1usize;
+                descriptor.picture_id = (((picture_id_0 & 0x7Fu8) as u16) << 8i32) | picture_id_1;
+            } else {
+                descriptor.picture_id = picture_id_0 as u16;
+            }
+        }
+
+        if has_tl0_pic_idx {
+            if offset >= packet.len {
+                return error.Vp8RtpDescriptorTooShort;
+            }
+            descriptor.has_tl0_pic_idx = true;
+            descriptor.tl0_pic_idx = packet[offset] as u8;
+            offset = offset + 1usize;
+        }
+
+        if has_tid || has_key_idx {
+            if offset >= packet.len {
+                return error.Vp8RtpDescriptorTooShort;
+            }
+            const tid_keyidx: u8 = packet[offset] as u8;
+            offset = offset + 1usize;
+
+            if has_tid {
+                descriptor.has_tid = true;
+                descriptor.tid = (tid_keyidx >> 6i32) & 0x03u8;
+                descriptor.layer_sync = (tid_keyidx & 0x20u8) != 0u8;
+            }
+
+            if has_key_idx {
+                descriptor.has_key_idx = true;
+                descriptor.key_idx = tid_keyidx & 0x1Fu8;
+            }
+        }
+    }
+
+    descriptor.payload_offset = offset;
+    descriptor.payload = packet[offset:packet.len - offset];
     return descriptor;
 }
 
@@ -63,16 +138,49 @@ export fn vp8_rtp_descriptor_write(
     if descriptor.partition_index > 0x0Fu8 {
         return error.Vp8RtpInvalidPartitionIndex;
     }
-    if descriptor.extension {
-        return error.Vp8RtpExtensionNotSupported;
+    if descriptor.has_picture_id && descriptor.picture_id > 0x7FFFu16 {
+        return error.Vp8RtpInvalidPictureId;
+    }
+    if descriptor.has_tid && descriptor.tid > 0x03u8 {
+        return error.Vp8RtpInvalidTemporalLayerId;
+    }
+    if descriptor.has_key_idx && descriptor.key_idx > 0x1Fu8 {
+        return error.Vp8RtpInvalidKeyIndex;
     }
 
-    const total_len: usize = 1usize + payload.len;
+    const has_extension_fields: bool =
+        descriptor.has_picture_id || descriptor.has_tl0_pic_idx || descriptor.has_tid || descriptor.has_key_idx;
+    const write_extension: bool = descriptor.extension || has_extension_fields;
+
+    var picture_id_len: usize = 0usize;
+    if descriptor.has_picture_id {
+        picture_id_len = 1usize;
+        if descriptor.picture_id > 0x7Fu16 {
+            picture_id_len = 2usize;
+        }
+    }
+
+    var extension_len: usize = 0usize;
+    if write_extension {
+        extension_len = 1usize;
+        extension_len = extension_len + picture_id_len;
+        if descriptor.has_tl0_pic_idx {
+            extension_len = extension_len + 1usize;
+        }
+        if descriptor.has_tid || descriptor.has_key_idx {
+            extension_len = extension_len + 1usize;
+        }
+    }
+
+    const total_len: usize = 1usize + extension_len + payload.len;
     if out_packet.len < total_len {
         return error.Vp8RtpBufferTooSmall;
     }
 
     var first: u8 = descriptor.partition_index & 0x0Fu8;
+    if write_extension {
+        first = first | 0x80u8;
+    }
     if descriptor.non_reference {
         first = first | 0x20u8;
     }
@@ -81,6 +189,57 @@ export fn vp8_rtp_descriptor_write(
     }
     out_packet[0] = first as byte;
 
-    try vp8_rtp_copy_bytes(out_packet[1:payload.len], payload, payload.len);
+    var offset: usize = 1usize;
+    if write_extension {
+        var extension_flags: u8 = 0u8;
+        if descriptor.has_picture_id {
+            extension_flags = extension_flags | 0x80u8;
+        }
+        if descriptor.has_tl0_pic_idx {
+            extension_flags = extension_flags | 0x40u8;
+        }
+        if descriptor.has_tid {
+            extension_flags = extension_flags | 0x20u8;
+        }
+        if descriptor.has_key_idx {
+            extension_flags = extension_flags | 0x10u8;
+        }
+        out_packet[offset] = extension_flags as byte;
+        offset = offset + 1usize;
+
+        if descriptor.has_picture_id {
+            if picture_id_len == 2usize {
+                out_packet[offset] = (0x80u8 | ((descriptor.picture_id >> 8i32) as u8)) as byte;
+                offset = offset + 1usize;
+                out_packet[offset] = (descriptor.picture_id & 0x00FFu16) as byte;
+                offset = offset + 1usize;
+            } else {
+                out_packet[offset] = (descriptor.picture_id & 0x007Fu16) as byte;
+                offset = offset + 1usize;
+            }
+        }
+
+        if descriptor.has_tl0_pic_idx {
+            out_packet[offset] = descriptor.tl0_pic_idx as byte;
+            offset = offset + 1usize;
+        }
+
+        if descriptor.has_tid || descriptor.has_key_idx {
+            var tid_keyidx: u8 = 0u8;
+            if descriptor.has_tid {
+                tid_keyidx = tid_keyidx | ((descriptor.tid & 0x03u8) << 6i32);
+                if descriptor.layer_sync {
+                    tid_keyidx = tid_keyidx | 0x20u8;
+                }
+            }
+            if descriptor.has_key_idx {
+                tid_keyidx = tid_keyidx | (descriptor.key_idx & 0x1Fu8);
+            }
+            out_packet[offset] = tid_keyidx as byte;
+            offset = offset + 1usize;
+        }
+    }
+
+    try vp8_rtp_copy_bytes(out_packet[offset:payload.len], payload, payload.len);
     return total_len;
 }
