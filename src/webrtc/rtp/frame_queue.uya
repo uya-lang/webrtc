@@ -1,0 +1,204 @@
+// webrtc.rtp.frame_queue - EncodedFrame output queue and small jitter buffer helpers
+// Module: src/webrtc/rtp/frame_queue.uya -> use webrtc.rtp.frame_queue;
+
+use webrtc.media.model;
+
+export const RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES: usize = 8usize;
+export const RTP_FRAME_OUTPUT_QUEUE_DROP_OLDEST: u8 = 0u8;
+export const RTP_FRAME_OUTPUT_QUEUE_DROP_NEWEST: u8 = 1u8;
+
+
+/// Frame output queue configuration shared by video and audio buffering.
+export struct RtpFrameOutputQueueConfig {
+    max_frames: usize = 4usize,
+    max_payload_bytes: usize = 65536usize,
+    release_delay_us: u64 = 0u64,
+    drop_policy: u8 = RTP_FRAME_OUTPUT_QUEUE_DROP_OLDEST,
+}
+
+/// One buffered encoded frame and its release timestamp.
+export struct RtpFrameOutputQueueEntry {
+    present: bool = false,
+    ready_at_us: u64 = 0u64,
+    codec_id: u16 = 0u16,
+    media_kind: u8 = 0u8,
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    payload: &[byte] = [],
+    is_keyframe: bool = false,
+    sequence_id: u64 = 0u64,
+    spatial_id: i32 = ENCODED_FRAME_NO_SPATIAL_ID,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+    marker: bool = false,
+}
+
+/// Small FIFO of encoded frames with a release delay and bounded cap.
+export struct RtpFrameOutputQueue {
+    config: RtpFrameOutputQueueConfig = RtpFrameOutputQueueConfig{},
+    entries: [RtpFrameOutputQueueEntry: RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES] = [],
+    frame_count: usize = 0usize,
+    frame_high_watermark: usize = 0usize,
+    drop_count: u64 = 0u64,
+}
+
+fn rtp_frame_output_queue_make_default() RtpFrameOutputQueue {
+    return RtpFrameOutputQueue{
+        config: RtpFrameOutputQueueConfig{
+            max_frames: 4usize,
+            max_payload_bytes: 65536usize,
+            release_delay_us: 0u64,
+            drop_policy: RTP_FRAME_OUTPUT_QUEUE_DROP_OLDEST,
+        },
+    };
+}
+
+fn rtp_frame_output_queue_validate_config(queue: &RtpFrameOutputQueue) bool {
+    if queue == null {
+        return false;
+    }
+    if queue.config.max_frames == 0usize || queue.config.max_frames > RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        return false;
+    }
+    if queue.config.max_payload_bytes == 0usize {
+        return false;
+    }
+    if queue.config.drop_policy != RTP_FRAME_OUTPUT_QUEUE_DROP_OLDEST
+        && queue.config.drop_policy != RTP_FRAME_OUTPUT_QUEUE_DROP_NEWEST {
+        return false;
+    }
+    return true;
+}
+
+fn rtp_frame_output_queue_drop_oldest(queue: &RtpFrameOutputQueue) void {
+    if queue.frame_count == 0usize {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index + 1usize < queue.frame_count {
+        queue.entries[index] = queue.entries[index + 1usize];
+        index = index + 1usize;
+    }
+
+    queue.entries[queue.frame_count - 1usize] = RtpFrameOutputQueueEntry{};
+    queue.frame_count = queue.frame_count - 1usize;
+}
+
+fn rtp_frame_output_queue_entry_to_frame(entry: &RtpFrameOutputQueueEntry) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = entry.codec_id;
+    frame.media_kind = entry.media_kind;
+    frame.timestamp = entry.timestamp;
+    frame.duration_us = entry.duration_us;
+    frame.payload = entry.payload;
+    frame.is_keyframe = entry.is_keyframe;
+    frame.sequence_id = entry.sequence_id;
+    frame.spatial_id = entry.spatial_id;
+    frame.temporal_id = entry.temporal_id;
+    frame.marker = entry.marker;
+    return frame;
+}
+
+/// Create a default encoded-frame queue suitable for video output.
+export fn rtp_video_frame_output_queue_make() RtpFrameOutputQueue {
+    var queue: RtpFrameOutputQueue = rtp_frame_output_queue_make_default();
+    queue.config.max_frames = 8usize;
+    queue.config.max_payload_bytes = 4194304usize;
+    queue.config.release_delay_us = 0u64;
+    return queue;
+}
+
+/// Create a default encoded-frame queue suitable for audio jitter buffering.
+export fn rtp_audio_jitter_buffer_make() RtpFrameOutputQueue {
+    var queue: RtpFrameOutputQueue = rtp_frame_output_queue_make_default();
+    queue.config.max_frames = 4usize;
+    queue.config.max_payload_bytes = 65536usize;
+    queue.config.release_delay_us = 4000u64;
+    return queue;
+}
+
+/// Reset the queue contents and counters.
+export fn rtp_frame_output_queue_reset(queue: &RtpFrameOutputQueue) void {
+    if queue == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        queue.entries[index] = RtpFrameOutputQueueEntry{};
+        index = index + 1usize;
+    }
+
+    queue.frame_count = 0usize;
+    queue.frame_high_watermark = 0usize;
+    queue.drop_count = 0u64;
+}
+
+/// Return whether the front frame has reached its release time.
+export fn rtp_frame_output_queue_has_ready_frame(queue: &RtpFrameOutputQueue, now_us: u64) bool {
+    if queue == null || queue.frame_count == 0usize {
+        return false;
+    }
+    return now_us >= queue.entries[0usize].ready_at_us;
+}
+
+/// Push a complete encoded frame into the queue.
+export fn rtp_frame_output_queue_push(queue: &RtpFrameOutputQueue, frame: &EncodedFrame, now_us: u64) bool {
+    if !rtp_frame_output_queue_validate_config(queue) {
+        return false;
+    }
+    if frame == null {
+        return false;
+    }
+    if frame.payload.len > queue.config.max_payload_bytes {
+        return false;
+    }
+
+    if queue.frame_count >= queue.config.max_frames || queue.frame_count >= RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        queue.drop_count = queue.drop_count + 1u64;
+        if queue.config.drop_policy == RTP_FRAME_OUTPUT_QUEUE_DROP_NEWEST {
+            return false;
+        }
+        rtp_frame_output_queue_drop_oldest(queue);
+    }
+
+    const slot: usize = queue.frame_count;
+    if slot >= RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        return false;
+    }
+
+    queue.entries[slot].present = true;
+    queue.entries[slot].ready_at_us = now_us + queue.config.release_delay_us;
+    queue.entries[slot].codec_id = frame.codec_id;
+    queue.entries[slot].media_kind = frame.media_kind;
+    queue.entries[slot].timestamp = frame.timestamp;
+    queue.entries[slot].duration_us = frame.duration_us;
+    queue.entries[slot].payload = frame.payload;
+    queue.entries[slot].is_keyframe = frame.is_keyframe;
+    queue.entries[slot].sequence_id = frame.sequence_id;
+    queue.entries[slot].spatial_id = frame.spatial_id;
+    queue.entries[slot].temporal_id = frame.temporal_id;
+    queue.entries[slot].marker = frame.marker;
+    queue.frame_count = queue.frame_count + 1usize;
+    if queue.frame_count > queue.frame_high_watermark {
+        queue.frame_high_watermark = queue.frame_count;
+    }
+    return true;
+}
+
+/// Pop the next ready encoded frame from the queue.
+export fn rtp_frame_output_queue_pop(queue: &RtpFrameOutputQueue, now_us: u64) EncodedFrame {
+    if !rtp_frame_output_queue_validate_config(queue) {
+        return encoded_frame_make();
+    }
+    if queue.frame_count == 0usize {
+        return encoded_frame_make();
+    }
+    if now_us < queue.entries[0usize].ready_at_us {
+        return encoded_frame_make();
+    }
+
+    const frame: EncodedFrame = rtp_frame_output_queue_entry_to_frame(&queue.entries[0usize]);
+    rtp_frame_output_queue_drop_oldest(queue);
+    return frame;
+}

@@ -1,0 +1,249 @@
+use libc.printf;
+use webrtc.media.model;
+use webrtc.rtp.frame_queue;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn make_test_frame(
+    codec_id: u16,
+    media_kind: u8,
+    timestamp: u64,
+    duration_us: u32,
+    sequence_id: u64,
+    is_keyframe: bool,
+    marker: bool,
+    payload: &[byte],
+) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = codec_id;
+    frame.media_kind = media_kind;
+    frame.timestamp = timestamp;
+    frame.duration_us = duration_us;
+    frame.sequence_id = sequence_id;
+    frame.is_keyframe = is_keyframe;
+    frame.marker = marker;
+    frame.payload = payload;
+    return frame;
+}
+
+fn check_video_frame_output_queue_roundtrip() i32 {
+    var queue: RtpFrameOutputQueue = rtp_video_frame_output_queue_make();
+    if queue.config.max_frames != 8usize || queue.config.release_delay_us != 0u64 {
+        return 10i32;
+    }
+    if queue.config.max_payload_bytes != 4194304usize {
+        return 11i32;
+    }
+
+    var payload_a: [byte: 3] = [0x11 as byte, 0x22 as byte, 0x33 as byte];
+    var payload_b: [byte: 2] = [0x44 as byte, 0x55 as byte];
+    const frame_a: EncodedFrame = make_test_frame(
+        CODEC_ID_VP8,
+        MEDIA_KIND_VIDEO,
+        9000u64,
+        33000u32,
+        7u64,
+        true,
+        true,
+        payload_a[0:3],
+    );
+    const frame_b: EncodedFrame = make_test_frame(
+        CODEC_ID_VP8,
+        MEDIA_KIND_VIDEO,
+        9300u64,
+        33000u32,
+        8u64,
+        false,
+        true,
+        payload_b[0:2],
+    );
+
+    const push_a: bool = rtp_frame_output_queue_push(&queue, &frame_a, 1000u64);
+    if !push_a {
+        return 12i32;
+    }
+    const push_b: bool = rtp_frame_output_queue_push(&queue, &frame_b, 2000u64);
+    if !push_b {
+        return 13i32;
+    }
+    if !rtp_frame_output_queue_has_ready_frame(&queue, 2000u64) {
+        return 14i32;
+    }
+
+    const pop_a: EncodedFrame = rtp_frame_output_queue_pop(&queue, 2000u64);
+    if pop_a.codec_id != CODEC_ID_VP8 || pop_a.media_kind != MEDIA_KIND_VIDEO {
+        return 15i32;
+    }
+    if pop_a.timestamp != 9000u64 || pop_a.sequence_id != 7u64 {
+        return 16i32;
+    }
+    if !pop_a.is_keyframe || !pop_a.marker {
+        return 17i32;
+    }
+    if !bytes_equal(pop_a.payload, payload_a[0:3]) {
+        return 18i32;
+    }
+
+    const pop_b: EncodedFrame = rtp_frame_output_queue_pop(&queue, 2000u64);
+    if pop_b.codec_id != CODEC_ID_VP8 || pop_b.sequence_id != 8u64 || pop_b.timestamp != 9300u64 {
+        return 19i32;
+    }
+    if !bytes_equal(pop_b.payload, payload_b[0:2]) {
+        return 20i32;
+    }
+
+    if queue.frame_count != 0usize || queue.frame_high_watermark != 2usize {
+        return 23i32;
+    }
+
+    return 0i32;
+}
+
+fn check_video_frame_output_queue_drop_policies() i32 {
+    var oldest: RtpFrameOutputQueue = rtp_video_frame_output_queue_make();
+    oldest.config.max_frames = 1usize;
+    oldest.config.drop_policy = RTP_FRAME_OUTPUT_QUEUE_DROP_OLDEST;
+
+    var payload_a: [byte: 1] = [0x10 as byte];
+    var payload_b: [byte: 1] = [0x20 as byte];
+    const frame_a: EncodedFrame = make_test_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1000u64, 30000u32, 1u64, false, true, payload_a[0:1]);
+    const frame_b: EncodedFrame = make_test_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1100u64, 30000u32, 2u64, false, true, payload_b[0:1]);
+
+    const push_old_a: bool = rtp_frame_output_queue_push(&oldest, &frame_a, 0u64);
+    if !push_old_a {
+        return 30i32;
+    }
+    const push_old_b: bool = rtp_frame_output_queue_push(&oldest, &frame_b, 1u64);
+    if !push_old_b {
+        return 31i32;
+    }
+    if oldest.drop_count != 1u64 || oldest.frame_count != 1usize {
+        return 32i32;
+    }
+    const oldest_pop: EncodedFrame = rtp_frame_output_queue_pop(&oldest, 1u64);
+    if oldest_pop.sequence_id != 2u64 {
+        return 32i32;
+    }
+
+    var newest: RtpFrameOutputQueue = rtp_video_frame_output_queue_make();
+    newest.config.max_frames = 1usize;
+    newest.config.drop_policy = RTP_FRAME_OUTPUT_QUEUE_DROP_NEWEST;
+
+    const push_new_a: bool = rtp_frame_output_queue_push(&newest, &frame_a, 0u64);
+    if !push_new_a {
+        return 33i32;
+    }
+    const push_new_b: bool = rtp_frame_output_queue_push(&newest, &frame_b, 1u64);
+    if push_new_b {
+        return 34i32;
+    }
+    if newest.drop_count != 1u64 || newest.frame_count != 1usize {
+        return 36i32;
+    }
+    const newest_pop: EncodedFrame = rtp_frame_output_queue_pop(&newest, 1u64);
+    if newest_pop.sequence_id != 1u64 {
+        return 35i32;
+    }
+
+    var oversize: RtpFrameOutputQueue = rtp_video_frame_output_queue_make();
+    oversize.config.max_payload_bytes = 2usize;
+    const oversize_frame: EncodedFrame = make_test_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1200u64, 30000u32, 3u64, false, true, payload_a[0:1]);
+    const oversize_ok: bool = rtp_frame_output_queue_push(&oversize, &oversize_frame, 0u64);
+    if !oversize_ok {
+        return 36i32;
+    }
+    var too_big_payload: [byte: 3] = [0x01 as byte, 0x02 as byte, 0x03 as byte];
+    const too_big_frame: EncodedFrame = make_test_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1300u64, 30000u32, 4u64, false, true, too_big_payload[0:3]);
+    const oversize_result: bool = rtp_frame_output_queue_push(&oversize, &too_big_frame, 1u64);
+    if oversize_result {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
+fn check_audio_small_jitter_buffer() i32 {
+    var queue: RtpFrameOutputQueue = rtp_audio_jitter_buffer_make();
+    if queue.config.max_frames >= 8usize {
+        return 40i32;
+    }
+    if queue.config.release_delay_us != 4000u64 {
+        return 41i32;
+    }
+
+    var payload_a: [byte: 2] = [0xAA as byte, 0xBB as byte];
+    var payload_b: [byte: 2] = [0xCC as byte, 0xDD as byte];
+    const frame_a: EncodedFrame = make_test_frame(CODEC_ID_OPUS, MEDIA_KIND_AUDIO, 48000u64, 20000u32, 10u64, false, true, payload_a[0:2]);
+    const frame_b: EncodedFrame = make_test_frame(CODEC_ID_OPUS, MEDIA_KIND_AUDIO, 50000u64, 20000u32, 11u64, false, true, payload_b[0:2]);
+
+    const push_a: bool = rtp_frame_output_queue_push(&queue, &frame_a, 1000u64);
+    if !push_a {
+        return 40i32;
+    }
+    if rtp_frame_output_queue_has_ready_frame(&queue, 4999u64) {
+        return 43i32;
+    }
+    if !rtp_frame_output_queue_has_ready_frame(&queue, 5000u64) {
+        return 44i32;
+    }
+
+    const pop_a: EncodedFrame = rtp_frame_output_queue_pop(&queue, 5000u64);
+    if pop_a.codec_id != CODEC_ID_OPUS {
+        return 41i32;
+    }
+    if !bytes_equal(pop_a.payload, payload_a[0:2]) {
+        return 42i32;
+    }
+
+    const push_b: bool = rtp_frame_output_queue_push(&queue, &frame_b, 6000u64);
+    if !push_b {
+        return 43i32;
+    }
+    const pop_b: EncodedFrame = rtp_frame_output_queue_pop(&queue, 10000u64);
+    if pop_b.sequence_id != 11u64 {
+        return 44i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_video_frame_output_queue_roundtrip();
+    if result != 0i32 {
+        printf("video frame output queue tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_video_frame_output_queue_drop_policies();
+    if result != 0i32 {
+        printf("video frame output queue drop tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("video frame output queue tests passed\n");
+
+    result = check_audio_small_jitter_buffer();
+    if result != 0i32 {
+        printf("audio jitter buffer tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("audio jitter buffer tests passed\n");
+
+    printf("RTP frame output queue tests passed\n");
+    return 0i32;
+}

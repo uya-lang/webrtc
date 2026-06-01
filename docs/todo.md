@@ -331,8 +331,8 @@
 - [x] 实现 RTX payload 支持。
 - [x] 实现 incomplete frame timeout。
 - [x] 实现 PLI 触发和限频。
-- [ ] 实现 video frame 输出队列。
-- [ ] 实现 audio 小抖动缓冲。
+- [x] 实现 video frame 输出队列。
+- [x] 实现 audio 小抖动缓冲。
 
 验收标准：
 
