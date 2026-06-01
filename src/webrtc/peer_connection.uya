@@ -142,6 +142,19 @@ export fn peer_connection_local_description_len(pc: &PeerConnection) usize {
     return pc.local_description.text_len;
 }
 
+/// Return the current remote description bytes, if any.
+export fn peer_connection_remote_description_bytes(pc: &PeerConnection) &[byte] {
+    return pc.remote_description.text[0:pc.remote_description.text_len];
+}
+
+/// Return the current remote description length.
+export fn peer_connection_remote_description_len(pc: &PeerConnection) usize {
+    if pc == null || !pc.has_remote_description {
+        return 0usize;
+    }
+    return pc.remote_description.text_len;
+}
+
 /// Return a borrowed runtime reference.
 export fn peer_connection_runtime(pc: &PeerConnection) &RtcRuntime {
     if pc == null {
@@ -166,6 +179,17 @@ export fn peer_connection_set_local_description(pc: &PeerConnection, description
 
     try peer_connection_copy_description(&pc.local_description, description);
     pc.has_local_description = true;
+    return;
+}
+
+/// Attach a remote SDP description to the PeerConnection.
+export fn peer_connection_set_remote_description(pc: &PeerConnection, description: &[byte]) !void {
+    if pc == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+
+    try peer_connection_copy_description(&pc.remote_description, description);
+    pc.has_remote_description = true;
     return;
 }
 
