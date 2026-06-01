@@ -248,7 +248,7 @@
 - [x] 实现 key derivation。
 - [x] 实现 RTP sequence rollover counter。
 - [x] 实现 replay window。
-- [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_80`。
+- [x] 实现 `SRTP_AES128_CM_HMAC_SHA1_80`。
 - [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_32`。
 - [ ] 实现 SRTCP protect/unprotect。
 - [ ] 集成 DTLS exporter keys。

@@ -1,215 +1,224 @@
-// webrtc.srtp.protect - SRTP protect and unprotect functions
-//Module: src/webrtc/srtp/protect.uya
+// webrtc.srtp.protect - SRTP protect/unprotect implementation
+// 模块路径：src/webrtc/srtp/protect.uya → use webrtc.srtp.protect;
 
 use webrtc.binary;
 use webrtc.crypto.aes;
 use webrtc.crypto.hmac;
+use webrtc.srtp.core;
 use webrtc.srtp.model;
-use webrtc.srtp.srtp;
+use webrtc.errors;
 
-// RTP header size (minimum)
 const RTP_HEADER_MIN_BYTES: usize = 12usize;
+const SRTP_MAX_PACKET_BYTES: usize = 2048usize;
 
-// Protect RTP packet -> SRTP packet
-// Input:RTP packet (header+ payload)
-// Output: SRTP packet (header+ encrypted payload +auth tag)
-export fn srtp_protect(
-    ctx: &SrtpContext,
-    rtp_packet: &[byte],
-    srtp_packet: &mut [byte],
-) !usize{
-    ifrtp_packet.len< RTP_HEADER_MIN_BYTES {
-        return error!void;
+fn srtp_context_profile_supported(ctx: &SrtpContext) bool {
+    return ctx.profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || ctx.profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
+}
+
+fn srtp_index_from_sender_state(ctx: &SrtpContext, seq: u16) u64 {
+    var roc: u32 = ctx.send_rollover_counter;
+    if ctx.send_sequence > 0x8000u16 && seq < 0x8000u16 && seq < ctx.send_sequence {
+        roc = roc + 1u32;
+        ctx.send_rollover_counter = roc;
     }
-    if ctx == null {
-        return error!void;
+    ctx.send_sequence = seq;
+    return ((roc as u64) << 16i32) | (seq as u64);
+}
+
+fn srtp_generate_iv(salt: &[byte], ssrc: u32, index: u64, iv: &[byte]) !void {
+    if salt.len != SRTP_SALT_BYTES || iv.len != 16usize {
+        return error.InvalidPacket;
     }
-    
-    // Parse RTP header to get sequence number and SSRC
-    var seq: u16 = ((rtp_packet[2] as u16) << 8) | (rtp_packet[3] as u16);
-    var ssrc: u32 = ((rtp_packet[8] as u32) << 24) |
-                    ((rtp_packet[9] as u32) << 16) |
-                    ((rtp_packet[10] as u32) << 8) |
-                    (rtp_packet[11] as u32);
-    
-    // Calculate packet index
-    var index: u64 = ((ctx.roc as u64) << 16) | (seq as u64);
-    
-    // Generate IV for AES-CTR
-    var iv: [byte: 16] = [];
-    try srtp_generate_iv(ctx, ssrc, index, iv);
-    
-    // Copy RTP header
+
     var i: usize = 0usize;
-    while i< RTP_HEADER_MIN_BYTES {
+    while i < 16usize {
+        iv[i] = 0 as byte;
+        i = i + 1usize;
+    }
+
+    // RFC 3711: IV = (salt || 0x0000) XOR (0x0000 || SSRC || packet_index || 0x0000)
+    i = 0usize;
+    while i < SRTP_SALT_BYTES {
+        iv[i] = salt[i];
+        i = i + 1usize;
+    }
+
+    iv[4usize] = iv[4usize] ^ (((ssrc >> 24i32) & 0xffu32) as byte);
+    iv[5usize] = iv[5usize] ^ (((ssrc >> 16i32) & 0xffu32) as byte);
+    iv[6usize] = iv[6usize] ^ (((ssrc >> 8i32) & 0xffu32) as byte);
+    iv[7usize] = iv[7usize] ^ ((ssrc & 0xffu32) as byte);
+
+    iv[8usize] = iv[8usize] ^ (((index >> 40i32) & 0xffu64) as byte);
+    iv[9usize] = iv[9usize] ^ (((index >> 32i32) & 0xffu64) as byte);
+    iv[10usize] = iv[10usize] ^ (((index >> 24i32) & 0xffu64) as byte);
+    iv[11usize] = iv[11usize] ^ (((index >> 16i32) & 0xffu64) as byte);
+    iv[12usize] = iv[12usize] ^ (((index >> 8i32) & 0xffu64) as byte);
+    iv[13usize] = iv[13usize] ^ ((index & 0xffu64) as byte);
+}
+
+fn srtp_authenticate_packet(auth_key: &[byte], packet: &[byte], roc: u32, out_tag: &[byte]) !void {
+    if out_tag.len < 20usize {
+        return error.InvalidPacket;
+    }
+    if packet.len + 4usize > SRTP_MAX_PACKET_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var auth_input: [byte: SRTP_MAX_PACKET_BYTES] = [];
+    var i: usize = 0usize;
+    while i < packet.len {
+        auth_input[i] = packet[i];
+        i = i + 1usize;
+    }
+
+    const offset: usize = packet.len;
+    auth_input[offset] = ((roc >> 24i32) & 0xffu32) as byte;
+    auth_input[offset + 1usize] = ((roc >> 16i32) & 0xffu32) as byte;
+    auth_input[offset + 2usize] = ((roc >> 8i32) & 0xffu32) as byte;
+    auth_input[offset + 3usize] = (roc & 0xffu32) as byte;
+
+    try crypto_hmac_sha1_digest(auth_key, auth_input[0:packet.len + 4usize], out_tag);
+}
+
+export fn srtp_auth_tag_length(profile: u16) usize {
+    if profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return SRTP_AUTH_TAG_BYTES_80;
+    }
+    if profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
+        return SRTP_AUTH_TAG_BYTES_32;
+    }
+    return 0usize;
+}
+
+export fn srtp_protect(ctx: &SrtpContext, rtp_packet: &[byte], srtp_packet: &[byte]) !usize {
+    if ctx == null {
+        return error.InvalidPacket;
+    }
+    if !srtp_context_profile_supported(ctx) {
+        return error.UnsupportedProfile;
+    }
+    if rtp_packet.len < RTP_HEADER_MIN_BYTES {
+        return error.PacketTooShort;
+    }
+
+    const tag_len: usize = srtp_auth_tag_length(ctx.profile);
+    if tag_len == 0usize {
+        return error.UnsupportedProfile;
+    }
+    if rtp_packet.len + tag_len > srtp_packet.len {
+        return error.InvalidPacket;
+    }
+
+    const seq: u16 = try read_be_u16(rtp_packet[2:2]);
+    const ssrc: u32 = try read_be_u32(rtp_packet[8:4]);
+    const index: u64 = srtp_index_from_sender_state(ctx, seq);
+    const roc: u32 = (index >> 16i32) as u32;
+
+    var iv: [byte: 16] = [];
+    try srtp_generate_iv(ctx.cipher_salt[0:SRTP_SALT_BYTES], ssrc, index, iv[0:16]);
+
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+    try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
+
+    var i: usize = 0usize;
+    while i < RTP_HEADER_MIN_BYTES {
         srtp_packet[i] = rtp_packet[i];
         i = i + 1usize;
     }
-    
-    // Encrypt payload
-    var payload_len: usize = rtp_packet.len - RTP_HEADER_MIN_BYTES;
-    try aes.aes128_ctr_encrypt(
-        ctx.cipher_key[0:SRTP_KEY_BYTES],
+
+    const payload_len: usize = rtp_packet.len - RTP_HEADER_MIN_BYTES;
+    try crypto_aes_ctr_xor(
+        &schedule,
         iv[0:16],
-        rtp_packet[RTP_HEADER_MIN_BYTES:rtp_packet.len],
-        srtp_packet[RTP_HEADER_MIN_BYTES:RTP_HEADER_MIN_BYTES + payload_len],
-    );
-    
-    // Calculate authentication tag
-    var auth_tag_len: usize = srtp_auth_tag_length(ctx.profile);
-    var auth_tag: [byte: 20] = [];
-    
-    // Auth covers: SRTP header + encrypted payload + ROC
-    var roc_bytes: [byte: 4] = [];
-    roc_bytes[0] = ((ctx.roc >> 24) &0xFF) asu8;
-    roc_bytes[1] = ((ctx.roc >>16)& 0xFF) as u8;
-    roc_bytes[2] = ((ctx.roc >> 8) & 0xFF) as u8;
-roc_bytes[3] = (ctx.roc &0xFF) asu8;
-    
-    try hmac.hmac_sha1(
-        ctx.auth_key[0:SRTP_AUTH_KEY_BYTES],
-        srtp_packet[0:RTP_HEADER_MIN_BYTES+ payload_len],
-        roc_bytes[0:4],
-        auth_tag[0:20],
+        rtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
+        srtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
     );
 
-    // Append authtag
-    i= 0usize;
-    whilei< auth_tag_len {
-        srtp_packet[RTP_HEADER_MIN_BYTES + payload_len + i] = auth_tag[i];
+    const packet_len: usize = rtp_packet.len;
+    var auth_digest: [byte: 20] = [];
+    try srtp_authenticate_packet(
+        ctx.auth_key[0:SRTP_AUTH_KEY_BYTES],
+        srtp_packet[0:packet_len],
+        roc,
+        auth_digest[0:20],
+    );
+
+    i = 0usize;
+    while i < tag_len {
+        srtp_packet[packet_len + i] = auth_digest[i];
         i = i + 1usize;
     }
-    
-    // Update context
-    srtp_index_update(ctx, index);
-    srtp_replay_update(ctx, index);
-    
-    return RTP_HEADER_MIN_BYTES + payload_len + auth_tag_len;
+
+    return packet_len + tag_len;
 }
 
-// Unprotect SRTP packet -> RTP packet
-// Input: SRTP packet (header+ encrypted payload +auth tag)
-// Output: RTPpacket (header +decrypted payload)
-export fn srtp_unprotect(
-    ctx: &SrtpContext,
-    srtp_packet: &[byte],
-    rtp_packet: &mut [byte],
-) !usize{
-    ifsrtp_packet.len< RTP_HEADER_MIN_BYTES {
-        return error!void;
-    }
+export fn srtp_unprotect(ctx: &SrtpContext, srtp_packet: &[byte], rtp_packet: &[byte]) !usize {
     if ctx == null {
-        return error!void;
+        return error.InvalidPacket;
     }
-    
-    var auth_tag_len: usize = srtp_auth_tag_length(ctx.profile);
-    
-    if srtp_packet.len< RTP_HEADER_MIN_BYTES + auth_tag_len {
-        return error!void;
+    if !srtp_context_profile_supported(ctx) {
+        return error.UnsupportedProfile;
     }
-    
-    // Parse SRTP header to get sequence number and SSRC
-    var seq: u16 = ((srtp_packet[2] as u16) << 8) | (srtp_packet[3] as u16);
-    var ssrc: u32 = ((srtp_packet[8] as u32) << 24) |
-                    ((srtp_packet[9] as u32) << 16) |
-                    ((srtp_packet[10] as u32) << 8) |
-                    (srtp_packet[11] as u32);
-    
-    // Guess packet index
-    var expected_seq: u16 = (ctx.s_largest_index & 0xFFFF) as u16;
-    var index: u64 = srtp_index_guess(ctx.roc, seq, expected_seq);
-    
-    // Check replay protection
+
+    const tag_len: usize = srtp_auth_tag_length(ctx.profile);
+    if tag_len == 0usize {
+        return error.UnsupportedProfile;
+    }
+    if srtp_packet.len < RTP_HEADER_MIN_BYTES + tag_len {
+        return error.PacketTooShort;
+    }
+
+    const packet_len: usize = srtp_packet.len - tag_len;
+    if packet_len > rtp_packet.len {
+        return error.InvalidPacket;
+    }
+
+    const seq: u16 = try read_be_u16(srtp_packet[2:2]);
+    const ssrc: u32 = try read_be_u32(srtp_packet[8:4]);
+
+    var index: u64 = (ctx.roc as u64) << 16i32 | (seq as u64);
+    if ctx.has_recv_index {
+        index = srtp_index_guess(ctx.roc, ctx.s_largest_index, seq);
+    }
     if !srtp_replay_check(ctx, index) {
-        return error!void;
+        return error.ReplayRejected;
     }
-    
-    // Verify authentication tag
-    var payload_len: usize = srtp_packet.len - RTP_HEADER_MIN_BYTES - auth_tag_len;
-    
-    var roc_bytes: [byte: 4] = [];
-    roc_bytes[0] = (((index >>16)>> 24) & 0xFF) as u8;
-roc_bytes[1] = (((index>> 16) >> 16) &0xFF) asu8;
-    roc_bytes[2] = (((index >> 16) >>8) &0xFF) asu8;
-    roc_bytes[3] = ((index >> 16) &0xFF) asu8;
-    
-    var expected_tag: [byte: 20] = [];
-    try hmac.hmac_sha1(
+
+    const roc: u32 = (index >> 16i32) as u32;
+
+    var auth_digest: [byte: 20] = [];
+    try srtp_authenticate_packet(
         ctx.auth_key[0:SRTP_AUTH_KEY_BYTES],
-srtp_packet[0:RTP_HEADER_MIN_BYTES +payload_len],
-        roc_bytes[0:4],
-        expected_tag[0:20],
-);
-    
-// Constant-time comparison
-    var i: usize =0usize;
-    var match:bool = true;
-    while i< auth_tag_len {
-        if expected_tag[i] != srtp_packet[RTP_HEADER_MIN_BYTES + payload_len + i] {
-            match = false;
-        }
-        i = i + 1usize;
+        srtp_packet[0:packet_len],
+        roc,
+        auth_digest[0:20],
+    );
+
+    if !constant_time_bytes_equal(auth_digest[0:tag_len], srtp_packet[packet_len:tag_len]) {
+        return error.IntegrityCheckFailed;
     }
-    
-    if !match {
-        return error!void;
-    }
-    
-    // Generate IV for AES-CTR
+
     var iv: [byte: 16] = [];
-    try srtp_generate_iv(ctx, ssrc, index, iv);
-    
-    // Copy RTP header
-    i = 0usize;
-    while i< RTP_HEADER_MIN_BYTES {
+    try srtp_generate_iv(ctx.cipher_salt[0:SRTP_SALT_BYTES], ssrc, index, iv[0:16]);
+
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+    try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
+
+    var i: usize = 0usize;
+    while i < RTP_HEADER_MIN_BYTES {
         rtp_packet[i] = srtp_packet[i];
         i = i + 1usize;
     }
-    
-    // Decrypt payload
-    try aes.aes128_ctr_decrypt(
-        ctx.cipher_key[0:SRTP_KEY_BYTES],
+
+    const payload_len: usize = packet_len - RTP_HEADER_MIN_BYTES;
+    try crypto_aes_ctr_xor(
+        &schedule,
         iv[0:16],
-        srtp_packet[RTP_HEADER_MIN_BYTES:RTP_HEADER_MIN_BYTES + payload_len],
-        rtp_packet[RTP_HEADER_MIN_BYTES:RTP_HEADER_MIN_BYTES + payload_len],
+        srtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
+        rtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
     );
-    
-    // Update context
-    srtp_index_update(ctx, index);
-    srtp_replay_update(ctx, index);
-    
-    return RTP_HEADER_MIN_BYTES + payload_len;
-}
 
-// Generate IV for AES-CTR (RFC 3711 Section 4.1.1)
-fn srtp_generate_iv(
-    ctx: &SrtpContext,
-    ssrc: u32,
-    index: u64,
-    iv: &mut [byte],
-) !void {
-    if iv.len != 16 {
-        return error!void;
-    }
-    
-    // IV = (ssrc XOR salt[4..8]) || (index XOR salt[8..14])
-    var i: usize = 0usize;
-    while i< 16 {
-        iv[i] = 0u8;
-        i = i + 1usize;
-    }
-    
-    // IV[4..8] = ssrc XOR salt[0..4]
-    iv[4] = (((ssrc >>24) &0xFF)as u8)^ ctx.cipher_salt[0];
-    iv[5] = (((ssrc >>16) &0xFF)as u8)^ ctx.cipher_salt[1];
-    iv[6] = (((ssrc >>8) &0xFF) asu8) ^ctx.cipher_salt[2];
-    iv[7] = ((ssrc & 0xFF) as u8) ^ ctx.cipher_salt[3];
-
-    // IV[8..14] = index XORsalt[4..10]
-    iv[8] = (((index>> 40) & 0xFF) as u8) ^ ctx.cipher_salt[4];
-iv[9] = (((index >>32)& 0xFF) as u8) ^ ctx.cipher_salt[5];
-    iv[10] = (((index >>24)& 0xFF) as u8) ^ ctx.cipher_salt[6];
-    iv[11] = (((index >>16)& 0xFF) as u8) ^ ctx.cipher_salt[7];
-    iv[12] = (((index >>8) &0xFF)as u8)^ ctx.cipher_salt[8];
-    iv[13] =((index &0xFF) asu8) ^ctx.cipher_salt[9];
+    try srtp_replay_accept(ctx, index);
+    return packet_len;
 }
