@@ -1,0 +1,146 @@
+// webrtc.rtp.rtp_receiver_route - SSRC/MID routing for RTP receiver
+// Module: src/webrtc/rtp/rtp_receiver_route.uya -> use webrtc.rtp.rtp_receiver_route;
+
+export error RtpReceiverRouteInvalidInput;
+export error RtpReceiverRouteInvalidMid;
+export error RtpReceiverRouteTableFull;
+export error RtpReceiverRouteNotFound;
+
+export const RTP_RECEIVER_ROUTE_MAX_ENTRIES: usize = 32usize;
+export const RTP_RECEIVER_ROUTE_MID_MAX_BYTES: usize = 32usize;
+
+export struct RtpReceiverRouteEntry {
+    receiver_id: u32 = 0u32,
+    has_ssrc: bool = false,
+    ssrc: u32 = 0u32,
+    has_mid: bool = false,
+    mid: [byte: RTP_RECEIVER_ROUTE_MID_MAX_BYTES] = [],
+    mid_len: usize = 0usize,
+}
+
+export struct RtpReceiverRouteTable {
+    entries: [RtpReceiverRouteEntry: RTP_RECEIVER_ROUTE_MAX_ENTRIES] = [],
+    entry_count: usize = 0usize,
+}
+
+fn rtp_receiver_route_mid_valid(mid: &[byte]) bool {
+    if mid.len == 0usize || mid.len > RTP_RECEIVER_ROUTE_MID_MAX_BYTES {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < mid.len {
+        const ch: u8 = mid[i] as u8;
+        if ch < 0x21u8 || ch > 0x7Eu8 {
+            return false;
+        }
+        i = i + 1usize;
+    }
+
+    return true;
+}
+
+fn rtp_receiver_route_mid_copy(dst: &[byte], src: &[byte]) void {
+    var i: usize = 0usize;
+    while i < src.len {
+        dst[i] = src[i];
+        i = i + 1usize;
+    }
+}
+
+fn rtp_receiver_route_mid_equal(entry: &RtpReceiverRouteEntry, mid: &[byte]) bool {
+    if entry.mid_len != mid.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < mid.len {
+        if entry.mid[i] != mid[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+
+    return true;
+}
+
+export fn rtp_receiver_route_table_make() RtpReceiverRouteTable {
+    return RtpReceiverRouteTable{};
+}
+
+export fn rtp_receiver_route_add(
+    table: &RtpReceiverRouteTable,
+    receiver_id: u32,
+    has_ssrc: bool,
+    ssrc: u32,
+    has_mid: bool,
+    mid: &[byte],
+) !void {
+    if table == null {
+        return error.RtpReceiverRouteInvalidInput;
+    }
+    if !has_ssrc && !has_mid {
+        return error.RtpReceiverRouteInvalidInput;
+    }
+    if table.entry_count >= RTP_RECEIVER_ROUTE_MAX_ENTRIES {
+        return error.RtpReceiverRouteTableFull;
+    }
+
+    if has_mid {
+        if !rtp_receiver_route_mid_valid(mid) {
+            return error.RtpReceiverRouteInvalidMid;
+        }
+    }
+
+    const index: usize = table.entry_count;
+    if index >= RTP_RECEIVER_ROUTE_MAX_ENTRIES {
+        return error.RtpReceiverRouteTableFull;
+    }
+    table.entries[index].receiver_id = receiver_id;
+    table.entries[index].has_ssrc = has_ssrc;
+    table.entries[index].ssrc = ssrc;
+    table.entries[index].has_mid = has_mid;
+    table.entries[index].mid_len = 0usize;
+    if has_mid {
+        table.entries[index].mid_len = mid.len;
+        rtp_receiver_route_mid_copy(table.entries[index].mid[0:RTP_RECEIVER_ROUTE_MID_MAX_BYTES], mid);
+    }
+
+    table.entry_count = table.entry_count + 1usize;
+}
+
+export fn rtp_receiver_route_resolve(
+    table: &RtpReceiverRouteTable,
+    ssrc: u32,
+    mid: &[byte],
+) !u32 {
+    if table == null {
+        return error.RtpReceiverRouteInvalidInput;
+    }
+
+    var i: usize = 0usize;
+    while i < table.entry_count {
+        const entry: &RtpReceiverRouteEntry = &table.entries[i];
+        if entry.has_ssrc && entry.ssrc == ssrc {
+            return entry.receiver_id;
+        }
+        i = i + 1usize;
+    }
+
+    if mid.len > 0usize {
+        if !rtp_receiver_route_mid_valid(mid) {
+            return error.RtpReceiverRouteInvalidMid;
+        }
+
+        i = 0usize;
+        while i < table.entry_count {
+            const entry: &RtpReceiverRouteEntry = &table.entries[i];
+            if entry.has_mid && rtp_receiver_route_mid_equal(entry, mid) {
+                return entry.receiver_id;
+            }
+            i = i + 1usize;
+        }
+    }
+
+    return error.RtpReceiverRouteNotFound;
+}

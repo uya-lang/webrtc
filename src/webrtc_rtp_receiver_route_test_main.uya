@@ -1,0 +1,185 @@
+use libc.printf;
+use webrtc.rtp.rtp_receiver_route;
+
+fn check_add_and_resolve() i32 {
+    var table: RtpReceiverRouteTable = rtp_receiver_route_table_make();
+
+    var mid_video: [byte: 5] = ['v' as byte, 'i' as byte, 'd' as byte, '0' as byte, '1' as byte];
+    const add_ssrc_only: !void = rtp_receiver_route_add(
+        &table,
+        11u32,
+        true,
+        0x11111111u32,
+        false,
+        mid_video[0:0],
+    );
+    if add_ssrc_only.error_id != 0 {
+        return 10i32;
+    }
+
+    const add_mid_only: !void = rtp_receiver_route_add(
+        &table,
+        22u32,
+        false,
+        0u32,
+        true,
+        mid_video[0:5],
+    );
+    if add_mid_only.error_id != 0 {
+        return 11i32;
+    }
+
+    const by_ssrc: !u32 = rtp_receiver_route_resolve(&table, 0x11111111u32, mid_video[0:0]);
+    if by_ssrc.error_id != 0 || by_ssrc.value != 11u32 {
+        return 12i32;
+    }
+
+    const by_mid: !u32 = rtp_receiver_route_resolve(&table, 0x22222222u32, mid_video[0:5]);
+    if by_mid.error_id != 0 || by_mid.value != 22u32 {
+        return 13i32;
+    }
+
+    return 0i32;
+}
+
+fn check_ssrc_priority() i32 {
+    var table: RtpReceiverRouteTable = rtp_receiver_route_table_make();
+    var mid_audio: [byte: 5] = ['a' as byte, 'u' as byte, 'd' as byte, '0' as byte, '1' as byte];
+
+    const add_first: !void = rtp_receiver_route_add(
+        &table,
+        31u32,
+        true,
+        0xAAAAAAAAu32,
+        true,
+        mid_audio[0:5],
+    );
+    if add_first.error_id != 0 {
+        return 20i32;
+    }
+
+    const add_second: !void = rtp_receiver_route_add(
+        &table,
+        32u32,
+        false,
+        0u32,
+        true,
+        mid_audio[0:5],
+    );
+    if add_second.error_id != 0 {
+        return 21i32;
+    }
+
+    const resolved: !u32 = rtp_receiver_route_resolve(&table, 0xAAAAAAAAu32, mid_audio[0:5]);
+    if resolved.error_id != 0 || resolved.value != 31u32 {
+        return 22i32;
+    }
+
+    return 0i32;
+}
+
+fn check_error_paths() i32 {
+    var table: RtpReceiverRouteTable = rtp_receiver_route_table_make();
+
+    var bad_mid: [byte: 3] = ['a' as byte, ' ' as byte, 'b' as byte];
+    const bad_add: !void = rtp_receiver_route_add(
+        &table,
+        41u32,
+        false,
+        0u32,
+        true,
+        bad_mid[0:3],
+    );
+    if bad_add.error_id != @error_id(error.RtpReceiverRouteInvalidMid) {
+        return 30i32;
+    }
+
+    var good_mid: [byte: 4] = ['m' as byte, 'i' as byte, 'd' as byte, '1' as byte];
+    const add_valid: !void = rtp_receiver_route_add(
+        &table,
+        42u32,
+        true,
+        0x12345678u32,
+        true,
+        good_mid[0:4],
+    );
+    if add_valid.error_id != 0 {
+        return 31i32;
+    }
+
+    const not_found: !u32 = rtp_receiver_route_resolve(&table, 0x87654321u32, good_mid[0:0]);
+    if not_found.error_id != @error_id(error.RtpReceiverRouteNotFound) {
+        return 32i32;
+    }
+
+    const bad_mid_resolve: !u32 = rtp_receiver_route_resolve(&table, 0x87654321u32, bad_mid[0:3]);
+    if bad_mid_resolve.error_id != @error_id(error.RtpReceiverRouteInvalidMid) {
+        return 33i32;
+    }
+
+    return 0i32;
+}
+
+fn check_table_full() i32 {
+    var table: RtpReceiverRouteTable = rtp_receiver_route_table_make();
+    var empty_mid: [byte: 1] = [];
+
+    var i: usize = 0usize;
+    while i < RTP_RECEIVER_ROUTE_MAX_ENTRIES {
+        const add_result: !void = rtp_receiver_route_add(
+            &table,
+            (i as u32),
+            true,
+            (1000u32 + (i as u32)),
+            false,
+            empty_mid[0:0],
+        );
+        if add_result.error_id != 0 {
+            return 40i32;
+        }
+        i = i + 1usize;
+    }
+
+    const overflow_add: !void = rtp_receiver_route_add(
+        &table,
+        9999u32,
+        true,
+        9999u32,
+        false,
+        empty_mid[0:0],
+    );
+    if overflow_add.error_id != @error_id(error.RtpReceiverRouteTableFull) {
+        return 41i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_add_and_resolve();
+    if result != 0i32 {
+        printf("RTP receiver route tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_ssrc_priority();
+    if result != 0i32 {
+        printf("RTP receiver route tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_error_paths();
+    if result != 0i32 {
+        printf("RTP receiver route tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_table_full();
+    if result != 0i32 {
+        printf("RTP receiver route tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP receiver SSRC/MID route tests passed\n");
+    return 0i32;
+}

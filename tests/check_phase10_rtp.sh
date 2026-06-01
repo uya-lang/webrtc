@@ -12,10 +12,12 @@ test -f src/webrtc/rtp/rtp_packet.uya
 test -f src/webrtc/rtp/rtp_extension.uya
 test -f src/webrtc/rtp/rtp_common_extensions.uya
 test -f src/webrtc/rtp/rtp_sender.uya
+test -f src/webrtc/rtp/rtp_receiver_route.uya
 test -f src/webrtc_rtp_packet_test_main.uya
 test -f src/webrtc_rtp_extension_test_main.uya
 test -f src/webrtc_rtp_common_extensions_test_main.uya
 test -f src/webrtc_rtp_sender_test_main.uya
+test -f src/webrtc_rtp_receiver_route_test_main.uya
 test -f benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 test -x tests/rtp_bench_baseline.py
 
@@ -40,6 +42,8 @@ rg -q "export fn rtp_extension_transport_seq_num_write" src/webrtc/rtp/rtp_commo
 rg -q "export fn rtp_sender_state_init" src/webrtc/rtp/rtp_sender.uya
 rg -q "export fn rtp_sender_stamp_packet" src/webrtc/rtp/rtp_sender.uya
 rg -q "export fn rtp_sender_advance_timestamp_by_duration_ns" src/webrtc/rtp/rtp_sender.uya
+rg -q "export fn rtp_receiver_route_add" src/webrtc/rtp/rtp_receiver_route.uya
+rg -q "export fn rtp_receiver_route_resolve" src/webrtc/rtp/rtp_receiver_route.uya
 rg -q '"bench_rtp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtp_extension_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtcp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
@@ -50,5 +54,6 @@ python3 tests/rtp_bench_baseline.py
 ../uya/bin/uya run src/webrtc_rtp_extension_test_main.uya
 ../uya/bin/uya run src/webrtc_rtp_common_extensions_test_main.uya
 ../uya/bin/uya run src/webrtc_rtp_sender_test_main.uya
+../uya/bin/uya run src/webrtc_rtp_receiver_route_test_main.uya
 
 echo "Phase 10 RTP/RTCP parser fixture checks passed"
