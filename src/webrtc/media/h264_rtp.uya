@@ -1,0 +1,174 @@
+// webrtc.media.h264_rtp - H264 RTP payload helper (STAP-A)
+// Module: src/webrtc/media/h264_rtp.uya -> use webrtc.media.h264_rtp;
+
+export const H264_RTP_NAL_TYPE_STAP_A: u8 = 24u8;
+export const H264_RTP_MAX_STAP_A_NAL_UNITS: usize = 32usize;
+
+export error H264RtpDescriptorTooShort;
+export error H264RtpUnsupportedAggregationType;
+export error H264RtpNalLengthExceedsPacket;
+export error H264RtpNalUnitEmpty;
+export error H264RtpNalTypeNotSingleNalUnit;
+export error H264RtpBufferTooSmall;
+export error H264RtpNalUnitTooLarge;
+export error H264RtpTooManyNalUnits;
+export error H264RtpStapAEmpty;
+export error H264RtpInvalidNri;
+
+export struct H264RtpStapANalSpan {
+    offset: usize = 0usize,
+    length: usize = 0usize,
+}
+
+export struct H264RtpStapAPacket {
+    forbidden_zero: bool = false,
+    nri: u8 = 0u8,
+    nal_count: usize = 0usize,
+    nal_spans: [H264RtpStapANalSpan: H264_RTP_MAX_STAP_A_NAL_UNITS] = [],
+}
+
+fn h264_rtp_nal_type(header: u8) u8 {
+    return header & 0x1Fu8;
+}
+
+fn h264_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.H264RtpBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn h264_rtp_validate_single_nal_unit(nal_unit: &[byte]) !void {
+    if nal_unit.len < 1usize {
+        return error.H264RtpNalUnitEmpty;
+    }
+
+    const nal_type: u8 = h264_rtp_nal_type(nal_unit[0] as u8);
+    if nal_type == 0u8 || nal_type >= 24u8 {
+        return error.H264RtpNalTypeNotSingleNalUnit;
+    }
+}
+
+export fn h264_rtp_stap_a_make() H264RtpStapAPacket {
+    return H264RtpStapAPacket{};
+}
+
+export fn h264_rtp_stap_a_parse(packet: &[byte]) !H264RtpStapAPacket {
+    if packet.len < 1usize {
+        return error.H264RtpDescriptorTooShort;
+    }
+
+    const first: u8 = packet[0] as u8;
+    const stap_type: u8 = h264_rtp_nal_type(first);
+    if stap_type != H264_RTP_NAL_TYPE_STAP_A {
+        return error.H264RtpUnsupportedAggregationType;
+    }
+
+    var parsed: H264RtpStapAPacket = h264_rtp_stap_a_make();
+    parsed.forbidden_zero = (first & 0x80u8) != 0u8;
+    parsed.nri = (first >> 5i32) & 0x03u8;
+
+    var offset: usize = 1usize;
+    while offset < packet.len {
+        if (packet.len - offset) < 2usize {
+            return error.H264RtpDescriptorTooShort;
+        }
+
+        const length_u16: u16 = (((packet[offset] as u16) << 8i32) | (packet[offset + 1usize] as u16));
+        const nal_len: usize = length_u16 as usize;
+        offset = offset + 2usize;
+
+        if nal_len == 0usize {
+            return error.H264RtpNalUnitEmpty;
+        }
+        if nal_len > (packet.len - offset) {
+            return error.H264RtpNalLengthExceedsPacket;
+        }
+        if parsed.nal_count >= H264_RTP_MAX_STAP_A_NAL_UNITS {
+            return error.H264RtpTooManyNalUnits;
+        }
+
+        const span_index: usize = parsed.nal_count;
+        if span_index >= H264_RTP_MAX_STAP_A_NAL_UNITS {
+            return error.H264RtpTooManyNalUnits;
+        }
+        parsed.nal_spans[span_index].offset = offset;
+        parsed.nal_spans[span_index].length = nal_len;
+
+        const nal_unit: &[byte] = packet[offset:nal_len];
+        try h264_rtp_validate_single_nal_unit(nal_unit);
+        parsed.nal_count = span_index + 1usize;
+        offset = offset + nal_len;
+    }
+
+    if parsed.nal_count == 0usize {
+        return error.H264RtpStapAEmpty;
+    }
+
+    return parsed;
+}
+
+export fn h264_rtp_stap_a_write(storage: &[byte], stap_a: &H264RtpStapAPacket, out_packet: &[byte]) !usize {
+    if stap_a == null {
+        return error.H264RtpDescriptorTooShort;
+    }
+    if stap_a.nri > 3u8 {
+        return error.H264RtpInvalidNri;
+    }
+    if stap_a.nal_count == 0usize {
+        return error.H264RtpStapAEmpty;
+    }
+    if stap_a.nal_count > H264_RTP_MAX_STAP_A_NAL_UNITS {
+        return error.H264RtpTooManyNalUnits;
+    }
+
+    var total_len: usize = 1usize;
+    var index: usize = 0usize;
+    while index < stap_a.nal_count {
+        const span: H264RtpStapANalSpan = stap_a.nal_spans[index];
+        if span.length == 0usize {
+            return error.H264RtpNalUnitEmpty;
+        }
+        if span.length > 0xFFFFusize {
+            return error.H264RtpNalUnitTooLarge;
+        }
+        if span.offset > storage.len || span.length > (storage.len - span.offset) {
+            return error.H264RtpNalLengthExceedsPacket;
+        }
+
+        const nal_unit: &[byte] = storage[span.offset:span.length];
+        try h264_rtp_validate_single_nal_unit(nal_unit);
+        total_len = total_len + 2usize + span.length;
+        index = index + 1usize;
+    }
+
+    if total_len > out_packet.len {
+        return error.H264RtpBufferTooSmall;
+    }
+
+    var header: u8 = H264_RTP_NAL_TYPE_STAP_A | ((stap_a.nri & 0x03u8) << 5i32);
+    if stap_a.forbidden_zero {
+        header = header | 0x80u8;
+    }
+    out_packet[0] = header as byte;
+
+    var offset: usize = 1usize;
+    index = 0usize;
+    while index < stap_a.nal_count {
+        const span: H264RtpStapANalSpan = stap_a.nal_spans[index];
+        const nal_len_u16: u16 = span.length as u16;
+        out_packet[offset] = (nal_len_u16 >> 8i32) as byte;
+        out_packet[offset + 1usize] = (nal_len_u16 & 0xFFu16) as byte;
+        offset = offset + 2usize;
+        try h264_rtp_copy_bytes(out_packet[offset:span.length], storage[span.offset:span.length], span.length);
+        offset = offset + span.length;
+        index = index + 1usize;
+    }
+
+    return offset;
+}

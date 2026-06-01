@@ -1,0 +1,140 @@
+use libc.printf;
+use webrtc.media.h264_rtp;
+
+fn bytes_equal(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < a.len {
+        if a[index] != b[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn check_parse_stap_a_two_nals() i32 {
+    var packet: [byte: 10] = [
+        0x78 as byte,
+        0x00 as byte, 0x02 as byte, 0x65 as byte, 0xAA as byte,
+        0x00 as byte, 0x03 as byte, 0x41 as byte, 0xBB as byte, 0xCC as byte,
+    ];
+    const parsed: !H264RtpStapAPacket = h264_rtp_stap_a_parse(packet[0:10]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value.nal_count != 2usize || parsed.value.nri != 3u8 || parsed.value.forbidden_zero {
+        return 11i32;
+    }
+
+    if parsed.value.nal_spans[0].offset != 3usize || parsed.value.nal_spans[0].length != 2usize {
+        return 12i32;
+    }
+    if parsed.value.nal_spans[1].offset != 7usize || parsed.value.nal_spans[1].length != 3usize {
+        return 13i32;
+    }
+
+    if packet[3] != (0x65 as byte) || packet[4] != (0xAA as byte) {
+        return 14i32;
+    }
+    if packet[7] != (0x41 as byte) || packet[8] != (0xBB as byte) || packet[9] != (0xCC as byte) {
+        return 15i32;
+    }
+    return 0i32;
+}
+
+fn check_write_stap_a_two_nals() i32 {
+    var packet: H264RtpStapAPacket = h264_rtp_stap_a_make();
+    packet.nri = 2u8;
+    packet.nal_count = 2usize;
+
+    var storage: [byte: 4] = [0x67 as byte, 0x11 as byte, 0x68 as byte, 0x22 as byte];
+    packet.nal_spans[0].offset = 0usize;
+    packet.nal_spans[0].length = 2usize;
+    packet.nal_spans[1].offset = 2usize;
+    packet.nal_spans[1].length = 2usize;
+
+    var out: [byte: 9] = [];
+    const written: !usize = h264_rtp_stap_a_write(storage[0:4], &packet, out[0:9]);
+    if written.error_id != 0 || written.value != 9usize {
+        return 20i32;
+    }
+
+    var expected: [byte: 9] = [
+        0x58 as byte,
+        0x00 as byte, 0x02 as byte, 0x67 as byte, 0x11 as byte,
+        0x00 as byte, 0x02 as byte, 0x68 as byte, 0x22 as byte,
+    ];
+    if !bytes_equal(out[0:9], expected[0:9]) {
+        return 21i32;
+    }
+
+    const reparsed: !H264RtpStapAPacket = h264_rtp_stap_a_parse(out[0:9]);
+    if reparsed.error_id != 0 || reparsed.value.nal_count != 2usize {
+        return 22i32;
+    }
+
+    if reparsed.value.nal_spans[1].offset != 7usize || reparsed.value.nal_spans[1].length != 2usize {
+        return 23i32;
+    }
+    return 0i32;
+}
+
+fn check_malformed_cases() i32 {
+    var short_packet: [byte: 2] = [0x78 as byte, 0x00 as byte];
+    const short_parse: !H264RtpStapAPacket = h264_rtp_stap_a_parse(short_packet[0:2]);
+    if short_parse.error_id != @error_id(error.H264RtpDescriptorTooShort) {
+        return 30i32;
+    }
+
+    var overrun_packet: [byte: 5] = [0x78 as byte, 0x00 as byte, 0x04 as byte, 0x65 as byte, 0xAA as byte];
+    const overrun_parse: !H264RtpStapAPacket = h264_rtp_stap_a_parse(overrun_packet[0:5]);
+    if overrun_parse.error_id != @error_id(error.H264RtpNalLengthExceedsPacket) {
+        return 31i32;
+    }
+
+    var zero_len_packet: [byte: 3] = [0x78 as byte, 0x00 as byte, 0x00 as byte];
+    const zero_len_parse: !H264RtpStapAPacket = h264_rtp_stap_a_parse(zero_len_packet[0:3]);
+    if zero_len_parse.error_id != @error_id(error.H264RtpNalUnitEmpty) {
+        return 32i32;
+    }
+
+    var not_stap_a: [byte: 2] = [0x65 as byte, 0xAA as byte];
+    const not_stap_parse: !H264RtpStapAPacket = h264_rtp_stap_a_parse(not_stap_a[0:2]);
+    if not_stap_parse.error_id != @error_id(error.H264RtpUnsupportedAggregationType) {
+        return 33i32;
+    }
+
+    var bad_nal_type: [byte: 4] = [0x78 as byte, 0x00 as byte, 0x01 as byte, 0x7Cu8 as byte];
+    const bad_nal_parse: !H264RtpStapAPacket = h264_rtp_stap_a_parse(bad_nal_type[0:4]);
+    if bad_nal_parse.error_id != @error_id(error.H264RtpNalTypeNotSingleNalUnit) {
+        return 34i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_parse_stap_a_two_nals();
+    if result != 0i32 {
+        printf("h264 stap-a parse tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_write_stap_a_two_nals();
+    if result != 0i32 {
+        printf("h264 stap-a write tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_malformed_cases();
+    if result != 0i32 {
+        printf("h264 stap-a malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("h264 stap-a tests passed\n");
+    return 0i32;
+}
