@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -735,6 +736,44 @@ class AgentLoopKillTests(unittest.TestCase):
             self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
             self.assertNotIn("commits", state)
 
+    def test_pending_commit_recovery_pushes_new_commits(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [x] task one\n- [x] task two\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            state = module.empty_state(root, todo_file)
+            state["pending_commit"] = {
+                "tasks": ["task one", "task two"],
+                "toolchain_bug_reports": [],
+                "attempts": 0,
+                "updated_at": "2026-05-31 12:00:00",
+            }
+
+            with patch.object(module, "git_head_commit", return_value="before"):
+                with patch.object(module, "run_codex", return_value=(True, root / "fake.log")):
+                    with patch.object(
+                        module,
+                        "parse_agent_result",
+                        return_value={"commits": ["abc123"], "verification": ["make test"]},
+                    ):
+                        with patch.object(module, "collect_valid_commits", return_value=["abc123"]):
+                            with patch.object(module, "collect_new_commits", return_value=[]):
+                                with patch.object(module, "git_status_lines", return_value=[]):
+                                    with patch.object(
+                                        module,
+                                        "push_commits_to_remote",
+                                        return_value=True,
+                                    ) as push_mock:
+                                        recovered = module.run_pending_commit_recovery(paths, state)
+
+        self.assertTrue(recovered)
+        push_mock.assert_called_once_with(paths["root"], ["abc123"])
+
     def test_dirty_recovery_resumes_matching_last_session(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
         session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
@@ -818,6 +857,81 @@ class AgentLoopKillTests(unittest.TestCase):
 
         self.assertTrue(recovered)
         self.assertIsNone(captured["resume_session_id"])
+
+
+class AgentLoopGitPushTests(unittest.TestCase):
+    def test_push_commits_to_remote_pushes_current_branch(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            remote_repo = base / "remote.git"
+            work_repo = base / "work"
+
+            subprocess.run(["git", "init", "--bare", str(remote_repo)], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "init", str(work_repo)], check=True, capture_output=True, text=True)
+            subprocess.run(["git", "-C", str(work_repo), "checkout", "-b", "main"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", str(work_repo), "config", "user.name", "Test User"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(work_repo), "config", "user.email", "test@example.com"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            (work_repo / "README.md").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(work_repo), "add", "README.md"], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-C", str(work_repo), "commit", "-m", "initial commit"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(work_repo), "remote", "add", "origin", str(remote_repo)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            head_commit = subprocess.run(
+                ["git", "-C", str(work_repo), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            pushed = module.push_commits_to_remote(work_repo, [head_commit])
+
+            remote_head = subprocess.run(
+                ["git", "-C", str(remote_repo), "rev-parse", "main"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            upstream = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(work_repo),
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{u}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+        self.assertTrue(pushed)
+        self.assertEqual(remote_head, head_commit)
+        self.assertEqual(upstream, "origin/main")
 
     def test_kill_stops_runner_and_codex_and_clears_state(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})

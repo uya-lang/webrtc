@@ -1618,6 +1618,100 @@ def git_status_lines(root):
     return [line for line in probe.stdout.splitlines() if line.strip()]
 
 
+def git_current_branch(root):
+    probe = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None
+
+    branch = probe.stdout.strip()
+    if not branch or branch == "HEAD":
+        return None
+
+    return branch
+
+
+def git_default_remote(root):
+    probe = subprocess.run(
+        ["git", "remote"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None
+
+    for line in probe.stdout.splitlines():
+        remote = line.strip()
+        if remote:
+            return remote
+
+    return None
+
+
+def git_upstream_ref(root):
+    probe = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None
+
+    upstream = probe.stdout.strip()
+    return upstream or None
+
+
+def push_commits_to_remote(root, commits):
+    if not commits or not is_git_repo(root):
+        return False
+
+    push_cmd = ["git", "push"]
+    upstream_ref = git_upstream_ref(root)
+    if upstream_ref is None:
+        branch = git_current_branch(root)
+        if branch is None:
+            print("[agent] push skipped: detached HEAD")
+            return False
+
+        remote = git_default_remote(root)
+        if remote is None:
+            print("[agent] push skipped: no git remote configured")
+            return False
+
+        push_cmd = ["git", "push", "-u", remote, branch]
+
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if not env.get("GIT_SSH_COMMAND"):
+        env["GIT_SSH_COMMAND"] = "ssh -oBatchMode=yes"
+
+    probe = subprocess.run(
+        push_cmd,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    if probe.returncode != 0:
+        detail = probe.stderr.strip() or probe.stdout.strip() or f"exit code {probe.returncode}"
+        print(f"[agent] push failed: {detail}")
+        return False
+
+    print(f"[agent] pushed {len(commits)} commit(s) to remote")
+    return True
+
+
 def has_uncommitted_changes(root):
     return bool(git_status_lines(root))
 
@@ -2699,6 +2793,7 @@ def run_pending_commit_recovery(paths, state, allow_last_session=None):
 
     if commits:
         print(f"[agent] recovery committed: {len(commits)}")
+        push_commits_to_remote(paths["root"], commits)
         remaining_dirty = git_status_lines(paths["root"])
         if remaining_dirty:
             print("[agent] recovery committed but worktree is still dirty; will continue recovery")
@@ -2830,6 +2925,7 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks, a
 
     if commits:
         print(f"[agent] current-task recovery committed: {len(commits)}")
+        push_commits_to_remote(paths["root"], commits)
 
     remaining_dirty = git_status_lines(paths["root"])
     if remaining_dirty:
@@ -3144,6 +3240,7 @@ def main():
 
             if commits:
                 print(f"[agent] recorded commits: {len(commits)}")
+                push_commits_to_remote(paths["root"], commits)
 
             if invalid_commits > 0:
                 print(f"[agent] ignored invalid commits: {invalid_commits}")
