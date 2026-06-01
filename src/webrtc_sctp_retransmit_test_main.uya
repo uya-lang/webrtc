@@ -1,0 +1,113 @@
+use libc.printf;
+use webrtc.sctp.retransmit;
+
+fn check_retransmission_timer_backoff() i32 {
+    var timer: SctpRetransmissionTimer = sctp_retransmission_timer_make();
+    if (sctp_retransmission_timer_start(&timer, 1000u64, 100u64, 400u64, 2u32)).error_id != 0 {
+        return 10i32;
+    }
+    if !timer.active || timer.timed_out {
+        return 11i32;
+    }
+    if timer.next_deadline_us != 1100u64 || timer.current_timeout_us != 100u64 {
+        return 12i32;
+    }
+    if sctp_retransmission_timer_should_fire(&timer, 1099u64) {
+        return 13i32;
+    }
+    if !sctp_retransmission_timer_should_fire(&timer, 1100u64) {
+        return 14i32;
+    }
+
+    const first_fire: !bool = sctp_retransmission_timer_fire(&timer, 1100u64);
+    if first_fire.error_id != 0 || !first_fire.value {
+        return 15i32;
+    }
+    if timer.retransmissions_sent != 1u32 || timer.current_timeout_us != 200u64 || timer.next_deadline_us != 1300u64 {
+        return 16i32;
+    }
+
+    const second_fire: !bool = sctp_retransmission_timer_fire(&timer, 1300u64);
+    if second_fire.error_id != 0 || !second_fire.value {
+        return 17i32;
+    }
+    if timer.retransmissions_sent != 2u32 || timer.current_timeout_us != 400u64 || timer.next_deadline_us != 1700u64 {
+        return 18i32;
+    }
+
+    const timeout_fire: !bool = sctp_retransmission_timer_fire(&timer, 1700u64);
+    if timeout_fire.error_id != 0 || timeout_fire.value {
+        return 19i32;
+    }
+    if timer.active || !timer.timed_out || timer.next_deadline_us != 0u64 {
+        return 20i32;
+    }
+
+    sctp_retransmission_timer_stop(&timer);
+    if timer.active || timer.timed_out || timer.next_deadline_us != 0u64 {
+        return 21i32;
+    }
+
+    return 0i32;
+}
+
+fn check_retransmission_timer_invalid_cases() i32 {
+    var timer: SctpRetransmissionTimer = sctp_retransmission_timer_make();
+    if (sctp_retransmission_timer_start(&timer, 0u64, 0u64, 400u64, 2u32)).error_id != @error_id(error.SctpRetransmissionTimerInvalidConfiguration) {
+        return 30i32;
+    }
+    if (sctp_retransmission_timer_start(&timer, 0u64, 100u64, 50u64, 2u32)).error_id != @error_id(error.SctpRetransmissionTimerInvalidConfiguration) {
+        return 31i32;
+    }
+    if (sctp_retransmission_timer_start(&timer, 0u64, 100u64, 400u64, 0u32)).error_id != @error_id(error.SctpRetransmissionTimerInvalidConfiguration) {
+        return 32i32;
+    }
+    if (sctp_retransmission_timer_fire(&timer, 0u64)).error_id != @error_id(error.SctpRetransmissionTimerNotReady) {
+        return 33i32;
+    }
+    if (sctp_retransmission_timer_start(&timer, 500u64, 100u64, 400u64, 1u32)).error_id != 0 {
+        return 34i32;
+    }
+    if (sctp_retransmission_timer_fire(&timer, 599u64)).error_id != @error_id(error.SctpRetransmissionTimerNotReady) {
+        return 35i32;
+    }
+
+    return 0i32;
+}
+
+fn check_retransmission_timer_saturating_deadline() i32 {
+    var timer: SctpRetransmissionTimer = sctp_retransmission_timer_make();
+    if (sctp_retransmission_timer_start(&timer, 0xfffffffffffffff0u64, 32u64, 64u64, 1u32)).error_id != 0 {
+        return 40i32;
+    }
+    if timer.next_deadline_us != 0xffffffffffffffffu64 {
+        return 41i32;
+    }
+    if !sctp_retransmission_timer_should_fire(&timer, 0xffffffffffffffffu64) {
+        return 42i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_retransmission_timer_backoff();
+    if result != 0i32 {
+        printf("SCTP retransmission timer backoff tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_retransmission_timer_invalid_cases();
+    if result != 0i32 {
+        printf("SCTP retransmission timer invalid tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_retransmission_timer_saturating_deadline();
+    if result != 0i32 {
+        printf("SCTP retransmission timer saturating tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("SCTP retransmission timer tests passed\n");
+    return 0i32;
+}

@@ -1,0 +1,137 @@
+// webrtc.sctp.retransmit - SCTP retransmission timer helpers
+// Module: src/webrtc/sctp/retransmit.uya -> use webrtc.sctp.retransmit;
+
+export error SctpRetransmissionTimerInvalidState;
+export error SctpRetransmissionTimerInvalidConfiguration;
+export error SctpRetransmissionTimerNotReady;
+
+export struct SctpRetransmissionTimer {
+    active: bool = false,
+    timed_out: bool = false,
+    retransmissions_sent: u32 = 0u32,
+    max_retransmissions: u32 = 0u32,
+    current_timeout_us: u64 = 0u64,
+    max_timeout_us: u64 = 0u64,
+    next_deadline_us: u64 = 0u64,
+}
+
+fn sctp_retransmission_timer_make_default() SctpRetransmissionTimer {
+    return SctpRetransmissionTimer{};
+}
+
+fn sctp_u64_add_saturating(lhs: u64, rhs: u64) u64 {
+    if rhs > 0xffffffffffffffffu64 - lhs {
+        return 0xffffffffffffffffu64;
+    }
+    return lhs + rhs;
+}
+
+fn sctp_u64_mul2_saturating(value: u64) u64 {
+    if value > 0x7fffffffffffffffu64 {
+        return 0xffffffffffffffffu64;
+    }
+    return value * 2u64;
+}
+
+fn sctp_retransmission_timer_reschedule(timer: &SctpRetransmissionTimer, now_us: u64) void {
+    if timer == null {
+        return;
+    }
+    timer.next_deadline_us = sctp_u64_add_saturating(now_us, timer.current_timeout_us);
+}
+
+/// Create an empty SCTP retransmission timer.
+export fn sctp_retransmission_timer_make() SctpRetransmissionTimer {
+    return sctp_retransmission_timer_make_default();
+}
+
+/// Reset the timer to its initial inactive state.
+export fn sctp_retransmission_timer_reset(timer: &SctpRetransmissionTimer) void {
+    if timer == null {
+        return;
+    }
+
+    timer.active = false;
+    timer.timed_out = false;
+    timer.retransmissions_sent = 0u32;
+    timer.max_retransmissions = 0u32;
+    timer.current_timeout_us = 0u64;
+    timer.max_timeout_us = 0u64;
+    timer.next_deadline_us = 0u64;
+}
+
+/// Start or restart the retransmission timer.
+export fn sctp_retransmission_timer_start(
+    timer: &SctpRetransmissionTimer,
+    now_us: u64,
+    initial_timeout_us: u64,
+    max_timeout_us: u64,
+    max_retransmissions: u32,
+) !void {
+    if timer == null {
+        return error.SctpRetransmissionTimerInvalidState;
+    }
+    if initial_timeout_us == 0u64
+        || max_timeout_us < initial_timeout_us
+        || max_retransmissions == 0u32 {
+        return error.SctpRetransmissionTimerInvalidConfiguration;
+    }
+
+    timer.active = true;
+    timer.timed_out = false;
+    timer.retransmissions_sent = 0u32;
+    timer.max_retransmissions = max_retransmissions;
+    timer.current_timeout_us = initial_timeout_us;
+    timer.max_timeout_us = max_timeout_us;
+    sctp_retransmission_timer_reschedule(timer, now_us);
+    return;
+}
+
+/// Stop the timer and clear all counters.
+export fn sctp_retransmission_timer_stop(timer: &SctpRetransmissionTimer) void {
+    if timer == null {
+        return;
+    }
+
+    timer.active = false;
+    timer.timed_out = false;
+    timer.retransmissions_sent = 0u32;
+    timer.max_retransmissions = 0u32;
+    timer.current_timeout_us = 0u64;
+    timer.max_timeout_us = 0u64;
+    timer.next_deadline_us = 0u64;
+}
+
+/// Return whether the timer is ready to fire at `now_us`.
+export fn sctp_retransmission_timer_should_fire(timer: &SctpRetransmissionTimer, now_us: u64) bool {
+    if timer == null || !timer.active || timer.timed_out {
+        return false;
+    }
+    return now_us >= timer.next_deadline_us;
+}
+
+/// Consume one retransmission timeout and schedule the next deadline.
+export fn sctp_retransmission_timer_fire(timer: &SctpRetransmissionTimer, now_us: u64) !bool {
+    if timer == null {
+        return error.SctpRetransmissionTimerInvalidState;
+    }
+    if !timer.active || timer.timed_out || now_us < timer.next_deadline_us {
+        return error.SctpRetransmissionTimerNotReady;
+    }
+
+    if timer.retransmissions_sent >= timer.max_retransmissions {
+        timer.active = false;
+        timer.timed_out = true;
+        timer.next_deadline_us = 0u64;
+        return false;
+    }
+
+    timer.retransmissions_sent = timer.retransmissions_sent + 1u32;
+    var next_timeout_us: u64 = sctp_u64_mul2_saturating(timer.current_timeout_us);
+    if next_timeout_us > timer.max_timeout_us {
+        next_timeout_us = timer.max_timeout_us;
+    }
+    timer.current_timeout_us = next_timeout_us;
+    sctp_retransmission_timer_reschedule(timer, now_us);
+    return true;
+}

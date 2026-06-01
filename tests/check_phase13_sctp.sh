@@ -20,6 +20,8 @@ test -f src/webrtc_sctp_dcep_test_main.uya
 test -f src/webrtc_sctp_model_test_main.uya
 test -f src/webrtc/sctp/tsn.uya
 test -f src/webrtc_sctp_tsn_test_main.uya
+test -f src/webrtc/sctp/retransmit.uya
+test -f src/webrtc_sctp_retransmit_test_main.uya
 
 rg -q "export struct SctpPacket" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_packet_parse" src/webrtc/sctp/packet.uya
@@ -92,6 +94,13 @@ rg -q "export fn sctp_tsn_tracker_ack_outstanding_tsn" src/webrtc/sctp/tsn.uya
 rg -q "export fn sctp_tsn_tracker_record_received" src/webrtc/sctp/tsn.uya
 rg -q "export fn sctp_tsn_tracker_build_sack" src/webrtc/sctp/tsn.uya
 rg -q "export fn sctp_tsn_tracker_acknowledge_sack" src/webrtc/sctp/tsn.uya
+rg -q "export struct SctpRetransmissionTimer" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_make" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_reset" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_start" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_stop" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_should_fire" src/webrtc/sctp/retransmit.uya
+rg -q "export fn sctp_retransmission_timer_fire" src/webrtc/sctp/retransmit.uya
 rg -q "export struct SctpDcepOpenMessage" src/webrtc/sctp/dcep.uya
 rg -q "export struct SctpDcepAckMessage" src/webrtc/sctp/dcep.uya
 rg -q "export fn sctp_dcep_open_parse" src/webrtc/sctp/dcep.uya
@@ -114,5 +123,6 @@ PY
 ../uya/bin/uya run src/webrtc_sctp_dcep_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_model_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_tsn_test_main.uya
+../uya/bin/uya run src/webrtc_sctp_retransmit_test_main.uya
 
 echo "Phase 13 SCTP parser checks passed"
