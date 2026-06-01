@@ -241,7 +241,7 @@
 
 ## Phase 9：SRTP / SRTCP
 
-- [ ] 先增加 RFC 3711 vectors。
+- [x] 先增加 RFC 3711 vectors。
 - [ ] 先增加 sequence wrap、ROC、replay window failing tests。
 - [ ] 先建立 `bench_srtp` 基线和零堆分配断言。
 - [ ] 定义 SRTP context。

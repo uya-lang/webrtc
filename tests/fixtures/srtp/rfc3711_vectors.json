@@ -1,70 +1,60 @@
 {
-  "aes_128_cm": {
-    "description": "RFC 3711 Appendix B.2 AES-128-CM test vectors",
+  "metadata": {
+    "rfc": "RFC 3711",
+    "appendix": [
+      "B.2",
+      "B.3"
+    ]
+  },
+  "rfc3711_aes_cm": {
+    "description": "RFC 3711 Appendix B.2 AES-CM keystream vectors",
+    "session_key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
     "vectors": [
       {
-        "name": "test_vector_1",
-        "key_hex": "00000000000000000000000000000000",
-        "iv_hex": "00000000000000000000000000000000",
-        "plaintext_hex": "",
-        "ciphertext_hex": ""
+        "name": "counter_0x00",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfd0000",
+        "keystream_hex": "e03ead0935c95e80e166b16dd92b4eb4"
       },
       {
-        "name": "test_vector_2",
-        "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
-        "iv_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
-        "plaintext_hex": "",
-        "ciphertext_hex": ""
-      }
-    ]
-  },
-  "hmac_sha1": {
-    "description": "RFC 3711 Appendix B.3 HMAC-SHA1 test vectors",
-    "vectors": [
-      {
-        "name": "test_vector_1",
-        "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
-        "data_hex": "4869205468657265",
-        "mac_hex": "b617318655057264e28bc0b6fb378c8ef146be00"
+        "name": "counter_0x01",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfd0001",
+        "keystream_hex": "d23513162b02d0f72a43a2fe4a5f97ab"
       },
       {
-        "name": "test_vector_2",
-        "key_hex": "4a656665",
-        "data_hex": "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
-        "mac_hex": "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"
+        "name": "counter_0x02",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfd0002",
+        "keystream_hex": "41e95b3bb0a2e8dd477901e4fca894c0"
+      },
+      {
+        "name": "counter_0xfe",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfd00fe",
+        "keystream_hex": "336c6a9f1cfb4f7e6c23e00a590a2df9"
+      },
+      {
+        "name": "counter_0xff",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfd00ff",
+        "keystream_hex": "67b99db606b8e661e6fd20e5dc8fddc0"
+      },
+      {
+        "name": "counter_0x100",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdff00",
+        "keystream_hex": "7b8d5b0b2a2c83a91a0e28df6a455139"
+      },
+      {
+        "name": "counter_0x101",
+        "counter_hex": "f0f1f2f3f4f5f6f7f8f9fafbfcfdff01",
+        "keystream_hex": "6a2cc3787889374fbeb4c81b17ba6c44"
       }
     ]
   },
-  "srtp_kdf": {
-    "description": "RFC 3711 Appendix B.4 SRTP key derivation test vectors",
-    "vectors": [
-      {
-        "name": "test_vector_1",
-        "master_key_hex": "e1f97a0d3e018be0d64fa32c06de4139",
-        "master_salt_hex": "0ec675ad498afeebb6960b3aabe6",
-        "ssrc_hex": "20782f2a",
-        "roc_hex": "00000000",
-        "index_hex": "000000000000",
-        "cipher_key_hex": "c61e7a93744f39ee10734afe3ff7a087",
-        "cipher_salt_hex": "30cbbc08863d8c85d49db34a9ae1",
-        "auth_key_hex": "cebe321f6ff7618b6e7991866c23c0877f7a38c031a5599a"
-      }
-    ]
-  },
-  "srtp_protect": {
-    "description": "SRTP protect/unprotect test vectors with AES-128-CM and HMAC-SHA1-80",
-    "suite": "SRTP_AES128_CM_HMAC_SHA1_80",
-    "vectors": [
-      {
-        "name": "basic_protect_unprotect",
-        "master_key_hex": "e1f97a0d3e018be0d64fa32c06de4139",
-        "master_salt_hex": "0ec675ad498afeebb6960b3aabe6",
-        "ssrc_hex": "20782f2a",
-        "rtp_header_hex": "800f1234567890abcdef",
-        "rtp_payload_hex": "48656c6c6f20576f726c6421",
-        "expected_srtp_packet_hex": "placeholder_will_be_computed"
-      }
-    ]
+  "rfc3711_key_derivation": {
+    "description": "RFC 3711 Appendix B.3 session key derivation vectors",
+    "master_key_hex": "e1f97a0d3e018be0d64fa32c06de4139",
+    "master_salt_hex": "0ec675ad498afeebb6960b3aabe6",
+    "index_div_kdr_hex": "000000000000",
+    "cipher_key_hex": "c61e7a93744f39ee10734afe3ff7a087",
+    "cipher_salt_hex": "30cbbc08863d8c85d49db34a9ae1",
+    "auth_key_hex": "cebe321f6ff7716b6fd4ab49af256a156d38baa48f0a0acf3c34e2359e6cdbcee049646c43d9327ad175578ef72270986371c10c9a369ac2f94a8c5fbcdddc256d6e919a48b610ef17c2041e474035766b68642c59bbfc2f34db60dbdfb2"
   },
   "sequence_wrap": {
     "description": "RTP sequence number wrap and ROC (rollover counter) test vectors",
