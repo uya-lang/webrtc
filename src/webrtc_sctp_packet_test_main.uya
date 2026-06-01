@@ -543,6 +543,96 @@ fn check_sack_chunk_malformed_cases() i32 {
     return 0i32;
 }
 
+fn check_heartbeat_chunk_roundtrip() i32 {
+    var info: [byte: 7] = [
+        0x01 as byte,
+        0x02 as byte,
+        0x03 as byte,
+        0x04 as byte,
+        0x05 as byte,
+        0x06 as byte,
+        0x07 as byte,
+    ];
+
+    var heartbeat: SctpHeartbeatChunk = sctp_heartbeat_chunk_make();
+    heartbeat.flags = 0x00u8;
+    heartbeat.info = info[0:7];
+
+    var buffer: [byte: 32] = [];
+    const written: !usize = sctp_heartbeat_chunk_write(&heartbeat, buffer[0:32]);
+    if written.error_id != 0 || written.value != 12usize {
+        return 150i32;
+    }
+
+    const parsed: !SctpHeartbeatChunk = sctp_heartbeat_chunk_parse(buffer[0:written.value]);
+    if parsed.error_id != 0 {
+        return 151i32;
+    }
+    if parsed.value.flags != 0x00u8 {
+        return 152i32;
+    }
+    if !bytes_equal(parsed.value.info, info[0:7]) {
+        return 153i32;
+    }
+
+    var ack: SctpHeartbeatAckChunk = sctp_heartbeat_ack_chunk_make();
+    ack.flags = 0x80u8;
+    ack.info = info[0:7];
+    var ack_buffer: [byte: 32] = [];
+    const ack_written: !usize = sctp_heartbeat_ack_chunk_write(&ack, ack_buffer[0:32]);
+    if ack_written.error_id != 0 || ack_written.value != 12usize {
+        return 154i32;
+    }
+    const ack_parsed: !SctpHeartbeatAckChunk = sctp_heartbeat_ack_chunk_parse(ack_buffer[0:ack_written.value]);
+    if ack_parsed.error_id != 0 {
+        return 155i32;
+    }
+    if ack_parsed.value.flags != 0x80u8 || !bytes_equal(ack_parsed.value.info, info[0:7]) {
+        return 156i32;
+    }
+
+    return 0i32;
+}
+
+fn check_heartbeat_chunk_malformed_cases() i32 {
+    var too_short: [byte: 3] = [0x04 as byte, 0x00 as byte, 0x00 as byte];
+    const too_short_result: !SctpHeartbeatChunk = sctp_heartbeat_chunk_parse(too_short[0:3]);
+    if too_short_result.error_id != @error_id(error.SctpPacketTooSmall) {
+        return 160i32;
+    }
+
+    var bad_length: [byte: 4] = [
+        0x04 as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte,
+    ];
+    const bad_length_result: !SctpHeartbeatChunk = sctp_heartbeat_chunk_parse(bad_length[0:4]);
+    if bad_length_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 161i32;
+    }
+
+    var bad_padding: [byte: 8] = [
+        0x05 as byte, 0x00 as byte, 0x00 as byte, 0x05 as byte,
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    bad_padding[5usize] = 0x01 as byte;
+    const bad_padding_result: !SctpHeartbeatAckChunk = sctp_heartbeat_ack_chunk_parse(bad_padding[0:8]);
+    if bad_padding_result.error_id != @error_id(error.SctpInvalidChunkPadding) {
+        return 162i32;
+    }
+
+    var wrong_type: [byte: 4] = [
+        0x0b as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x04 as byte,
+    ];
+    const wrong_type_result: !SctpHeartbeatChunk = sctp_heartbeat_chunk_parse(wrong_type[0:4]);
+    if wrong_type_result.error_id != @error_id(error.SctpInvalidChunkType) {
+        return 163i32;
+    }
+
+    return 0i32;
+}
+
 fn check_handshake_chunk_malformed_cases() i32 {
     var too_short_init: [byte: 3] = [
         0x01 as byte,
@@ -641,6 +731,18 @@ fn main() i32 {
     result = check_sack_chunk_malformed_cases();
     if result != 0i32 {
         printf("SCTP SACK malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_heartbeat_chunk_roundtrip();
+    if result != 0i32 {
+        printf("SCTP HEARTBEAT chunk tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_heartbeat_chunk_malformed_cases();
+    if result != 0i32 {
+        printf("SCTP HEARTBEAT malformed tests failed: %d\n", result);
         return 1i32;
     }
 

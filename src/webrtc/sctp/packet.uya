@@ -85,6 +85,16 @@ export struct SctpCookieAckChunk {
     flags: u8 = 0u8,
 }
 
+export struct SctpHeartbeatChunk {
+    flags: u8 = 0u8,
+    info: &[byte] = [],
+}
+
+export struct SctpHeartbeatAckChunk {
+    flags: u8 = 0u8,
+    info: &[byte] = [],
+}
+
 export struct SctpSackGapAckBlock {
     start: u16 = 0u16,
     end: u16 = 0u16,
@@ -357,6 +367,16 @@ export fn sctp_cookie_ack_chunk_make() SctpCookieAckChunk {
     return SctpCookieAckChunk{};
 }
 
+/// Create an empty SCTP HEARTBEAT chunk container.
+export fn sctp_heartbeat_chunk_make() SctpHeartbeatChunk {
+    return SctpHeartbeatChunk{};
+}
+
+/// Create an empty SCTP HEARTBEAT_ACK chunk container.
+export fn sctp_heartbeat_ack_chunk_make() SctpHeartbeatAckChunk {
+    return SctpHeartbeatAckChunk{};
+}
+
 /// Create an empty SCTP SACK gap-ack block container.
 export fn sctp_sack_gap_ack_block_make() SctpSackGapAckBlock {
     return SctpSackGapAckBlock{};
@@ -461,6 +481,38 @@ export fn sctp_cookie_ack_chunk_parse(packet: &[byte]) !SctpCookieAckChunk {
 
     var chunk: SctpCookieAckChunk = sctp_cookie_ack_chunk_make();
     chunk.flags = header.flags;
+    return chunk;
+}
+
+/// Parse an SCTP HEARTBEAT chunk body and preserve the info parameter bytes.
+export fn sctp_heartbeat_chunk_parse(packet: &[byte]) !SctpHeartbeatChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_HEARTBEAT {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpHeartbeatChunk = sctp_heartbeat_chunk_make();
+    chunk.flags = header.flags;
+    chunk.info = packet[4usize:header.length - 4usize];
+    return chunk;
+}
+
+/// Parse an SCTP HEARTBEAT_ACK chunk body and preserve the info parameter bytes.
+export fn sctp_heartbeat_ack_chunk_parse(packet: &[byte]) !SctpHeartbeatAckChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_HEARTBEAT_ACK {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpHeartbeatAckChunk = sctp_heartbeat_ack_chunk_make();
+    chunk.flags = header.flags;
+    chunk.info = packet[4usize:header.length - 4usize];
     return chunk;
 }
 
@@ -623,6 +675,54 @@ export fn sctp_data_chunk_write(chunk: &SctpDataChunk, buffer: &[byte]) !usize {
         buffer[pad_index] = 0u8;
         pad_index = pad_index + 1usize;
     }
+    return padded_length;
+}
+
+/// Write an SCTP HEARTBEAT chunk.
+export fn sctp_heartbeat_chunk_write(chunk: &SctpHeartbeatChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + chunk.info.len;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_HEARTBEAT, chunk.flags, chunk_length);
+    try sctp_copy_bytes(buffer[4usize:chunk.info.len], chunk.info, chunk.info.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+
+    return padded_length;
+}
+
+/// Write an SCTP HEARTBEAT_ACK chunk.
+export fn sctp_heartbeat_ack_chunk_write(chunk: &SctpHeartbeatAckChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + chunk.info.len;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_HEARTBEAT_ACK, chunk.flags, chunk_length);
+    try sctp_copy_bytes(buffer[4usize:chunk.info.len], chunk.info, chunk.info.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+
     return padded_length;
 }
 

@@ -351,7 +351,7 @@
 - [x] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
 - [x] 实现 DATA chunk。
 - [x] 实现 SACK。
-- [ ] 实现 HEARTBEAT。
+- [x] 实现 HEARTBEAT。
 - [ ] 实现 ABORT / SHUTDOWN。
 - [ ] 实现 TSN tracking。
 - [ ] 实现 retransmission timer。

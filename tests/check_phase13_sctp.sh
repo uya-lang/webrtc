@@ -34,6 +34,14 @@ rg -q "export fn sctp_init_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_init_ack_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_cookie_echo_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_cookie_ack_chunk_write" src/webrtc/sctp/packet.uya
+rg -q "export struct SctpHeartbeatChunk" src/webrtc/sctp/packet.uya
+rg -q "export struct SctpHeartbeatAckChunk" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_chunk_make" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_ack_chunk_make" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_chunk_parse" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_ack_chunk_parse" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_chunk_write" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_heartbeat_ack_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export const SCTP_DATA_CHUNK_FLAG_UNORDERED" src/webrtc/sctp/packet.uya
 rg -q "export const SCTP_SACK_MAX_GAP_ACK_BLOCKS" src/webrtc/sctp/packet.uya
 rg -q "export const SCTP_SACK_MAX_DUPLICATE_TSNS" src/webrtc/sctp/packet.uya
