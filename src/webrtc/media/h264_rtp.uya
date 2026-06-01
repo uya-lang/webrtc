@@ -23,6 +23,9 @@ export error H264RtpFuAReassemblyStateRequired;
 export error H264RtpFuAReassemblyFrameNotStarted;
 export error H264RtpFuAReassemblyUnexpectedStart;
 export error H264RtpFuAReassemblyHeaderMismatch;
+export error H264RtpAnnexBStartCodeMissing;
+export error H264RtpAvccLengthTooShort;
+export error H264RtpAvccLengthExceedsBuffer;
 
 export struct H264RtpStapANalSpan {
     offset: usize = 0usize,
@@ -83,6 +86,44 @@ fn h264_rtp_validate_fu_nal_type(nal_type: u8) !void {
     if nal_type == 0u8 || nal_type >= 24u8 {
         return error.H264RtpFuANalTypeInvalid;
     }
+}
+
+fn h264_rtp_annexb_start_code_len_at(data: &[byte], offset: usize) usize {
+    if offset + 3usize <= data.len &&
+        data[offset] == 0u8 &&
+        data[offset + 1usize] == 0u8 &&
+        data[offset + 2usize] == 1u8 {
+        return 3usize;
+    }
+    if offset + 4usize <= data.len &&
+        data[offset] == 0u8 &&
+        data[offset + 1usize] == 0u8 &&
+        data[offset + 2usize] == 0u8 &&
+        data[offset + 3usize] == 1u8 {
+        return 4usize;
+    }
+    return 0usize;
+}
+
+fn h264_rtp_write_u32_be(dst: &[byte], value: u32) !void {
+    if dst.len < 4usize {
+        return error.H264RtpBufferTooSmall;
+    }
+    dst[0] = ((value >> 24i32) & 0xFFu32) as byte;
+    dst[1] = ((value >> 16i32) & 0xFFu32) as byte;
+    dst[2] = ((value >> 8i32) & 0xFFu32) as byte;
+    dst[3] = (value & 0xFFu32) as byte;
+}
+
+fn h264_rtp_read_u32_be(src: &[byte]) !u32 {
+    if src.len < 4usize {
+        return error.H264RtpAvccLengthTooShort;
+    }
+    return
+        (((src[0] as u32) << 24i32) |
+        ((src[1] as u32) << 16i32) |
+        ((src[2] as u32) << 8i32) |
+        (src[3] as u32));
 }
 
 export fn h264_rtp_stap_a_make() H264RtpStapAPacket {
@@ -295,6 +336,95 @@ export fn h264_rtp_fu_a_reassembly_absorb(
         return nal_len;
     }
     return 0usize;
+}
+
+export fn h264_annexb_to_avcc(annexb: &[byte], out_avcc: &[byte]) !usize {
+    if annexb.len < 3usize {
+        return error.H264RtpAnnexBStartCodeMissing;
+    }
+
+    const first_start_code_len: usize = h264_rtp_annexb_start_code_len_at(annexb, 0usize);
+    if first_start_code_len == 0usize {
+        return error.H264RtpAnnexBStartCodeMissing;
+    }
+
+    var cursor: usize = first_start_code_len;
+    var out_len: usize = 0usize;
+    while cursor <= annexb.len {
+        const nal_start: usize = cursor;
+        var next: usize = cursor;
+        while next < annexb.len {
+            if h264_rtp_annexb_start_code_len_at(annexb, next) != 0usize {
+                break;
+            }
+            next = next + 1usize;
+        }
+
+        const nal_len: usize = next - nal_start;
+        if nal_len == 0usize {
+            return error.H264RtpNalUnitEmpty;
+        }
+        if nal_len > 0xFFFFFFFFusize {
+            return error.H264RtpNalUnitTooLarge;
+        }
+        if (out_avcc.len - out_len) < (4usize + nal_len) {
+            return error.H264RtpBufferTooSmall;
+        }
+
+        try h264_rtp_write_u32_be(out_avcc[out_len:4usize], nal_len as u32);
+        out_len = out_len + 4usize;
+        try h264_rtp_copy_bytes(out_avcc[out_len:nal_len], annexb[nal_start:nal_len], nal_len);
+        out_len = out_len + nal_len;
+
+        if next >= annexb.len {
+            break;
+        }
+        const next_start_code_len: usize = h264_rtp_annexb_start_code_len_at(annexb, next);
+        if next_start_code_len == 0usize {
+            return error.H264RtpAnnexBStartCodeMissing;
+        }
+        cursor = next + next_start_code_len;
+    }
+
+    return out_len;
+}
+
+export fn h264_avcc_to_annexb(avcc: &[byte], out_annexb: &[byte]) !usize {
+    if avcc.len < 4usize {
+        return error.H264RtpAvccLengthTooShort;
+    }
+
+    var cursor: usize = 0usize;
+    var out_len: usize = 0usize;
+    while cursor < avcc.len {
+        if (avcc.len - cursor) < 4usize {
+            return error.H264RtpAvccLengthTooShort;
+        }
+        const nal_len_u32: u32 = try h264_rtp_read_u32_be(avcc[cursor:4usize]);
+        cursor = cursor + 4usize;
+
+        const nal_len: usize = nal_len_u32 as usize;
+        if nal_len == 0usize {
+            return error.H264RtpNalUnitEmpty;
+        }
+        if nal_len > (avcc.len - cursor) {
+            return error.H264RtpAvccLengthExceedsBuffer;
+        }
+        if (out_annexb.len - out_len) < (4usize + nal_len) {
+            return error.H264RtpBufferTooSmall;
+        }
+
+        out_annexb[out_len] = 0u8;
+        out_annexb[out_len + 1usize] = 0u8;
+        out_annexb[out_len + 2usize] = 0u8;
+        out_annexb[out_len + 3usize] = 1u8;
+        out_len = out_len + 4usize;
+        try h264_rtp_copy_bytes(out_annexb[out_len:nal_len], avcc[cursor:nal_len], nal_len);
+        out_len = out_len + nal_len;
+        cursor = cursor + nal_len;
+    }
+
+    return out_len;
 }
 
 export fn h264_rtp_stap_a_write(storage: &[byte], stap_a: &H264RtpStapAPacket, out_packet: &[byte]) !usize {

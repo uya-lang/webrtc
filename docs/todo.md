@@ -305,7 +305,7 @@
 - [x] 增加 VP8 keyframe、inter frame、partition start、picture id wrap、丢包重组失败 golden tests。
 - [x] 实现 H264 STAP-A。
 - [x] 实现 H264 FU-A。
-- [ ] 实现 Annex-B / AVCC 转换 helper。
+- [x] 实现 Annex-B / AVCC 转换 helper。
 - [ ] 实现 AV1 RTP payload descriptor。
 - [ ] 实现 keyframe 检测。
 - [ ] 实现 frame metadata。
