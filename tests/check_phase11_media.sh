@@ -10,6 +10,12 @@ test -f src/webrtc_media_model_test_main.uya
 
 rg -q "export struct EncodedFrame" src/webrtc/media/model.uya
 rg -q "export fn encoded_frame_make" src/webrtc/media/model.uya
+rg -q "export struct CodecCapability" src/webrtc/media/model.uya
+rg -q "export struct CodecCapabilitySet" src/webrtc/media/model.uya
+rg -q "export struct CodecNegotiationResult" src/webrtc/media/model.uya
+rg -q "export fn codec_capability_make" src/webrtc/media/model.uya
+rg -q "export fn codec_capability_set_make" src/webrtc/media/model.uya
+rg -q "export fn codec_negotiation_result_make" src/webrtc/media/model.uya
 
 ../uya/bin/uya run src/webrtc_media_model_test_main.uya
 

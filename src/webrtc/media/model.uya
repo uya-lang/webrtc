@@ -3,6 +3,10 @@
 
 export const ENCODED_FRAME_NO_SPATIAL_ID: i32 = -1i32;
 export const ENCODED_FRAME_NO_TEMPORAL_ID: i32 = -1i32;
+export const MEDIA_MAX_CODEC_CAPABILITIES: usize = 16usize;
+export const MEDIA_MAX_CODEC_FMTP_PARAMS: usize = 12usize;
+export const MEDIA_MAX_CODEC_FEEDBACKS: usize = 8usize;
+export const MEDIA_MAX_NEGOTIATED_CODECS: usize = 16usize;
 
 export struct EncodedFrame {
     codec_id: u16 = 0u16,
@@ -17,6 +21,57 @@ export struct EncodedFrame {
     marker: bool = false,
 }
 
+export struct CodecFmtpParam {
+    key: &[byte] = [],
+    value: &[byte] = [],
+}
+
+export struct CodecFeedback {
+    value: &[byte] = [],
+}
+
+export struct CodecCapability {
+    codec_id: u16 = 0u16,
+    media_kind: u8 = 0u8,
+    clock_rate_hz: u32 = 0u32,
+    channels: u8 = 0u8,
+    preferred_payload_type: u8 = 0u8,
+    fmtp_params: [CodecFmtpParam: MEDIA_MAX_CODEC_FMTP_PARAMS] = [],
+    fmtp_param_count: usize = 0usize,
+    rtcp_feedbacks: [CodecFeedback: MEDIA_MAX_CODEC_FEEDBACKS] = [],
+    rtcp_feedback_count: usize = 0usize,
+}
+
+export struct CodecCapabilitySet {
+    codec_count: usize = 0usize,
+    codecs: [CodecCapability: MEDIA_MAX_CODEC_CAPABILITIES] = [],
+}
+
+export struct CodecNegotiatedCodec {
+    codec_id: u16 = 0u16,
+    media_kind: u8 = 0u8,
+    payload_type: u8 = 0u8,
+    clock_rate_hz: u32 = 0u32,
+    channels: u8 = 0u8,
+}
+
+export struct CodecNegotiationResult {
+    negotiated_count: usize = 0usize,
+    negotiated: [CodecNegotiatedCodec: MEDIA_MAX_NEGOTIATED_CODECS] = [],
+}
+
 export fn encoded_frame_make() EncodedFrame {
     return EncodedFrame{};
+}
+
+export fn codec_capability_make() CodecCapability {
+    return CodecCapability{};
+}
+
+export fn codec_capability_set_make() CodecCapabilitySet {
+    return CodecCapabilitySet{};
+}
+
+export fn codec_negotiation_result_make() CodecNegotiationResult {
+    return CodecNegotiationResult{};
 }

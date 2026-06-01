@@ -52,6 +52,44 @@ fn check_assign_payload_and_metadata() i32 {
     return 0i32;
 }
 
+fn check_codec_capability_and_negotiation_structs() i32 {
+    var capability: CodecCapability = codec_capability_make();
+    capability.codec_id = 111u16;
+    capability.media_kind = 2u8;
+    capability.clock_rate_hz = 48000u32;
+    capability.channels = 2u8;
+    capability.preferred_payload_type = 111u8;
+    capability.fmtp_params[0].key = "minptime" as &[byte];
+    capability.fmtp_params[0].value = "10" as &[byte];
+    capability.fmtp_param_count = 1usize;
+    capability.rtcp_feedbacks[0].value = "transport-cc" as &[byte];
+    capability.rtcp_feedback_count = 1usize;
+
+    var capability_set: CodecCapabilitySet = codec_capability_set_make();
+    capability_set.codec_count = 1usize;
+    capability_set.codecs[0] = capability;
+    if capability_set.codecs[0].fmtp_param_count != 1usize {
+        return 30i32;
+    }
+    if capability_set.codecs[0].rtcp_feedbacks[0].value.len != 12usize {
+        return 31i32;
+    }
+
+    var result: CodecNegotiationResult = codec_negotiation_result_make();
+    result.negotiated_count = 1usize;
+    result.negotiated[0].codec_id = capability_set.codecs[0].codec_id;
+    result.negotiated[0].media_kind = capability_set.codecs[0].media_kind;
+    result.negotiated[0].payload_type = capability_set.codecs[0].preferred_payload_type;
+    result.negotiated[0].clock_rate_hz = capability_set.codecs[0].clock_rate_hz;
+    result.negotiated[0].channels = capability_set.codecs[0].channels;
+
+    if result.negotiated[0].payload_type != 111u8 || result.negotiated[0].clock_rate_hz != 48000u32 {
+        return 32i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_default_frame();
     if result != 0i32 {
@@ -65,6 +103,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("EncodedFrame tests passed\n");
+    result = check_codec_capability_and_negotiation_structs();
+    if result != 0i32 {
+        printf("Codec capability/negotiation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("EncodedFrame and codec capability tests passed\n");
     return 0i32;
 }
