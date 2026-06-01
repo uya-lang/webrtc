@@ -1,0 +1,215 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.sctp.dcep;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn check_make_and_dcep_open_message() i32 {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.ordered = false;
+    init.has_max_retransmits = true;
+    init.max_retransmits = 5u16;
+
+    const channel_result: !DataChannel = data_channel_make("chat" as &[byte], "webrtc-datachannel" as &[byte], &init);
+    if channel_result.error_id != 0 {
+        return 10i32;
+    }
+    var channel: DataChannel = channel_result.value;
+    if channel.state != DATA_CHANNEL_STATE_CONNECTING {
+        return 11i32;
+    }
+    if !bytes_equal(data_channel_label(&channel), "chat" as &[byte]) {
+        return 12i32;
+    }
+    if !bytes_equal(data_channel_protocol(&channel), "webrtc-datachannel" as &[byte]) {
+        return 13i32;
+    }
+    if data_channel_buffered_amount(&channel) != 0usize {
+        return 14i32;
+    }
+
+    const open_message: !SctpDcepOpenMessage = data_channel_make_dcep_open_message(&channel);
+    if open_message.error_id != 0 {
+        return 15i32;
+    }
+    if open_message.value.channel_type != SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED {
+        return 16i32;
+    }
+    if open_message.value.reliability_parameter != 5u32 {
+        return 17i32;
+    }
+    if !bytes_equal(open_message.value.label, "chat" as &[byte]) {
+        return 18i32;
+    }
+    if !bytes_equal(open_message.value.protocol, "webrtc-datachannel" as &[byte]) {
+        return 19i32;
+    }
+
+    var buffer: [byte: 64] = [];
+    const written: !usize = sctp_dcep_open_write(&open_message.value, buffer[0:64]);
+    if written.error_id != 0 {
+        return 20i32;
+    }
+    const parsed: !SctpDcepOpenMessage = sctp_dcep_open_parse(buffer[0:written.value]);
+    if parsed.error_id != 0 {
+        return 21i32;
+    }
+    if parsed.value.channel_type != open_message.value.channel_type {
+        return 22i32;
+    }
+
+    return 0i32;
+}
+
+fn check_open_send_receive_and_close() i32 {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    const channel_result: !DataChannel = data_channel_make("echo" as &[byte], "webrtc-datachannel" as &[byte], &init);
+    if channel_result.error_id != 0 {
+        return 30i32;
+    }
+    var channel: DataChannel = channel_result.value;
+
+    if !data_channel_open(&channel) {
+        return 31i32;
+    }
+    if !data_channel_is_open(&channel) {
+        return 32i32;
+    }
+
+    var payload: [byte: 5] = ['h' as byte, 'e' as byte, 'l' as byte, 'l' as byte, 'o' as byte];
+    const send_result: !void = data_channel_send(&channel, payload[0:5]);
+    if send_result.error_id != 0 {
+        return 33i32;
+    }
+    if !data_channel_has_outgoing_message(&channel) {
+        return 34i32;
+    }
+    if data_channel_buffered_amount(&channel) != 5usize {
+        return 35i32;
+    }
+
+    var outgoing: DataChannelMessage = data_channel_pop_outgoing_message(&channel);
+    if outgoing.payload_len != 5usize {
+        return 36i32;
+    }
+    if !bytes_equal(outgoing.payload[0:outgoing.payload_len], payload[0:5]) {
+        return 37i32;
+    }
+    if data_channel_buffered_amount(&channel) != 0usize {
+        return 38i32;
+    }
+
+    const deliver_result: !void = data_channel_deliver_message(&channel, outgoing.payload[0:outgoing.payload_len]);
+    if deliver_result.error_id != 0 {
+        return 39i32;
+    }
+    if !data_channel_has_received_message(&channel) {
+        return 40i32;
+    }
+
+    var received: DataChannelMessage = data_channel_pop_received_message(&channel);
+    if received.payload_len != 5usize {
+        return 41i32;
+    }
+    if !bytes_equal(received.payload[0:received.payload_len], payload[0:5]) {
+        return 42i32;
+    }
+    if data_channel_has_received_message(&channel) {
+        return 43i32;
+    }
+
+    if !data_channel_close(&channel) {
+        return 44i32;
+    }
+    if !data_channel_is_closed(&channel) {
+        return 45i32;
+    }
+
+    const send_after_close: !void = data_channel_send(&channel, payload[0:5]);
+    if send_after_close.error_id != @error_id(error.SctpDataChannelInvalidState) {
+        return 46i32;
+    }
+
+    return 0i32;
+}
+
+fn check_queue_caps_and_reliability_helpers() i32 {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.ordered = true;
+    init.has_max_packet_lifetime_ms = true;
+    init.max_packet_lifetime_ms = 120u16;
+
+    const channel_result: !DataChannel = data_channel_make("caps" as &[byte], "proto" as &[byte], &init);
+    if channel_result.error_id != 0 {
+        return 50i32;
+    }
+    var channel: DataChannel = channel_result.value;
+    if !data_channel_open(&channel) {
+        return 51i32;
+    }
+    const mode: !u8 = data_channel_init_reliability_mode(&channel.init);
+    if mode.error_id != 0 {
+        return 52i32;
+    }
+    if mode.value != SCTP_DATA_CHANNEL_RELIABILITY_MAX_PACKET_LIFETIME {
+        return 53i32;
+    }
+
+    var index: usize = 0usize;
+    while index < DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        var payload: [byte: 1] = [(48usize + index) as byte];
+        const result: !void = data_channel_send(&channel, payload[0:1]);
+        if result.error_id != 0 {
+            return 54i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    var overflow_payload: [byte: 1] = [0x7Fu8 as byte];
+    const overflow: !void = data_channel_send(&channel, overflow_payload[0:1]);
+    if overflow.error_id != @error_id(error.SctpDataChannelQueueFull) {
+        return 62i32;
+    }
+    if !data_channel_has_outgoing_message(&channel) {
+        return 63i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_make_and_dcep_open_message();
+    if result != 0i32 {
+        printf("DataChannel API make/open tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_open_send_receive_and_close();
+    if result != 0i32 {
+        printf("DataChannel API send/receive tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_queue_caps_and_reliability_helpers();
+    if result != 0i32 {
+        printf("DataChannel API queue cap tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("DataChannel API tests passed\n");
+    return 0i32;
+}

@@ -359,7 +359,7 @@
 - [x] 实现 reliable / max_retransmits / max_packet_lifetime。
 - [x] 实现 stream reset。
 - [x] 实现 DCEP OPEN / ACK。
-- [ ] 实现 DataChannel public API。
+- [x] 实现 DataChannel public API。
 - [ ] 增加 Uya loopback DataChannel echo 示例。
 
 验收标准：

@@ -1,0 +1,457 @@
+// webrtc.api - Native WebRTC 风格的公共 DataChannel API
+// 模块路径：src/webrtc/api.uya → use webrtc.api;
+
+use webrtc.sctp.dcep;
+use webrtc.sctp.model;
+
+export const DATA_CHANNEL_STATE_CONNECTING: u8 = 0u8;
+export const DATA_CHANNEL_STATE_OPEN: u8 = 1u8;
+export const DATA_CHANNEL_STATE_CLOSING: u8 = 2u8;
+export const DATA_CHANNEL_STATE_CLOSED: u8 = 3u8;
+
+export const DATA_CHANNEL_MAX_LABEL_BYTES: usize = 64usize;
+export const DATA_CHANNEL_MAX_PROTOCOL_BYTES: usize = 64usize;
+export const DATA_CHANNEL_MAX_BUFFERED_MESSAGES: usize = 8usize;
+export const DATA_CHANNEL_MAX_MESSAGE_BYTES: usize = 2048usize;
+
+export error SctpDataChannelBufferTooSmall;
+export error SctpDataChannelLabelTooLong;
+export error SctpDataChannelMessageTooLarge;
+export error SctpDataChannelProtocolTooLong;
+export error SctpDataChannelQueueEmpty;
+export error SctpDataChannelQueueFull;
+
+export struct DataChannelMessage {
+    payload_len: usize = 0usize,
+    payload: [byte: DATA_CHANNEL_MAX_MESSAGE_BYTES] = [],
+}
+
+export struct DataChannel {
+    label: [byte: DATA_CHANNEL_MAX_LABEL_BYTES] = [],
+    label_len: usize = 0usize,
+    protocol: [byte: DATA_CHANNEL_MAX_PROTOCOL_BYTES] = [],
+    protocol_len: usize = 0usize,
+    init: SctpDataChannelInit = SctpDataChannelInit{},
+    state: u8 = DATA_CHANNEL_STATE_CONNECTING,
+    buffered_amount: usize = 0usize,
+    buffered_amount_high_watermark: usize = 0usize,
+    outgoing_head: usize = 0usize,
+    outgoing_count: usize = 0usize,
+    incoming_head: usize = 0usize,
+    incoming_count: usize = 0usize,
+    outgoing_messages: [DataChannelMessage: DATA_CHANNEL_MAX_BUFFERED_MESSAGES] = [],
+    incoming_messages: [DataChannelMessage: DATA_CHANNEL_MAX_BUFFERED_MESSAGES] = [],
+    incoming_budget: SctpDataChannelReassemblyBudget = SctpDataChannelReassemblyBudget{},
+    send_count: u64 = 0u64,
+    receive_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    open_count: u64 = 0u64,
+    close_count: u64 = 0u64,
+}
+
+fn data_channel_make_default_message() DataChannelMessage {
+    return DataChannelMessage{};
+}
+
+fn data_channel_make_default() DataChannel {
+    return DataChannel{};
+}
+
+fn data_channel_copy_bytes(dst: &[byte], src: &[byte]) !void {
+    if src.len > dst.len {
+        return error.SctpDataChannelBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn data_channel_copy_message_payload(message: &DataChannelMessage, payload: &[byte]) !void {
+    if message == null {
+        return error.SctpDataChannelMessageTooLarge;
+    }
+    if payload.len > DATA_CHANNEL_MAX_MESSAGE_BYTES {
+        return error.SctpDataChannelMessageTooLarge;
+    }
+
+    message.payload_len = payload.len;
+    var index: usize = 0usize;
+    while index < payload.len {
+        message.payload[index] = payload[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn data_channel_queue_slot(head: usize, count: usize) usize {
+    var slot: usize = head + count;
+    if slot >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        slot = slot - DATA_CHANNEL_MAX_BUFFERED_MESSAGES;
+    }
+    return slot;
+}
+
+fn data_channel_outgoing_push(channel: &DataChannel, message: &DataChannelMessage) bool {
+    if channel.outgoing_count >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.drop_count = channel.drop_count + 1u64;
+        return false;
+    }
+
+    const slot: usize = data_channel_queue_slot(channel.outgoing_head, channel.outgoing_count);
+    if slot >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.drop_count = channel.drop_count + 1u64;
+        return false;
+    }
+    channel.outgoing_messages[slot] = *message;
+    channel.outgoing_count = channel.outgoing_count + 1usize;
+    channel.buffered_amount = channel.buffered_amount + message.payload_len;
+    if channel.buffered_amount > channel.buffered_amount_high_watermark {
+        channel.buffered_amount_high_watermark = channel.buffered_amount;
+    }
+    return true;
+}
+
+fn data_channel_outgoing_pop(channel: &DataChannel) DataChannelMessage {
+    if channel.outgoing_count == 0usize {
+        return DataChannelMessage{};
+    }
+
+    const slot: usize = channel.outgoing_head;
+    if slot >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        return DataChannelMessage{};
+    }
+    const message: DataChannelMessage = channel.outgoing_messages[slot];
+    channel.outgoing_messages[slot] = DataChannelMessage{};
+    channel.outgoing_head = channel.outgoing_head + 1usize;
+    if channel.outgoing_head >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.outgoing_head = 0usize;
+    }
+    channel.outgoing_count = channel.outgoing_count - 1usize;
+    if channel.buffered_amount >= message.payload_len {
+        channel.buffered_amount = channel.buffered_amount - message.payload_len;
+    } else {
+        channel.buffered_amount = 0usize;
+    }
+    return message;
+}
+
+fn data_channel_incoming_push(channel: &DataChannel, message: &DataChannelMessage) bool {
+    if channel.incoming_count >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.drop_count = channel.drop_count + 1u64;
+        return false;
+    }
+
+    const slot: usize = data_channel_queue_slot(channel.incoming_head, channel.incoming_count);
+    if slot >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.drop_count = channel.drop_count + 1u64;
+        return false;
+    }
+    channel.incoming_messages[slot] = *message;
+    channel.incoming_count = channel.incoming_count + 1usize;
+    return true;
+}
+
+fn data_channel_incoming_pop(channel: &DataChannel) DataChannelMessage {
+    if channel.incoming_count == 0usize {
+        return DataChannelMessage{};
+    }
+
+    const slot: usize = channel.incoming_head;
+    if slot >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        return DataChannelMessage{};
+    }
+    const message: DataChannelMessage = channel.incoming_messages[slot];
+    channel.incoming_messages[slot] = DataChannelMessage{};
+    channel.incoming_head = channel.incoming_head + 1usize;
+    if channel.incoming_head >= DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.incoming_head = 0usize;
+    }
+    channel.incoming_count = channel.incoming_count - 1usize;
+    return message;
+}
+
+fn data_channel_reset_buffers(channel: &DataChannel) void {
+    if channel == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        channel.outgoing_messages[index] = DataChannelMessage{};
+        channel.incoming_messages[index] = DataChannelMessage{};
+        index = index + 1usize;
+    }
+
+    channel.outgoing_head = 0usize;
+    channel.outgoing_count = 0usize;
+    channel.incoming_head = 0usize;
+    channel.incoming_count = 0usize;
+    channel.buffered_amount = 0usize;
+    channel.buffered_amount_high_watermark = 0usize;
+    sctp_data_channel_reassembly_budget_reset(&channel.incoming_budget);
+    channel.incoming_budget.cap_bytes = channel.init.reassembly_cap_bytes;
+}
+
+fn data_channel_message_channel_type(channel: &DataChannel) !u8 {
+    const mode: u8 = try sctp_data_channel_init_reliability_mode(&channel.init);
+    if mode == SCTP_DATA_CHANNEL_RELIABILITY_RELIABLE {
+        if channel.init.ordered {
+            return SCTP_DCEP_CHANNEL_TYPE_RELIABLE;
+        }
+        return SCTP_DCEP_CHANNEL_TYPE_RELIABLE_UNORDERED;
+    }
+    if mode == SCTP_DATA_CHANNEL_RELIABILITY_MAX_RETRANSMITS {
+        if channel.init.ordered {
+            return SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT;
+        }
+        return SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED;
+    }
+    if channel.init.ordered {
+        return SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED;
+    }
+    return SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED_UNORDERED;
+}
+
+fn data_channel_message_reliability_parameter(channel: &DataChannel) !u32 {
+    const mode: u8 = try sctp_data_channel_init_reliability_mode(&channel.init);
+    if mode == SCTP_DATA_CHANNEL_RELIABILITY_MAX_RETRANSMITS {
+        return channel.init.max_retransmits as u32;
+    }
+    if mode == SCTP_DATA_CHANNEL_RELIABILITY_MAX_PACKET_LIFETIME {
+        return channel.init.max_packet_lifetime_ms as u32;
+    }
+    return 0u32;
+}
+
+/// Create the default DataChannel init struct.
+export fn data_channel_init_make() SctpDataChannelInit {
+    return sctp_data_channel_init_make();
+}
+
+/// Validate the DataChannel init.
+export fn data_channel_init_validate(init: &SctpDataChannelInit) !void {
+    return sctp_data_channel_init_validate(init);
+}
+
+/// Classify the init struct into the supported reliability mode.
+export fn data_channel_init_reliability_mode(init: &SctpDataChannelInit) !u8 {
+    return sctp_data_channel_init_reliability_mode(init);
+}
+
+/// Create the default reassembly budget with the documented 4 MB cap.
+export fn data_channel_reassembly_budget_make() SctpDataChannelReassemblyBudget {
+    return sctp_data_channel_reassembly_budget_make();
+}
+
+/// Reset reassembly accounting back to an empty state.
+export fn data_channel_reassembly_budget_reset(state: &SctpDataChannelReassemblyBudget) void {
+    sctp_data_channel_reassembly_budget_reset(state);
+}
+
+/// Return the remaining bytes available under the reassembly cap.
+export fn data_channel_reassembly_budget_available_bytes(state: &SctpDataChannelReassemblyBudget) usize {
+    return sctp_data_channel_reassembly_budget_available_bytes(state);
+}
+
+/// Reserve bytes for a fragment or completed message under the cap.
+export fn data_channel_reassembly_budget_reserve(state: &SctpDataChannelReassemblyBudget, bytes: usize) !void {
+    return sctp_data_channel_reassembly_budget_reserve(state, bytes);
+}
+
+/// Release previously reserved bytes from the budget.
+export fn data_channel_reassembly_budget_release(state: &SctpDataChannelReassemblyBudget, bytes: usize) !void {
+    return sctp_data_channel_reassembly_budget_release(state, bytes);
+}
+
+/// Create an empty DataChannel shell.
+export fn data_channel_make(label: &[byte], protocol: &[byte], init: &SctpDataChannelInit) !DataChannel {
+    if init == null {
+        return error.SctpDataChannelInvalidState;
+    }
+    try sctp_data_channel_init_validate(init);
+
+    var channel: DataChannel = data_channel_make_default();
+    try data_channel_copy_bytes(channel.label[0:DATA_CHANNEL_MAX_LABEL_BYTES], label);
+    try data_channel_copy_bytes(channel.protocol[0:DATA_CHANNEL_MAX_PROTOCOL_BYTES], protocol);
+    channel.label_len = label.len;
+    channel.protocol_len = protocol.len;
+    channel.init = *init;
+    channel.state = DATA_CHANNEL_STATE_CONNECTING;
+    channel.incoming_budget = sctp_data_channel_reassembly_budget_make();
+    channel.incoming_budget.cap_bytes = init.reassembly_cap_bytes;
+    data_channel_reset_buffers(&channel);
+    return channel;
+}
+
+/// Return the DataChannel label as a borrowed slice.
+export fn data_channel_label(channel: &DataChannel) &[byte] {
+    if channel == null {
+        return [] as &[byte];
+    }
+    return channel.label[0:channel.label_len];
+}
+
+/// Return the DataChannel protocol as a borrowed slice.
+export fn data_channel_protocol(channel: &DataChannel) &[byte] {
+    if channel == null {
+        return [] as &[byte];
+    }
+    return channel.protocol[0:channel.protocol_len];
+}
+
+/// Return the current ready state.
+export fn data_channel_ready_state(channel: &DataChannel) u8 {
+    if channel == null {
+        return DATA_CHANNEL_STATE_CLOSED;
+    }
+    return channel.state;
+}
+
+/// Return whether the channel is open.
+export fn data_channel_is_open(channel: &DataChannel) bool {
+    return data_channel_ready_state(channel) == DATA_CHANNEL_STATE_OPEN;
+}
+
+/// Return whether the channel is closed.
+export fn data_channel_is_closed(channel: &DataChannel) bool {
+    return data_channel_ready_state(channel) == DATA_CHANNEL_STATE_CLOSED;
+}
+
+/// Return the amount of queued outgoing application data.
+export fn data_channel_buffered_amount(channel: &DataChannel) usize {
+    if channel == null {
+        return 0usize;
+    }
+    return channel.buffered_amount;
+}
+
+/// Transition the channel to open.
+export fn data_channel_open(channel: &DataChannel) bool {
+    if channel == null {
+        return false;
+    }
+    if channel.state == DATA_CHANNEL_STATE_OPEN {
+        return true;
+    }
+    if channel.state != DATA_CHANNEL_STATE_CONNECTING {
+        return false;
+    }
+
+    channel.state = DATA_CHANNEL_STATE_OPEN;
+    channel.open_count = channel.open_count + 1u64;
+    return true;
+}
+
+/// Transition the channel to closed and clear queued buffers.
+export fn data_channel_close(channel: &DataChannel) bool {
+    if channel == null {
+        return false;
+    }
+    if channel.state == DATA_CHANNEL_STATE_CLOSED {
+        return true;
+    }
+
+    data_channel_reset_buffers(channel);
+    channel.state = DATA_CHANNEL_STATE_CLOSED;
+    channel.close_count = channel.close_count + 1u64;
+    return true;
+}
+
+/// Create a DCEP OPEN message from the channel configuration.
+export fn data_channel_make_dcep_open_message(channel: &DataChannel) !SctpDcepOpenMessage {
+    if channel == null {
+        return error.SctpDataChannelInvalidState;
+    }
+
+    var message: SctpDcepOpenMessage = sctp_dcep_open_message_make();
+    message.channel_type = try data_channel_message_channel_type(channel);
+    message.priority = 0u16;
+    message.reliability_parameter = try data_channel_message_reliability_parameter(channel);
+    message.label = channel.label[0:channel.label_len];
+    message.protocol = channel.protocol[0:channel.protocol_len];
+    return message;
+}
+
+/// Create a DCEP ACK message.
+export fn data_channel_make_dcep_ack_message(channel: &DataChannel) SctpDcepAckMessage {
+    if channel == null {
+        return sctp_dcep_ack_message_make();
+    }
+    return sctp_dcep_ack_message_make();
+}
+
+/// Queue outgoing application data for transport.
+export fn data_channel_send(channel: &DataChannel, payload: &[byte]) !void {
+    if channel == null || !data_channel_is_open(channel) {
+        return error.SctpDataChannelInvalidState;
+    }
+
+    var message: DataChannelMessage = data_channel_make_default_message();
+    try data_channel_copy_message_payload(&message, payload);
+    if !data_channel_outgoing_push(channel, &message) {
+        return error.SctpDataChannelQueueFull;
+    }
+    channel.send_count = channel.send_count + 1u64;
+    return;
+}
+
+/// Return whether the channel has queued outgoing application data.
+export fn data_channel_has_outgoing_message(channel: &DataChannel) bool {
+    if channel == null {
+        return false;
+    }
+    return channel.outgoing_count > 0usize;
+}
+
+/// Pop the next queued outgoing message.
+export fn data_channel_pop_outgoing_message(channel: &DataChannel) DataChannelMessage {
+    if channel == null {
+        return DataChannelMessage{};
+    }
+    return data_channel_outgoing_pop(channel);
+}
+
+/// Deliver one complete message into the application receive queue.
+export fn data_channel_deliver_message(channel: &DataChannel, payload: &[byte]) !void {
+    if channel == null || !data_channel_is_open(channel) {
+        return error.SctpDataChannelInvalidState;
+    }
+
+    var message: DataChannelMessage = data_channel_make_default_message();
+    try data_channel_copy_message_payload(&message, payload);
+    try sctp_data_channel_reassembly_budget_reserve(&channel.incoming_budget, message.payload_len);
+    if !data_channel_incoming_push(channel, &message) {
+        try sctp_data_channel_reassembly_budget_release(&channel.incoming_budget, message.payload_len);
+        return error.SctpDataChannelQueueFull;
+    }
+    return;
+}
+
+/// Return whether the channel has an application message ready to read.
+export fn data_channel_has_received_message(channel: &DataChannel) bool {
+    if channel == null {
+        return false;
+    }
+    return channel.incoming_count > 0usize;
+}
+
+/// Pop the next received application message and release its reassembly budget.
+export fn data_channel_pop_received_message(channel: &DataChannel) DataChannelMessage {
+    if channel == null {
+        return DataChannelMessage{};
+    }
+
+    const had_message: bool = channel.incoming_count > 0usize;
+    const message: DataChannelMessage = data_channel_incoming_pop(channel);
+    if had_message && message.payload_len > 0usize {
+        _ = sctp_data_channel_reassembly_budget_release(&channel.incoming_budget, message.payload_len);
+    }
+    if had_message {
+        channel.receive_count = channel.receive_count + 1u64;
+    }
+    return message;
+}
