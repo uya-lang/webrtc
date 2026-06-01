@@ -137,6 +137,48 @@ fn check_abs_send_time_parse_and_write() i32 {
     return 0i32;
 }
 
+fn check_transport_seq_num_parse_and_write() i32 {
+    var raw: [byte: 2] = [0x12 as byte, 0x34 as byte];
+    const parsed: !TransportSeqNumExtension = rtp_extension_transport_seq_num_parse(raw[0:2]);
+    if parsed.error_id != 0 {
+        return 40i32;
+    }
+    if parsed.value.sequence_number != 0x1234u16 {
+        return 41i32;
+    }
+
+    var truncated: [byte: 1] = [0x12 as byte];
+    const truncated_result: !TransportSeqNumExtension = rtp_extension_transport_seq_num_parse(truncated[0:1]);
+    if truncated_result.error_id != @error_id(error.TransportSeqNumExtensionInvalid) {
+        return 42i32;
+    }
+
+    var extra: [byte: 3] = [0x12 as byte, 0x34 as byte, 0x56 as byte];
+    const extra_result: !TransportSeqNumExtension = rtp_extension_transport_seq_num_parse(extra[0:3]);
+    if extra_result.error_id != @error_id(error.TransportSeqNumExtensionInvalid) {
+        return 43i32;
+    }
+
+    var out: [byte: 2] = [];
+    var ext: TransportSeqNumExtension = TransportSeqNumExtension{ sequence_number: 0xBEEFu16 };
+    const written: !usize = rtp_extension_transport_seq_num_write(&ext, out[0:2]);
+    if written.error_id != 0 || written.value != 2usize {
+        return 44i32;
+    }
+    var expected: [byte: 2] = [0xbe as byte, 0xef as byte];
+    if !bytes_equal(out[0:2], expected[0:2]) {
+        return 45i32;
+    }
+
+    var small_out: [byte: 1] = [];
+    const small_out_result: !usize = rtp_extension_transport_seq_num_write(&ext, small_out[0:1]);
+    if small_out_result.error_id != @error_id(error.TransportSeqNumExtensionInvalid) {
+        return 46i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_mid_parse();
     if result != 0i32 {
@@ -156,6 +198,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("RTP common extension MID/ABS tests passed\n");
+    result = check_transport_seq_num_parse_and_write();
+    if result != 0i32 {
+        printf("RTP common extension transport-seq tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP common extension MID/ABS/transport tests passed\n");
     return 0i32;
 }

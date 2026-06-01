@@ -13,6 +13,7 @@ export error PlayoutDelayExtensionInvalid;
 const RTP_EXTENSION_MID_MAX_BYTES: usize = 255usize;
 const RTP_EXTENSION_ABS_SEND_TIME_BYTES: usize = 3usize;
 const RTP_EXTENSION_ABS_SEND_TIME_MAX: u32 = 0x00FFFFFFu32;
+const RTP_EXTENSION_TRANSPORT_SEQ_BYTES: usize = 2usize;
 
 fn rtp_extension_mid_byte_valid(ch: byte) bool {
     const value: u8 = ch as u8;
@@ -87,7 +88,7 @@ export struct TransportSeqNumExtension {
 }
 
 export fn rtp_extension_transport_seq_num_parse(data: &[byte]) !TransportSeqNumExtension {
-    if data.len < 2usize {
+    if data.len != RTP_EXTENSION_TRANSPORT_SEQ_BYTES {
         return error.TransportSeqNumExtensionInvalid;
     }
 
@@ -96,12 +97,12 @@ export fn rtp_extension_transport_seq_num_parse(data: &[byte]) !TransportSeqNumE
 }
 
 export fn rtp_extension_transport_seq_num_write(ext: &TransportSeqNumExtension, buffer: &[byte]) !usize {
-    if buffer.len < 2usize {
+    if buffer.len < RTP_EXTENSION_TRANSPORT_SEQ_BYTES {
         return error.TransportSeqNumExtensionInvalid;
     }
 
     try write_be_u16(buffer[0:2], ext.sequence_number);
-    return 2usize;
+    return RTP_EXTENSION_TRANSPORT_SEQ_BYTES;
 }
 
 // audio-level extension (RFC 6464)

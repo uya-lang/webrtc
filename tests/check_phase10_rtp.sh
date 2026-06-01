@@ -33,6 +33,8 @@ rg -q "export fn rtp_extension_mid_parse" src/webrtc/rtp/rtp_common_extensions.u
 rg -q "export fn rtp_extension_mid_write" src/webrtc/rtp/rtp_common_extensions.uya
 rg -q "export fn rtp_extension_abs_send_time_parse" src/webrtc/rtp/rtp_common_extensions.uya
 rg -q "export fn rtp_extension_abs_send_time_write" src/webrtc/rtp/rtp_common_extensions.uya
+rg -q "export fn rtp_extension_transport_seq_num_parse" src/webrtc/rtp/rtp_common_extensions.uya
+rg -q "export fn rtp_extension_transport_seq_num_write" src/webrtc/rtp/rtp_common_extensions.uya
 rg -q '"bench_rtp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtp_extension_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtcp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
