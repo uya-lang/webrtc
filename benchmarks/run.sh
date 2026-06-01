@@ -32,6 +32,14 @@ append_srtp_baseline_rows() {
 EOF
 }
 
+append_rtp_rtcp_parser_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_rtp_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_rtp_extension_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_rtcp_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 run_crypto_bench_capture() {
     local out_path="$1"
     /bin/bash -c '../uya/bin/uya run src/webrtc_crypto_bench_main.uya > "$1" 2>/dev/null' _ "$out_path" 2>/dev/null
@@ -48,3 +56,4 @@ else
 fi
 
 append_srtp_baseline_rows
+append_rtp_rtcp_parser_baseline_rows
