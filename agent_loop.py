@@ -789,7 +789,6 @@ def empty_state(root, todo_file):
         "done": [],
         "failed": {},
         "toolchain_bugs": [],
-        "commits": [],
         "pending_commit": None,
         "current": None,
         "last_session": None,
@@ -819,7 +818,7 @@ def load_state(state_file, root, todo_file):
     if "toolchain_bugs" not in state:
         state["toolchain_bugs"] = state.pop("compiler_bugs", [])
     state.setdefault("runner", None)
-    state.setdefault("commits", [])
+    state.pop("commits", None)
     state.setdefault("pending_commit", None)
     state.setdefault("current", None)
     state.setdefault("last_session", None)
@@ -2700,7 +2699,6 @@ def run_pending_commit_recovery(paths, state, allow_last_session=None):
 
     if commits:
         print(f"[agent] recovery committed: {len(commits)}")
-        merge_unique_strings(state.setdefault("commits", []), commits)
         remaining_dirty = git_status_lines(paths["root"])
         if remaining_dirty:
             print("[agent] recovery committed but worktree is still dirty; will continue recovery")
@@ -2832,7 +2830,6 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks, a
 
     if commits:
         print(f"[agent] current-task recovery committed: {len(commits)}")
-        merge_unique_strings(state.setdefault("commits", []), commits)
 
     remaining_dirty = git_status_lines(paths["root"])
     if remaining_dirty:
@@ -3147,7 +3144,6 @@ def main():
 
             if commits:
                 print(f"[agent] recorded commits: {len(commits)}")
-                merge_unique_strings(state.setdefault("commits", []), commits)
 
             if invalid_commits > 0:
                 print(f"[agent] ignored invalid commits: {invalid_commits}")

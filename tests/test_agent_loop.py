@@ -675,6 +675,32 @@ class AgentLoopKillTests(unittest.TestCase):
         self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
         self.assertEqual(state["pending_commit"]["toolchain_bug_reports"], ["bug.md"])
 
+    def test_load_state_discards_legacy_commits_field(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [ ] fresh task\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            paths["state_file"].write_text(
+                json.dumps(
+                    {
+                        "project_root": str(root),
+                        "todo_file": str(todo_file),
+                        "commits": ["abc123"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            state = module.load_state(paths["state_file"], root, todo_file)
+
+        self.assertNotIn("commits", state)
+
     def test_pending_commit_recovery_stays_open_when_worktree_remains_dirty(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
 
@@ -707,7 +733,7 @@ class AgentLoopKillTests(unittest.TestCase):
 
             self.assertFalse(recovered)
             self.assertEqual(state["pending_commit"]["tasks"], ["task one", "task two"])
-            self.assertIn("abc123", state["commits"])
+            self.assertNotIn("commits", state)
 
     def test_dirty_recovery_resumes_matching_last_session(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
