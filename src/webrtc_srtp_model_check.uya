@@ -1,0 +1,24 @@
+use webrtc.srtp.model;
+
+fn srtp_model_check_compile_only() !void {
+    var master_key: [byte: SRTP_KEY_BYTES] = [];
+    var master_salt: [byte: SRTP_SALT_BYTES] = [];
+
+    var srtp_ctx: SrtpContext = srtp_context_make();
+    try srtp_context_init(
+        &srtp_ctx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x10203040u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    );
+
+    var srtcp_ctx: SrtcpContext = srtcp_context_make();
+    try srtcp_context_init(
+        &srtcp_ctx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x10203040u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    );
+}

@@ -1,142 +1,144 @@
-// webrtc.srtp.model - SRTP/SRTCP context and data structures
-// Module: src/webrtc/srtp/model.uya
+// webrtc.srtp.model - SRTP/SRTCP context definitions
+// 模块路径：src/webrtc/srtp/model.uya → use webrtc.srtp.model;
 
-use webrtc.crypto.aes;
-use webrtc.crypto.hmac;
+use webrtc.errors;
 
 export const SRTP_KEY_BYTES: usize = 16usize;
 export const SRTP_SALT_BYTES: usize = 14usize;
-export const SRTP_AUTH_TAG_BYTES_80: usize = 10usize;
-export const SRTP_AUTH_TAG_BYTES_32: usize = 4usize;
-export const SRTP_REPLAY_WINDOW_SIZE: usize = 64usize;
-
 export const SRTP_AUTH_KEY_BYTES: usize = 20usize;
 
-// SRTP protection profile
+export const SRTP_AUTH_TAG_BYTES_80: usize = 10usize;
+export const SRTP_AUTH_TAG_BYTES_32: usize = 4usize;
+export const SRTP_REPLAY_WINDOW_BITS: usize = 64usize;
+
+// RFC 5764 DTLS-SRTP protection profile ids.
 export const SRTP_PROFILE_AES128_CM_HMAC_SHA1_80: u16 = 0x0001u16;
 export const SRTP_PROFILE_AES128_CM_HMAC_SHA1_32: u16 = 0x0002u16;
 
-// SRTP context for encrypt/decrypt
 export struct SrtpContext {
+    master_key: [byte: SRTP_KEY_BYTES] = [],
+    master_salt: [byte: SRTP_SALT_BYTES] = [],
     cipher_key: [byte: SRTP_KEY_BYTES] = [],
     cipher_salt: [byte: SRTP_SALT_BYTES] = [],
     auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [],
     profile: u16 = 0u16,
+    ssrc: u32 = 0u32,
     roc: u32 = 0u32,
     s_largest_index: u64 = 0u64,
-    replay_window: [byte: SRTP_REPLAY_WINDOW_SIZE] = [],
+    replay_window: u64 = 0u64,
+    send_sequence: u16 = 0u16,
+    send_rollover_counter: u32 = 0u32,
+    has_recv_index: bool = false,
+}
+
+export struct SrtcpContext {
+    master_key: [byte: SRTP_KEY_BYTES] = [],
+    master_salt: [byte: SRTP_SALT_BYTES] = [],
+    cipher_key: [byte: SRTP_KEY_BYTES] = [],
+    cipher_salt: [byte: SRTP_SALT_BYTES] = [],
+    auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [],
+    profile: u16 = 0u16,
+    ssrc: u32 = 0u32,
+    srtcp_index: u32 = 0u32,
+    replay_window: u64 = 0u64,
+}
+
+fn srtp_profile_supported(profile: u16) bool {
+    return profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || profile == SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
+}
+
+fn srtp_copy_bytes(dst: &[byte], src: &[byte]) !void {
+    if dst.len < src.len {
+        return error.InvalidPacket;
+    }
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn srtp_zero_bytes(dst: &[byte]) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = 0 as byte;
+        index = index + 1usize;
+    }
 }
 
 export fn srtp_context_make() SrtpContext {
-    var cipher_key: [byte: SRTP_KEY_BYTES] = [];
-    var cipher_salt: [byte: SRTP_SALT_BYTES] = [];
-    var auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [];
-    var replay_window: [byte: SRTP_REPLAY_WINDOW_SIZE] = [];
-    return SrtpContext{
-        cipher_key: cipher_key,
-        cipher_salt: cipher_salt,
-        auth_key: auth_key,
-        profile: 0u16,
-        roc: 0u32,
-        s_largest_index: 0u64,
-        replay_window: replay_window,
-    };
+    return SrtpContext{};
+}
+
+export fn srtcp_context_make() SrtcpContext {
+    return SrtcpContext{};
 }
 
 export fn srtp_context_init(
     ctx: &SrtpContext,
-    cipher_key: &[byte],
-    cipher_salt: &[byte],
-    auth_key: &[byte],
     profile: u16,
+    ssrc: u32,
+    master_key: &[byte],
+    master_salt: &[byte],
 ) !void {
     if ctx == null {
-        return error!void;
+        return error.InvalidPacket;
     }
-    if cipher_key.len != SRTP_KEY_BYTES {
-        return error!void;
+    if !srtp_profile_supported(profile) {
+        return error.UnsupportedProfile;
     }
-    if cipher_salt.len != SRTP_SALT_BYTES {
-        return error!void;
+    if master_key.len != SRTP_KEY_BYTES {
+        return error.InvalidPacket;
     }
-    if auth_key.len != SRTP_AUTH_KEY_BYTES {
-        return error!void;
+    if master_salt.len != SRTP_SALT_BYTES {
+        return error.InvalidPacket;
     }
-    if profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 && profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
-        return error!void;
-    }
-    
-    ctx.cipher_key = cipher_key[0:SRTP_KEY_BYTES];
-    ctx.cipher_salt = cipher_salt[0:SRTP_SALT_BYTES];
-    ctx.auth_key = auth_key[0:SRTP_AUTH_KEY_BYTES];
+
+    try srtp_copy_bytes(ctx.master_key[0:SRTP_KEY_BYTES], master_key);
+    try srtp_copy_bytes(ctx.master_salt[0:SRTP_SALT_BYTES], master_salt);
+    srtp_zero_bytes(ctx.cipher_key[0:SRTP_KEY_BYTES]);
+    srtp_zero_bytes(ctx.cipher_salt[0:SRTP_SALT_BYTES]);
+    srtp_zero_bytes(ctx.auth_key[0:SRTP_AUTH_KEY_BYTES]);
+
     ctx.profile = profile;
+    ctx.ssrc = ssrc;
     ctx.roc = 0u32;
     ctx.s_largest_index = 0u64;
-    
-    var i: usize = 0usize;
-    while i< SRTP_REPLAY_WINDOW_SIZE {
-        ctx.replay_window[i] = 0u8;
-        i = i + 1usize;
-    }
-}
-
-// SRTCP context (separate from SRTP for independent ROC tracking)
-export struct SrtcpContext {
-    cipher_key: [byte: SRTP_KEY_BYTES] = [],
-    cipher_salt: [byte: SRTP_SALT_BYTES] = [],
-    auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [],
-    profile: u16 = 0u16,
-    srtcp_index: u32 = 0u32,
-    replay_window: [byte: SRTP_REPLAY_WINDOW_SIZE] = [],
-}
-
-export fn srtcp_context_make() SrtcpContext {
-    var cipher_key: [byte: SRTP_KEY_BYTES] = [];
-    var cipher_salt: [byte: SRTP_SALT_BYTES] = [];
-    var auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [];
-    var replay_window: [byte: SRTP_REPLAY_WINDOW_SIZE] = [];
-    return SrtcpContext{
-        cipher_key: cipher_key,
-        cipher_salt: cipher_salt,
-        auth_key: auth_key,
-        profile: 0u16,
-        srtcp_index: 0u32,
-        replay_window: replay_window,
-    };
+    ctx.replay_window = 0u64;
+    ctx.send_sequence = 0u16;
+    ctx.send_rollover_counter = 0u32;
+    ctx.has_recv_index = false;
 }
 
 export fn srtcp_context_init(
     ctx: &SrtcpContext,
-    cipher_key: &[byte],
-    cipher_salt: &[byte],
-    auth_key: &[byte],
     profile: u16,
+    ssrc: u32,
+    master_key: &[byte],
+    master_salt: &[byte],
 ) !void {
     if ctx == null {
-        return error!void;
+        return error.InvalidPacket;
     }
-    if cipher_key.len != SRTP_KEY_BYTES {
-        return error!void;
+    if !srtp_profile_supported(profile) {
+        return error.UnsupportedProfile;
     }
-    if cipher_salt.len != SRTP_SALT_BYTES {
-        return error!void;
+    if master_key.len != SRTP_KEY_BYTES {
+        return error.InvalidPacket;
     }
-    if auth_key.len != SRTP_AUTH_KEY_BYTES {
-        return error!void;
+    if master_salt.len != SRTP_SALT_BYTES {
+        return error.InvalidPacket;
     }
-    if profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 && profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
-        return error!void;
-    }
-    
-    ctx.cipher_key = cipher_key[0:SRTP_KEY_BYTES];
-    ctx.cipher_salt = cipher_salt[0:SRTP_SALT_BYTES];
-    ctx.auth_key = auth_key[0:SRTP_AUTH_KEY_BYTES];
+
+    try srtp_copy_bytes(ctx.master_key[0:SRTP_KEY_BYTES], master_key);
+    try srtp_copy_bytes(ctx.master_salt[0:SRTP_SALT_BYTES], master_salt);
+    srtp_zero_bytes(ctx.cipher_key[0:SRTP_KEY_BYTES]);
+    srtp_zero_bytes(ctx.cipher_salt[0:SRTP_SALT_BYTES]);
+    srtp_zero_bytes(ctx.auth_key[0:SRTP_AUTH_KEY_BYTES]);
+
     ctx.profile = profile;
+    ctx.ssrc = ssrc;
     ctx.srtcp_index = 0u32;
-    
-    var i: usize = 0usize;
-    while i< SRTP_REPLAY_WINDOW_SIZE {
-        ctx.replay_window[i] = 0u8;
-        i = i + 1usize;
-    }
+    ctx.replay_window = 0u64;
 }
