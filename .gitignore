@@ -3,3 +3,5 @@ __pycache__/
 
 .agent/state.json
 build/benchmarks/
+
+.agent/state*.json
