@@ -247,7 +247,7 @@
 - [x] 定义 SRTP context。
 - [x] 实现 key derivation。
 - [x] 实现 RTP sequence rollover counter。
-- [ ] 实现 replay window。
+- [x] 实现 replay window。
 - [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_80`。
 - [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_32`。
 - [ ] 实现 SRTCP protect/unprotect。
