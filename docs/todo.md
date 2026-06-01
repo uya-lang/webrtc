@@ -360,7 +360,7 @@
 - [x] 实现 stream reset。
 - [x] 实现 DCEP OPEN / ACK。
 - [x] 实现 DataChannel public API。
-- [ ] 增加 Uya loopback DataChannel echo 示例。
+- [x] 增加 Uya loopback DataChannel echo 示例。
 
 验收标准：
 
