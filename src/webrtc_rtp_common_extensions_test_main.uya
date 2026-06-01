@@ -1,0 +1,107 @@
+use libc.printf;
+use webrtc.rtp.rtp_common_extensions;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn check_mid_parse() i32 {
+    var valid_mid: [byte: 5] = [
+        'v' as byte,
+        'i' as byte,
+        'd' as byte,
+        '0' as byte,
+        '1' as byte,
+    ];
+    const parsed: !&[byte] = rtp_extension_mid_parse(valid_mid[0:5]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if !bytes_equal(parsed.value, valid_mid[0:5]) {
+        return 11i32;
+    }
+
+    var empty: [byte: 1] = [];
+    const empty_result: !&[byte] = rtp_extension_mid_parse(empty[0:0]);
+    if empty_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 12i32;
+    }
+
+    var invalid_space: [byte: 4] = [
+        'm' as byte,
+        'i' as byte,
+        ' ' as byte,
+        'd' as byte,
+    ];
+    const invalid_space_result: !&[byte] = rtp_extension_mid_parse(invalid_space[0:4]);
+    if invalid_space_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 13i32;
+    }
+
+    var invalid_ctl: [byte: 1] = [0x1fu8 as byte];
+    const invalid_ctl_result: !&[byte] = rtp_extension_mid_parse(invalid_ctl[0:1]);
+    if invalid_ctl_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 14i32;
+    }
+
+    return 0i32;
+}
+
+fn check_mid_write() i32 {
+    var mid: [byte: 4] = ['m' as byte, 'i' as byte, 'd' as byte, '1' as byte];
+    var out: [byte: 8] = [];
+    const written: !usize = rtp_extension_mid_write(mid[0:4], out[0:8]);
+    if written.error_id != 0 || written.value != 4usize {
+        return 20i32;
+    }
+    if !bytes_equal(out[0:4], mid[0:4]) {
+        return 21i32;
+    }
+
+    var empty: [byte: 1] = [];
+    const empty_result: !usize = rtp_extension_mid_write(empty[0:0], out[0:8]);
+    if empty_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 22i32;
+    }
+
+    var small_out: [byte: 2] = [];
+    const small_result: !usize = rtp_extension_mid_write(mid[0:4], small_out[0:2]);
+    if small_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 23i32;
+    }
+
+    var invalid_mid: [byte: 3] = ['a' as byte, ' ' as byte, 'b' as byte];
+    const invalid_result: !usize = rtp_extension_mid_write(invalid_mid[0:3], out[0:8]);
+    if invalid_result.error_id != @error_id(error.MidExtensionInvalid) {
+        return 24i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_mid_parse();
+    if result != 0i32 {
+        printf("RTP common extension MID tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_mid_write();
+    if result != 0i32 {
+        printf("RTP common extension MID tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP common extension MID tests passed\n");
+    return 0i32;
+}

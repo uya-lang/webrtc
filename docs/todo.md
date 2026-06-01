@@ -268,7 +268,7 @@
 - [x] 先建立 RTP/RTCP parser microbench 和 allocation count 基线。
 - [x] 实现 RTP header parser/writer。
 - [x] 实现 one-byte/two-byte RTP header extension。
-- [ ] 实现 MID extension。
+- [x] 实现 MID extension。
 - [ ] 实现 abs-send-time extension。
 - [ ] 实现 transport-wide sequence number extension。
 - [ ] 实现 RTP sender sequence/timestamp。

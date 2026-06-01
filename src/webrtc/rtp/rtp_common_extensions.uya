@@ -1,5 +1,5 @@
 // webrtc.rtp.common_extensions - Common RTP header extensions for WebRTC
-// Module: src/webrtc/rtp/rtp_common_extensions.uya → use webrtc.rtp.common_extensions;
+// Module: src/webrtc/rtp/rtp_common_extensions.uya -> use webrtc.rtp.common_extensions;
 
 use webrtc.binary;
 
@@ -10,20 +10,42 @@ export error AudioLevelExtensionInvalid;
 export error VideoOrientationExtensionInvalid;
 export error PlayoutDelayExtensionInvalid;
 
+const RTP_EXTENSION_MID_MAX_BYTES: usize = 255usize;
+
+fn rtp_extension_mid_byte_valid(ch: byte) bool {
+    const value: u8 = ch as u8;
+    return value >= 0x21u8 && value <= 0x7Eu8;
+}
+
 // MID extension (RFC 9143)
 export fn rtp_extension_mid_parse(data: &[byte]) !&[byte] {
+    if data.len == 0usize || data.len > RTP_EXTENSION_MID_MAX_BYTES {
+        return error.MidExtensionInvalid;
+    }
+
+    var i: usize = 0usize;
+    while i < data.len {
+        if !rtp_extension_mid_byte_valid(data[i]) {
+            return error.MidExtensionInvalid;
+        }
+        i = i + 1usize;
+    }
+
     return data;
 }
 
 export fn rtp_extension_mid_write(mid: &[byte], buffer: &[byte]) !usize {
-    if mid.len> buffer.len {
+    _ = try rtp_extension_mid_parse(mid);
+    if mid.len > buffer.len {
         return error.MidExtensionInvalid;
     }
-    var i:usize = 0usize;
-while i< mid.len {
+
+    var i: usize = 0usize;
+    while i < mid.len {
         buffer[i] = mid[i];
         i = i + 1usize;
     }
+
     return mid.len;
 }
 
@@ -33,42 +55,46 @@ export struct AbsSendTimeExtension {
 }
 
 export fn rtp_extension_abs_send_time_parse(data: &[byte]) !AbsSendTimeExtension {
-    if data.len< 3usize {
+    if data.len < 3usize {
         return error.AbsSendTimeExtensionInvalid;
     }
-    var timestamp: u32 = ((data[0] as u32) << 16) |
-                        ((data[1] as u32) << 8) |
-                        (data[2] as u32);
+
+    const timestamp: u32 = ((data[0] as u32) << 16)
+        | ((data[1] as u32) << 8)
+        | (data[2] as u32);
     return AbsSendTimeExtension{ timestamp: timestamp };
 }
 
 export fn rtp_extension_abs_send_time_write(ext: &AbsSendTimeExtension, buffer: &[byte]) !usize {
-    if buffer.len< 3usize {
+    if buffer.len < 3usize {
         return error.AbsSendTimeExtensionInvalid;
     }
+
     buffer[0] = ((ext.timestamp >> 16) & 0xFFu32) as u8;
-buffer[1] = ((ext.timestamp>>8)&0xFFu32) asu8;
-    buffer[2] = (ext.timestamp &0xFFu32) as u8;
-return 3usize;
+    buffer[1] = ((ext.timestamp >> 8) & 0xFFu32) as u8;
+    buffer[2] = (ext.timestamp & 0xFFu32) as u8;
+    return 3usize;
 }
 
 // transport-wide-cc-extensions-02 (draft-holmer-rmcat-transport-wide-cc)
-exportstruct TransportSeqNumExtension {
-    sequence_number: u16= 0u16,
+export struct TransportSeqNumExtension {
+    sequence_number: u16 = 0u16,
 }
 
-export fnrtp_extension_transport_seq_num_parse(data: &[byte])!TransportSeqNumExtension {
-if data.len< 2usize {
+export fn rtp_extension_transport_seq_num_parse(data: &[byte]) !TransportSeqNumExtension {
+    if data.len < 2usize {
         return error.TransportSeqNumExtensionInvalid;
     }
-    var seq: u16 = try read_be_u16(data[0:2]);
+
+    const seq: u16 = try read_be_u16(data[0:2]);
     return TransportSeqNumExtension{ sequence_number: seq };
 }
 
 export fn rtp_extension_transport_seq_num_write(ext: &TransportSeqNumExtension, buffer: &[byte]) !usize {
-    if buffer.len< 2usize {
+    if buffer.len < 2usize {
         return error.TransportSeqNumExtensionInvalid;
     }
+
     try write_be_u16(buffer[0:2], ext.sequence_number);
     return 2usize;
 }
@@ -80,12 +106,13 @@ export struct AudioLevelExtension {
 }
 
 export fn rtp_extension_audio_level_parse(data: &[byte]) !AudioLevelExtension {
-    if data.len< 1usize {
+    if data.len < 1usize {
         return error.AudioLevelExtensionInvalid;
     }
-    var byte: u8 = data[0];
-    var voice_activity: bool = (byte &0x80u8) != 0u8;
-    var level: u8 = byte &0x7Fu8;
+
+    const byte: u8 = data[0];
+    const voice_activity: bool = (byte & 0x80u8) != 0u8;
+    const level: u8 = byte & 0x7Fu8;
     return AudioLevelExtension{
         voice_activity: voice_activity,
         level: level,
@@ -93,9 +120,10 @@ export fn rtp_extension_audio_level_parse(data: &[byte]) !AudioLevelExtension {
 }
 
 export fn rtp_extension_audio_level_write(ext: &AudioLevelExtension, buffer: &[byte]) !usize {
-    if buffer.len< 1usize {
+    if buffer.len < 1usize {
         return error.AudioLevelExtensionInvalid;
     }
+
     var byte: u8 = ext.level & 0x7Fu8;
     if ext.voice_activity {
         byte = byte | 0x80u8;
@@ -112,31 +140,35 @@ export struct VideoOrientationExtension {
 }
 
 export fn rtp_extension_video_orientation_parse(data: &[byte]) !VideoOrientationExtension {
-    if data.len< 1usize {
+    if data.len < 1usize {
         return error.VideoOrientationExtensionInvalid;
     }
-    var byte: u8 = data[0];
-    var camera: bool = (byte &0x04u8) != 0u8;
-    var flip: bool = (byte & 0x02u8) != 0u8;
-    var rotation_id: u8 = byte & 0x03u8;
-    var rotation: u16 = switch (rotation_id) {
-        0u8 =>0u16,
-1u8=> 90u16,
-        2u8 =>180u16,
-        3u8 => 270u16,
-else => 0u16,
-    };
+
+    const byte: u8 = data[0];
+    const camera: bool = (byte & 0x04u8) != 0u8;
+    const flip: bool = (byte & 0x02u8) != 0u8;
+    const rotation_id: u8 = byte & 0x03u8;
+    var rotation: u16 = 0u16;
+    if rotation_id == 1u8 {
+        rotation = 90u16;
+    } else if rotation_id == 2u8 {
+        rotation = 180u16;
+    } else if rotation_id == 3u8 {
+        rotation = 270u16;
+    }
+
     return VideoOrientationExtension{
-camera: camera,
-        flip:flip,
-rotation: rotation,
+        camera: camera,
+        flip: flip,
+        rotation: rotation,
     };
 }
 
-export fnrtp_extension_video_orientation_write(ext:&VideoOrientationExtension, buffer: &[byte]) !usize{
-    ifbuffer.len< 1usize {
+export fn rtp_extension_video_orientation_write(ext: &VideoOrientationExtension, buffer: &[byte]) !usize {
+    if buffer.len < 1usize {
         return error.VideoOrientationExtensionInvalid;
     }
+
     var byte: u8 = 0u8;
     if ext.camera {
         byte = byte | 0x04u8;
@@ -144,32 +176,37 @@ export fnrtp_extension_video_orientation_write(ext:&VideoOrientationExtension, b
     if ext.flip {
         byte = byte | 0x02u8;
     }
-    var rotation_id: u8 = switch (ext.rotation) {
-        0u16 => 0u8,
-90u16 =>1u8,
-        180u16 => 2u8,
-        270u16=> 3u8,
-else => 0u8,
-    };
-byte = byte |rotation_id;
+
+    var rotation_id: u8 = 0u8;
+    if ext.rotation == 90u16 {
+        rotation_id = 1u8;
+    } else if ext.rotation == 180u16 {
+        rotation_id = 2u8;
+    } else if ext.rotation == 270u16 {
+        rotation_id = 3u8;
+    }
+
+    byte = byte | rotation_id;
     buffer[0] = byte;
-    return1usize;
+    return 1usize;
 }
 
 // playout-delay extension (draft-ietf-perc-double-encrypt)
-export structPlayoutDelayExtension{
+export struct PlayoutDelayExtension {
     min_delay: u32 = 0u32,
-    max_delay: u32= 0u32,
+    max_delay: u32 = 0u32,
 }
 
-export fnrtp_extension_playout_delay_parse(data: &[byte])!PlayoutDelayExtension {
-if data.len< 3usize {
+export fn rtp_extension_playout_delay_parse(data: &[byte]) !PlayoutDelayExtension {
+    if data.len < 3usize {
         return error.PlayoutDelayExtensionInvalid;
     }
+
     var min_delay: u32 = ((data[0] as u32) << 4) | ((data[1] as u32) >> 4);
-    varmax_delay: u32 = ((data[1] as u32) & 0x0Fu32) << 8 | (data[2] as u32);
+    var max_delay: u32 = (((data[1] as u32) & 0x0Fu32) << 8) | (data[2] as u32);
     min_delay = min_delay * 10u32;
     max_delay = max_delay * 10u32;
+
     return PlayoutDelayExtension{
         min_delay: min_delay,
         max_delay: max_delay,
@@ -177,13 +214,14 @@ if data.len< 3usize {
 }
 
 export fn rtp_extension_playout_delay_write(ext: &PlayoutDelayExtension, buffer: &[byte]) !usize {
-    if buffer.len< 3usize {
+    if buffer.len < 3usize {
         return error.PlayoutDelayExtensionInvalid;
     }
-    var min_delay: u32 = ext.min_delay / 10u32;
-    var max_delay: u32 = ext.max_delay / 10u32;
-    buffer[0] = ((min_delay >>4) &0xFFu32) as u8;
-    buffer[1] =(((min_delay &0x0Fu32)<< 4) | ((max_delay >> 8)& 0x0Fu32)) as u8;
-    buffer[2] =(max_delay &0xFFu32) asu8;
+
+    const min_delay: u32 = ext.min_delay / 10u32;
+    const max_delay: u32 = ext.max_delay / 10u32;
+    buffer[0] = ((min_delay >> 4) & 0xFFu32) as u8;
+    buffer[1] = (((min_delay & 0x0Fu32) << 4) | ((max_delay >> 8) & 0x0Fu32)) as u8;
+    buffer[2] = (max_delay & 0xFFu32) as u8;
     return 3usize;
 }
