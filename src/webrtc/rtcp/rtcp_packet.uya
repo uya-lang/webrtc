@@ -1,0 +1,314 @@
+// webrtc.rtcp.rtcp_packet - RTCP SR/RR parser/writer
+// Module: src/webrtc/rtcp/rtcp_packet.uya -> use webrtc.rtcp.rtcp_packet;
+
+use webrtc.binary;
+
+export error RtcpPacketTooSmall;
+export error RtcpInvalidVersion;
+export error RtcpInvalidPacketType;
+export error RtcpInvalidLength;
+export error RtcpInvalidPadding;
+export error RtcpTooManyReportBlocks;
+export error RtcpBufferTooSmall;
+export error RtcpRttInvalid;
+
+export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
+export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
+export const RTCP_MAX_REPORT_BLOCKS: usize = 31usize;
+
+const RTCP_VERSION: u8 = 2u8;
+const RTCP_HEADER_BYTES: usize = 4usize;
+const RTCP_SR_SENDER_INFO_BYTES: usize = 24usize;
+const RTCP_RR_SENDER_SSRC_BYTES: usize = 4usize;
+const RTCP_REPORT_BLOCK_BYTES: usize = 24usize;
+const RTCP_COMPACT_NTP_SCALE: u32 = 65536u32;
+
+struct RtcpParseHeader {
+    count: u8 = 0u8,
+    packet_len: usize = 0usize,
+    effective_len: usize = 0usize,
+}
+
+export struct RtcpReportBlock {
+    ssrc: u32 = 0u32,
+    fraction_lost: u8 = 0u8,
+    cumulative_lost: u32 = 0u32,
+    highest_seq: u32 = 0u32,
+    jitter: u32 = 0u32,
+    lsr: u32 = 0u32,
+    dlsr: u32 = 0u32,
+}
+
+export struct RtcpSenderReport {
+    sender_ssrc: u32 = 0u32,
+    ntp_msw: u32 = 0u32,
+    ntp_lsw: u32 = 0u32,
+    rtp_timestamp: u32 = 0u32,
+    packet_count: u32 = 0u32,
+    octet_count: u32 = 0u32,
+    report_count: u8 = 0u8,
+    report_blocks: [RtcpReportBlock: RTCP_MAX_REPORT_BLOCKS] = [],
+}
+
+export struct RtcpReceiverReport {
+    sender_ssrc: u32 = 0u32,
+    report_count: u8 = 0u8,
+    report_blocks: [RtcpReportBlock: RTCP_MAX_REPORT_BLOCKS] = [],
+}
+
+fn rtcp_read_u24(src: &[byte]) !u32 {
+    if src.len < 3usize {
+        return error.RtcpInvalidLength;
+    }
+    return ((src[0] as u32) << 16) | ((src[1] as u32) << 8) | (src[2] as u32);
+}
+
+fn rtcp_write_u24(dst: &[byte], value: u32) !void {
+    if dst.len < 3usize {
+        return error.RtcpBufferTooSmall;
+    }
+    if value > 0x00FFFFFFu32 {
+        return error.RtcpInvalidLength;
+    }
+    dst[0] = ((value >> 16) & 0xFFu32) as u8;
+    dst[1] = ((value >> 8) & 0xFFu32) as u8;
+    dst[2] = (value & 0xFFu32) as u8;
+}
+
+fn rtcp_parse_header(packet: &[byte], expected_packet_type: u8) !RtcpParseHeader {
+    if packet.len < RTCP_HEADER_BYTES {
+        return error.RtcpPacketTooSmall;
+    }
+
+    const first: u8 = packet[0];
+    const version: u8 = (first >> 6i32) & 0x03u8;
+    if version != RTCP_VERSION {
+        return error.RtcpInvalidVersion;
+    }
+
+    const packet_type: u8 = packet[1];
+    if packet_type != expected_packet_type {
+        return error.RtcpInvalidPacketType;
+    }
+
+    const length_words_minus_one: usize = (try read_be_u16(packet[2:2])) as usize;
+    const packet_len: usize = (length_words_minus_one + 1usize) * 4usize;
+    if packet_len < RTCP_HEADER_BYTES || packet_len > packet.len {
+        return error.RtcpInvalidLength;
+    }
+    if packet_len != packet.len {
+        return error.RtcpInvalidLength;
+    }
+
+    const padding: bool = ((first >> 5i32) & 0x01u8) != 0u8;
+    var effective_len: usize = packet_len;
+    if padding {
+        const pad_size: usize = packet[packet_len - 1usize] as usize;
+        if pad_size == 0usize || pad_size > (packet_len - RTCP_HEADER_BYTES) {
+            return error.RtcpInvalidPadding;
+        }
+        effective_len = packet_len - pad_size;
+    }
+
+    return RtcpParseHeader{
+        count: first & 0x1Fu8,
+        packet_len: packet_len,
+        effective_len: effective_len,
+    };
+}
+
+fn rtcp_parse_report_blocks(
+    packet: &[byte],
+    offset: usize,
+    report_count: u8,
+    report_blocks: &[RtcpReportBlock],
+) !usize {
+    if (report_count as usize) > RTCP_MAX_REPORT_BLOCKS {
+        return error.RtcpTooManyReportBlocks;
+    }
+
+    const blocks_len: usize = (report_count as usize) * RTCP_REPORT_BLOCK_BYTES;
+    if offset + blocks_len > packet.len {
+        return error.RtcpInvalidLength;
+    }
+
+    var index: usize = 0usize;
+    while index < (report_count as usize) {
+        const block_offset: usize = offset + (index * RTCP_REPORT_BLOCK_BYTES);
+        report_blocks[index].ssrc = try read_be_u32(packet[block_offset:4]);
+        report_blocks[index].fraction_lost = packet[block_offset + 4usize];
+        report_blocks[index].cumulative_lost = try rtcp_read_u24(packet[block_offset + 5usize:3]);
+        report_blocks[index].highest_seq = try read_be_u32(packet[block_offset + 8usize:4]);
+        report_blocks[index].jitter = try read_be_u32(packet[block_offset + 12usize:4]);
+        report_blocks[index].lsr = try read_be_u32(packet[block_offset + 16usize:4]);
+        report_blocks[index].dlsr = try read_be_u32(packet[block_offset + 20usize:4]);
+        index = index + 1usize;
+    }
+
+    return offset + blocks_len;
+}
+
+fn rtcp_write_report_blocks(
+    report_blocks: &[RtcpReportBlock],
+    report_count: u8,
+    buffer: &[byte],
+    offset: usize,
+) !usize {
+    if (report_count as usize) > RTCP_MAX_REPORT_BLOCKS {
+        return error.RtcpTooManyReportBlocks;
+    }
+
+    const blocks_len: usize = (report_count as usize) * RTCP_REPORT_BLOCK_BYTES;
+    if offset + blocks_len > buffer.len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < (report_count as usize) {
+        const block_offset: usize = offset + (index * RTCP_REPORT_BLOCK_BYTES);
+        const block: &RtcpReportBlock = &report_blocks[index];
+
+        try write_be_u32(buffer[block_offset:4], block.ssrc);
+        buffer[block_offset + 4usize] = block.fraction_lost;
+        try rtcp_write_u24(buffer[block_offset + 5usize:3], block.cumulative_lost);
+        try write_be_u32(buffer[block_offset + 8usize:4], block.highest_seq);
+        try write_be_u32(buffer[block_offset + 12usize:4], block.jitter);
+        try write_be_u32(buffer[block_offset + 16usize:4], block.lsr);
+        try write_be_u32(buffer[block_offset + 20usize:4], block.dlsr);
+
+        index = index + 1usize;
+    }
+
+    return offset + blocks_len;
+}
+
+export fn rtcp_sender_report_make() RtcpSenderReport {
+    return RtcpSenderReport{};
+}
+
+export fn rtcp_receiver_report_make() RtcpReceiverReport {
+    return RtcpReceiverReport{};
+}
+
+export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_SR);
+
+    var report: RtcpSenderReport = rtcp_sender_report_make();
+    report.report_count = header.count;
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    if offset + RTCP_SR_SENDER_INFO_BYTES > header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+
+    report.sender_ssrc = try read_be_u32(packet[offset:4]);
+    report.ntp_msw = try read_be_u32(packet[offset + 4usize:4]);
+    report.ntp_lsw = try read_be_u32(packet[offset + 8usize:4]);
+    report.rtp_timestamp = try read_be_u32(packet[offset + 12usize:4]);
+    report.packet_count = try read_be_u32(packet[offset + 16usize:4]);
+    report.octet_count = try read_be_u32(packet[offset + 20usize:4]);
+    offset = offset + RTCP_SR_SENDER_INFO_BYTES;
+
+    offset = try rtcp_parse_report_blocks(packet[0:header.effective_len], offset, report.report_count, report.report_blocks[0:RTCP_MAX_REPORT_BLOCKS]);
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+
+    return report;
+}
+
+export fn rtcp_sender_report_write(report: &RtcpSenderReport, buffer: &[byte]) !usize {
+    if report == null {
+        return error.RtcpInvalidLength;
+    }
+    if (report.report_count as usize) > RTCP_MAX_REPORT_BLOCKS {
+        return error.RtcpTooManyReportBlocks;
+    }
+
+    const total_len: usize = RTCP_HEADER_BYTES
+        + RTCP_SR_SENDER_INFO_BYTES
+        + ((report.report_count as usize) * RTCP_REPORT_BLOCK_BYTES);
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (report.report_count & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_SR;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    try write_be_u32(buffer[offset:4], report.sender_ssrc);
+    try write_be_u32(buffer[offset + 4usize:4], report.ntp_msw);
+    try write_be_u32(buffer[offset + 8usize:4], report.ntp_lsw);
+    try write_be_u32(buffer[offset + 12usize:4], report.rtp_timestamp);
+    try write_be_u32(buffer[offset + 16usize:4], report.packet_count);
+    try write_be_u32(buffer[offset + 20usize:4], report.octet_count);
+    offset = offset + RTCP_SR_SENDER_INFO_BYTES;
+
+    offset = try rtcp_write_report_blocks(report.report_blocks[0:RTCP_MAX_REPORT_BLOCKS], report.report_count, buffer, offset);
+    return offset;
+}
+
+export fn rtcp_receiver_report_parse(packet: &[byte]) !RtcpReceiverReport {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_RR);
+
+    var report: RtcpReceiverReport = rtcp_receiver_report_make();
+    report.report_count = header.count;
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    if offset + RTCP_RR_SENDER_SSRC_BYTES > header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+
+    report.sender_ssrc = try read_be_u32(packet[offset:4]);
+    offset = offset + RTCP_RR_SENDER_SSRC_BYTES;
+
+    offset = try rtcp_parse_report_blocks(packet[0:header.effective_len], offset, report.report_count, report.report_blocks[0:RTCP_MAX_REPORT_BLOCKS]);
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+
+    return report;
+}
+
+export fn rtcp_receiver_report_write(report: &RtcpReceiverReport, buffer: &[byte]) !usize {
+    if report == null {
+        return error.RtcpInvalidLength;
+    }
+    if (report.report_count as usize) > RTCP_MAX_REPORT_BLOCKS {
+        return error.RtcpTooManyReportBlocks;
+    }
+
+    const total_len: usize = RTCP_HEADER_BYTES
+        + RTCP_RR_SENDER_SSRC_BYTES
+        + ((report.report_count as usize) * RTCP_REPORT_BLOCK_BYTES);
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (report.report_count & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_RR;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    try write_be_u32(buffer[offset:4], report.sender_ssrc);
+    offset = offset + RTCP_RR_SENDER_SSRC_BYTES;
+
+    offset = try rtcp_write_report_blocks(report.report_blocks[0:RTCP_MAX_REPORT_BLOCKS], report.report_count, buffer, offset);
+    return offset;
+}
+
+export fn rtcp_report_rtt_ticks(arrival_compact_ntp: u32, lsr: u32, dlsr: u32) !u32 {
+    const floor: u32 = lsr + dlsr;
+    if arrival_compact_ntp <= floor {
+        return error.RtcpRttInvalid;
+    }
+    return arrival_compact_ntp - floor;
+}
+
+export fn rtcp_report_rtt_ms(arrival_compact_ntp: u32, lsr: u32, dlsr: u32) !u32 {
+    const ticks: u32 = try rtcp_report_rtt_ticks(arrival_compact_ntp, lsr, dlsr);
+    return ((ticks as u64) * 1000u64 / (RTCP_COMPACT_NTP_SCALE as u64)) as u32;
+}

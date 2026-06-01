@@ -1,0 +1,158 @@
+use libc.printf;
+use webrtc.rtcp.rtcp_packet;
+
+fn check_parse_minimal_sr_rr() i32 {
+    var sr_bytes: [byte: 28] = [
+        0x80 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x02 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    const sr: !RtcpSenderReport = rtcp_sender_report_parse(sr_bytes[0:28]);
+    if sr.error_id != 0 {
+        return 10i32;
+    }
+    if sr.value.sender_ssrc != 0x11223344u32 || sr.value.report_count != 0u8 {
+        return 11i32;
+    }
+    if sr.value.packet_count != 4u32 || sr.value.octet_count != 5u32 {
+        return 12i32;
+    }
+
+    var rr_bytes: [byte: 8] = [
+        0x80 as byte, 0xC9 as byte, 0x00 as byte, 0x01 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+    ];
+    const rr: !RtcpReceiverReport = rtcp_receiver_report_parse(rr_bytes[0:8]);
+    if rr.error_id != 0 {
+        return 13i32;
+    }
+    if rr.value.sender_ssrc != 0x11223344u32 || rr.value.report_count != 0u8 {
+        return 14i32;
+    }
+
+    return 0i32;
+}
+
+fn check_sr_rr_roundtrip_with_report_block() i32 {
+    var sr: RtcpSenderReport = rtcp_sender_report_make();
+    sr.sender_ssrc = 0x11112222u32;
+    sr.ntp_msw = 0x01020304u32;
+    sr.ntp_lsw = 0x05060708u32;
+    sr.rtp_timestamp = 0x090A0B0Cu32;
+    sr.packet_count = 10u32;
+    sr.octet_count = 20u32;
+    sr.report_count = 1u8;
+    sr.report_blocks[0].ssrc = 0x33334444u32;
+    sr.report_blocks[0].fraction_lost = 9u8;
+    sr.report_blocks[0].cumulative_lost = 0x00010203u32;
+    sr.report_blocks[0].highest_seq = 0x10111213u32;
+    sr.report_blocks[0].jitter = 0x20212223u32;
+    sr.report_blocks[0].lsr = 0x30313233u32;
+    sr.report_blocks[0].dlsr = 0x40414243u32;
+
+    var sr_buf: [byte: 80] = [];
+    const sr_written: !usize = rtcp_sender_report_write(&sr, sr_buf[0:80]);
+    if sr_written.error_id != 0 || sr_written.value != 52usize {
+        return 20i32;
+    }
+
+    const sr_parsed: !RtcpSenderReport = rtcp_sender_report_parse(sr_buf[0:sr_written.value]);
+    if sr_parsed.error_id != 0 {
+        return 21i32;
+    }
+    if sr_parsed.value.report_count != 1u8 || sr_parsed.value.report_blocks[0].ssrc != 0x33334444u32 {
+        return 22i32;
+    }
+    if sr_parsed.value.report_blocks[0].cumulative_lost != 0x00010203u32 {
+        return 23i32;
+    }
+
+    var rr: RtcpReceiverReport = rtcp_receiver_report_make();
+    rr.sender_ssrc = 0xABCD1234u32;
+    rr.report_count = 1u8;
+    rr.report_blocks[0] = sr.report_blocks[0];
+
+    var rr_buf: [byte: 64] = [];
+    const rr_written: !usize = rtcp_receiver_report_write(&rr, rr_buf[0:64]);
+    if rr_written.error_id != 0 || rr_written.value != 32usize {
+        return 24i32;
+    }
+
+    const rr_parsed: !RtcpReceiverReport = rtcp_receiver_report_parse(rr_buf[0:rr_written.value]);
+    if rr_parsed.error_id != 0 {
+        return 25i32;
+    }
+    if rr_parsed.value.report_count != 1u8 || rr_parsed.value.report_blocks[0].jitter != 0x20212223u32 {
+        return 26i32;
+    }
+
+    return 0i32;
+}
+
+fn check_error_and_rtt_paths() i32 {
+    var bad_version_sr: [byte: 28] = [
+        0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x02 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    const bad_version: !RtcpSenderReport = rtcp_sender_report_parse(bad_version_sr[0:28]);
+    if bad_version.error_id != @error_id(error.RtcpInvalidVersion) {
+        return 30i32;
+    }
+
+    var short_buf: [byte: 7] = [];
+    var rr: RtcpReceiverReport = rtcp_receiver_report_make();
+    rr.sender_ssrc = 1u32;
+    const short_write: !usize = rtcp_receiver_report_write(&rr, short_buf[0:7]);
+    if short_write.error_id != @error_id(error.RtcpBufferTooSmall) {
+        return 31i32;
+    }
+
+    const rtt_ticks: !u32 = rtcp_report_rtt_ticks(50000u32, 10000u32, 20000u32);
+    if rtt_ticks.error_id != 0 || rtt_ticks.value != 20000u32 {
+        return 32i32;
+    }
+
+    const rtt_ms: !u32 = rtcp_report_rtt_ms(50000u32, 10000u32, 20000u32);
+    if rtt_ms.error_id != 0 || rtt_ms.value != 305u32 {
+        return 33i32;
+    }
+
+    const bad_rtt: !u32 = rtcp_report_rtt_ticks(30000u32, 20000u32, 10000u32);
+    if bad_rtt.error_id != @error_id(error.RtcpRttInvalid) {
+        return 34i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_parse_minimal_sr_rr();
+    if result != 0i32 {
+        printf("RTCP SR/RR tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sr_rr_roundtrip_with_report_block();
+    if result != 0i32 {
+        printf("RTCP SR/RR tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR tests passed\n");
+    return 0i32;
+}
