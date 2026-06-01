@@ -274,7 +274,7 @@
 - [x] 实现 RTP sender sequence/timestamp。
 - [x] 实现 RTP receiver SSRC/MID route。
 - [x] 实现 RTCP SR/RR。
-- [ ] 实现 RTCP SDES CNAME。
+- [x] 实现 RTCP SDES CNAME。
 - [ ] 实现 RTCP BYE。
 - [ ] 实现 RTCP NACK。
 - [ ] 实现 RTCP PLI。

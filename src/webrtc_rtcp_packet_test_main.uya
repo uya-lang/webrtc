@@ -93,6 +93,48 @@ fn check_sr_rr_roundtrip_with_report_block() i32 {
     return 0i32;
 }
 
+fn check_sdes_parse_and_roundtrip() i32 {
+    var sdes_packet: [byte: 16] = [
+        0x81 as byte, 0xCA as byte, 0x00 as byte, 0x03 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x01 as byte, 0x05 as byte,
+        'a' as byte, 'l' as byte, 'i' as byte, 'c' as byte, 'e' as byte,
+        0x00 as byte,
+    ];
+    const parsed: !RtcpSdesPacket = rtcp_sdes_parse(sdes_packet[0:16]);
+    if parsed.error_id != 0 {
+        return 30i32;
+    }
+    if parsed.value.chunk_count != 1u8 {
+        return 31i32;
+    }
+    if parsed.value.chunks[0].ssrc != 0x11223344u32 {
+        return 32i32;
+    }
+    if !parsed.value.chunks[0].has_cname || parsed.value.chunks[0].cname_len != 5usize {
+        return 33i32;
+    }
+    if parsed.value.chunks[0].cname[0] != 'a' as byte || parsed.value.chunks[0].cname[4] != 'e' as byte {
+        return 34i32;
+    }
+
+    var out: [byte: 32] = [];
+    const written: !usize = rtcp_sdes_write(&parsed.value, out[0:32]);
+    if written.error_id != 0 || written.value != 16usize {
+        return 35i32;
+    }
+
+    const reparsed: !RtcpSdesPacket = rtcp_sdes_parse(out[0:written.value]);
+    if reparsed.error_id != 0 {
+        return 36i32;
+    }
+    if reparsed.value.chunks[0].cname_len != 5usize || reparsed.value.chunks[0].cname[1] != 'l' as byte {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
 fn check_error_and_rtt_paths() i32 {
     var bad_version_sr: [byte: 28] = [
         0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
@@ -128,7 +170,28 @@ fn check_error_and_rtt_paths() i32 {
 
     const bad_rtt: !u32 = rtcp_report_rtt_ticks(30000u32, 20000u32, 10000u32);
     if bad_rtt.error_id != @error_id(error.RtcpRttInvalid) {
-        return 34i32;
+        return 44i32;
+    }
+
+    var bad_sdes_no_cname: RtcpSdesPacket = rtcp_sdes_packet_make();
+    bad_sdes_no_cname.chunk_count = 1u8;
+    bad_sdes_no_cname.chunks[0].ssrc = 0x99887766u32;
+    var sdes_out: [byte: 32] = [];
+    const missing_cname: !usize = rtcp_sdes_write(&bad_sdes_no_cname, sdes_out[0:32]);
+    if missing_cname.error_id != @error_id(error.RtcpSdesCnameRequired) {
+        return 45i32;
+    }
+
+    var bad_sdes_padding: [byte: 20] = [
+        0x81 as byte, 0xCA as byte, 0x00 as byte, 0x04 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x01 as byte, 0x06 as byte,
+        'a' as byte, 'l' as byte, 'i' as byte, 'c' as byte, 'e' as byte, 'x' as byte,
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const bad_padding_parse: !RtcpSdesPacket = rtcp_sdes_parse(bad_sdes_padding[0:20]);
+    if bad_padding_parse.error_id != @error_id(error.RtcpInvalidPadding) {
+        return 46i32;
     }
 
     return 0i32;
@@ -147,12 +210,18 @@ fn main() i32 {
         return 1i32;
     }
 
-    result = check_error_and_rtt_paths();
+    result = check_sdes_parse_and_roundtrip();
     if result != 0i32 {
-        printf("RTCP SR/RR tests failed: %d\n", result);
+        printf("RTCP SDES tests failed: %d\n", result);
         return 1i32;
     }
 
-    printf("RTCP SR/RR tests passed\n");
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR/SDES tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR/SDES tests passed\n");
     return 0i32;
 }

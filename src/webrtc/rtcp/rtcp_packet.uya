@@ -11,10 +11,18 @@ export error RtcpInvalidPadding;
 export error RtcpTooManyReportBlocks;
 export error RtcpBufferTooSmall;
 export error RtcpRttInvalid;
+export error RtcpSdesTooManyChunks;
+export error RtcpSdesInvalidChunk;
+export error RtcpSdesInvalidItem;
+export error RtcpSdesCnameRequired;
+export error RtcpSdesCnameTooLong;
 
 export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
 export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
+export const RTCP_PACKET_TYPE_SDES: u8 = 202u8;
 export const RTCP_MAX_REPORT_BLOCKS: usize = 31usize;
+export const RTCP_MAX_SDES_CHUNKS: usize = 31usize;
+export const RTCP_MAX_SDES_CNAME_BYTES: usize = 255usize;
 
 const RTCP_VERSION: u8 = 2u8;
 const RTCP_HEADER_BYTES: usize = 4usize;
@@ -22,6 +30,8 @@ const RTCP_SR_SENDER_INFO_BYTES: usize = 24usize;
 const RTCP_RR_SENDER_SSRC_BYTES: usize = 4usize;
 const RTCP_REPORT_BLOCK_BYTES: usize = 24usize;
 const RTCP_COMPACT_NTP_SCALE: u32 = 65536u32;
+const RTCP_SDES_ITEM_END: u8 = 0u8;
+const RTCP_SDES_ITEM_CNAME: u8 = 1u8;
 
 struct RtcpParseHeader {
     count: u8 = 0u8,
@@ -56,6 +66,18 @@ export struct RtcpReceiverReport {
     report_blocks: [RtcpReportBlock: RTCP_MAX_REPORT_BLOCKS] = [],
 }
 
+export struct RtcpSdesChunk {
+    ssrc: u32 = 0u32,
+    has_cname: bool = false,
+    cname: [byte: RTCP_MAX_SDES_CNAME_BYTES] = [],
+    cname_len: usize = 0usize,
+}
+
+export struct RtcpSdesPacket {
+    chunk_count: u8 = 0u8,
+    chunks: [RtcpSdesChunk: RTCP_MAX_SDES_CHUNKS] = [],
+}
+
 fn rtcp_read_u24(src: &[byte]) !u32 {
     if src.len < 3usize {
         return error.RtcpInvalidLength;
@@ -73,6 +95,17 @@ fn rtcp_write_u24(dst: &[byte], value: u32) !void {
     dst[0] = ((value >> 16) & 0xFFu32) as u8;
     dst[1] = ((value >> 8) & 0xFFu32) as u8;
     dst[2] = (value & 0xFFu32) as u8;
+}
+
+fn rtcp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.RtcpInvalidLength;
+    }
+    var i: usize = 0usize;
+    while i < len {
+        dst[i] = src[i];
+        i = i + 1usize;
+    }
 }
 
 fn rtcp_parse_header(packet: &[byte], expected_packet_type: u8) !RtcpParseHeader {
@@ -190,6 +223,10 @@ export fn rtcp_receiver_report_make() RtcpReceiverReport {
     return RtcpReceiverReport{};
 }
 
+export fn rtcp_sdes_packet_make() RtcpSdesPacket {
+    return RtcpSdesPacket{};
+}
+
 export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
     const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_SR);
 
@@ -297,6 +334,161 @@ export fn rtcp_receiver_report_write(report: &RtcpReceiverReport, buffer: &[byte
     offset = offset + RTCP_RR_SENDER_SSRC_BYTES;
 
     offset = try rtcp_write_report_blocks(report.report_blocks[0:RTCP_MAX_REPORT_BLOCKS], report.report_count, buffer, offset);
+    return offset;
+}
+
+export fn rtcp_sdes_parse(packet: &[byte]) !RtcpSdesPacket {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_SDES);
+    if (header.count as usize) > RTCP_MAX_SDES_CHUNKS {
+        return error.RtcpSdesTooManyChunks;
+    }
+
+    var sdes: RtcpSdesPacket = rtcp_sdes_packet_make();
+    sdes.chunk_count = header.count;
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    var chunk_index: usize = 0usize;
+    while chunk_index < (sdes.chunk_count as usize) {
+        if offset + 4usize > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+
+        sdes.chunks[chunk_index].ssrc = try read_be_u32(packet[offset:4]);
+        sdes.chunks[chunk_index].has_cname = false;
+        sdes.chunks[chunk_index].cname_len = 0usize;
+        offset = offset + 4usize;
+
+        while true {
+            if offset >= header.effective_len {
+                return error.RtcpInvalidLength;
+            }
+
+            const item_type: u8 = packet[offset];
+            offset = offset + 1usize;
+            if item_type == RTCP_SDES_ITEM_END {
+                break;
+            }
+
+            if offset >= header.effective_len {
+                return error.RtcpInvalidLength;
+            }
+            const item_len: usize = packet[offset] as usize;
+            offset = offset + 1usize;
+            if offset + item_len > header.effective_len {
+                return error.RtcpInvalidLength;
+            }
+
+            if item_type == RTCP_SDES_ITEM_CNAME {
+                if item_len == 0usize {
+                    return error.RtcpSdesInvalidItem;
+                }
+                if item_len > RTCP_MAX_SDES_CNAME_BYTES {
+                    return error.RtcpSdesCnameTooLong;
+                }
+                if sdes.chunks[chunk_index].has_cname {
+                    return error.RtcpSdesInvalidItem;
+                }
+
+                try rtcp_copy_bytes(
+                    sdes.chunks[chunk_index].cname[0:RTCP_MAX_SDES_CNAME_BYTES],
+                    packet[offset:item_len],
+                    item_len,
+                );
+                sdes.chunks[chunk_index].cname_len = item_len;
+                sdes.chunks[chunk_index].has_cname = true;
+            }
+
+            offset = offset + item_len;
+        }
+
+        const padding: usize = (4usize - (offset % 4usize)) % 4usize;
+        if offset + padding > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+        var pad_index: usize = 0usize;
+        while pad_index < padding {
+            if packet[offset + pad_index] != 0u8 {
+                return error.RtcpInvalidPadding;
+            }
+            pad_index = pad_index + 1usize;
+        }
+        offset = offset + padding;
+
+        chunk_index = chunk_index + 1usize;
+    }
+
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+    return sdes;
+}
+
+export fn rtcp_sdes_write(sdes: &RtcpSdesPacket, buffer: &[byte]) !usize {
+    if sdes == null {
+        return error.RtcpSdesInvalidChunk;
+    }
+    if (sdes.chunk_count as usize) > RTCP_MAX_SDES_CHUNKS {
+        return error.RtcpSdesTooManyChunks;
+    }
+
+    var total_len: usize = RTCP_HEADER_BYTES;
+    var chunk_index: usize = 0usize;
+    while chunk_index < (sdes.chunk_count as usize) {
+        const chunk: &RtcpSdesChunk = &sdes.chunks[chunk_index];
+        if !chunk.has_cname || chunk.cname_len == 0usize {
+            return error.RtcpSdesCnameRequired;
+        }
+        if chunk.cname_len > RTCP_MAX_SDES_CNAME_BYTES {
+            return error.RtcpSdesCnameTooLong;
+        }
+
+        var chunk_len: usize = 4usize + 2usize + chunk.cname_len + 1usize;
+        const padding: usize = (4usize - (chunk_len % 4usize)) % 4usize;
+        chunk_len = chunk_len + padding;
+        total_len = total_len + chunk_len;
+        chunk_index = chunk_index + 1usize;
+    }
+
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (sdes.chunk_count & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_SDES;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    chunk_index = 0usize;
+    while chunk_index < (sdes.chunk_count as usize) {
+        const chunk: &RtcpSdesChunk = &sdes.chunks[chunk_index];
+        try write_be_u32(buffer[offset:4], chunk.ssrc);
+        offset = offset + 4usize;
+
+        buffer[offset] = RTCP_SDES_ITEM_CNAME;
+        buffer[offset + 1usize] = chunk.cname_len as u8;
+        offset = offset + 2usize;
+        try rtcp_copy_bytes(
+            buffer[offset:chunk.cname_len],
+            chunk.cname[0:RTCP_MAX_SDES_CNAME_BYTES],
+            chunk.cname_len,
+        );
+        offset = offset + chunk.cname_len;
+
+        buffer[offset] = RTCP_SDES_ITEM_END;
+        offset = offset + 1usize;
+
+        const padding: usize = (4usize - (offset % 4usize)) % 4usize;
+        var pad_index: usize = 0usize;
+        while pad_index < padding {
+            buffer[offset + pad_index] = 0u8;
+            pad_index = pad_index + 1usize;
+        }
+        offset = offset + padding;
+
+        chunk_index = chunk_index + 1usize;
+    }
+
     return offset;
 }
 

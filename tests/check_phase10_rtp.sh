@@ -50,6 +50,8 @@ rg -q "export fn rtcp_sender_report_parse" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_sender_report_write" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_receiver_report_parse" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_receiver_report_write" src/webrtc/rtcp/rtcp_packet.uya
+rg -q "export fn rtcp_sdes_parse" src/webrtc/rtcp/rtcp_packet.uya
+rg -q "export fn rtcp_sdes_write" src/webrtc/rtcp/rtcp_packet.uya
 rg -q "export fn rtcp_report_rtt_ms" src/webrtc/rtcp/rtcp_packet.uya
 rg -q '"bench_rtp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 rg -q '"bench_rtp_extension_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
