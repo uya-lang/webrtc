@@ -1238,6 +1238,17 @@ def parse_todo(todo_file):
     return tasks
 
 
+def todo_has_in_progress_tasks(tasks):
+    if not tasks:
+        return False
+
+    for task in tasks:
+        if isinstance(task, dict) and task.get("in_progress_in_file"):
+            return True
+
+    return False
+
+
 def choose_runnable_tasks(tasks, state):
     runnable = []
 
@@ -2614,21 +2625,26 @@ def recovery_task_list(pending_commit):
     ]
 
 
-def run_pending_commit_recovery(paths, state):
+def run_pending_commit_recovery(paths, state, allow_last_session=None):
     pending_commit = ensure_pending_commit(state)
     pending_commit["attempts"] = pending_commit.get("attempts", 0) + 1
     pending_commit["updated_at"] = now()
 
+    if allow_last_session is None:
+        allow_last_session = todo_has_in_progress_tasks(parse_todo(paths["todo_file"]))
+
     recovery_tasks = recovery_task_list(pending_commit)
     recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
     batch_head_before = git_head_commit(paths["root"])
-    resume_session_id = resolve_resume_session_id(
-        paths["root"],
-        state,
-        paths["log_dir"],
-        task_texts=pending_commit.get("tasks", []) or pending_commit.get("toolchain_bug_reports", []),
-        allow_any_known_session=True,
-    )
+    resume_session_id = None
+    if allow_last_session:
+        resume_session_id = resolve_resume_session_id(
+            paths["root"],
+            state,
+            paths["log_dir"],
+            task_texts=pending_commit.get("tasks", []) or pending_commit.get("toolchain_bug_reports", []),
+            allow_any_known_session=True,
+        )
     state["current"] = {
         "project_root": path_label(paths["root"], paths["root"]),
         "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -2710,7 +2726,7 @@ def run_pending_commit_recovery(paths, state):
     return False
 
 
-def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
+def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks, allow_last_session=None):
     dirty_lines = git_status_lines(paths["root"])
     if not dirty_lines:
         return True
@@ -2718,13 +2734,18 @@ def run_dirty_worktree_recovery(paths, state, runnable_tasks, exhausted_tasks):
     recovery_tasks = list(runnable_tasks)
     recovery_log_file = make_log_file(paths["log_dir"], recovery_tasks)
     batch_head_before = git_head_commit(paths["root"])
-    resume_session_id = resolve_resume_session_id(
-        paths["root"],
-        state,
-        paths["log_dir"],
-        task_texts=[task["text"] for task in recovery_tasks],
-        allow_any_known_session=True,
-    )
+    if allow_last_session is None:
+        allow_last_session = todo_has_in_progress_tasks(recovery_tasks)
+
+    resume_session_id = None
+    if allow_last_session:
+        resume_session_id = resolve_resume_session_id(
+            paths["root"],
+            state,
+            paths["log_dir"],
+            task_texts=[task["text"] for task in recovery_tasks],
+            allow_any_known_session=True,
+        )
     state["current"] = {
         "project_root": path_label(paths["root"], paths["root"]),
         "todo_file": todo_label(paths["root"], paths["todo_file"]),
@@ -2955,8 +2976,14 @@ def main():
             if reconcile_state_with_todo(state, tasks_before):
                 save_state(paths["state_file"], state)
 
+            allow_last_session = todo_has_in_progress_tasks(tasks_before)
+
             if git_repo and isinstance(state.get("pending_commit"), dict):
-                recovered = run_pending_commit_recovery(paths, state)
+                recovered = run_pending_commit_recovery(
+                    paths,
+                    state,
+                    allow_last_session=allow_last_session,
+                )
                 if recovered:
                     continue
 
@@ -2969,7 +2996,13 @@ def main():
             recovery_tasks = current_batch_tasks(state, tasks_before) or list(runnable_tasks)
 
             if git_repo and has_uncommitted_changes(paths["root"]) and recovery_tasks:
-                recovered = run_dirty_worktree_recovery(paths, state, recovery_tasks, exhausted_tasks)
+                recovered = run_dirty_worktree_recovery(
+                    paths,
+                    state,
+                    recovery_tasks,
+                    exhausted_tasks,
+                    allow_last_session=allow_last_session,
+                )
                 if recovered:
                     continue
 
@@ -2985,13 +3018,15 @@ def main():
 
             batch_log_file = make_log_file(paths["log_dir"], runnable_tasks)
             batch_head_before = git_head_commit(paths["root"])
-            resume_session_id = resolve_resume_session_id(
-                paths["root"],
-                state,
-                paths["log_dir"],
-                task_texts=[task["text"] for task in runnable_tasks],
-                allow_any_known_session=True,
-            )
+            resume_session_id = None
+            if allow_last_session:
+                resume_session_id = resolve_resume_session_id(
+                    paths["root"],
+                    state,
+                    paths["log_dir"],
+                    task_texts=[task["text"] for task in runnable_tasks],
+                    allow_any_known_session=True,
+                )
             state["current"] = {
                 "project_root": path_label(paths["root"], paths["root"]),
                 "todo_file": todo_label(paths["root"], paths["todo_file"]),

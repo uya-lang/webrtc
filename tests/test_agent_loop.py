@@ -547,6 +547,27 @@ class AgentLoopKillTests(unittest.TestCase):
 
         self.assertEqual(resolved, session_id)
 
+    def test_todo_has_in_progress_tasks_only_counts_resume_markers(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text(
+                "- [ ] fresh task\n- [~] active task\n",
+                encoding="utf-8",
+            )
+
+            tasks = module.parse_todo(todo_file)
+
+        self.assertTrue(module.todo_has_in_progress_tasks(tasks))
+        self.assertFalse(
+            module.todo_has_in_progress_tasks(
+                [task for task in tasks if not task["in_progress_in_file"]]
+            )
+        )
+
     def test_sync_current_in_progress_tasks_from_todo_updates_current_batch(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
 
@@ -729,6 +750,48 @@ class AgentLoopKillTests(unittest.TestCase):
 
         self.assertTrue(recovered)
         self.assertEqual(captured["resume_session_id"], session_id)
+
+    def test_dirty_recovery_does_not_resume_last_session_without_resume_marker(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+        session_id = "019e7d51-d947-7a12-8da8-4745674b1cf3"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            todo_file = root / "docs/todo.md"
+            todo_file.parent.mkdir(parents=True, exist_ok=True)
+            todo_file.write_text("- [ ] fresh task\n", encoding="utf-8")
+
+            paths = module.build_runtime_paths(root, todo_file)
+            state = module.empty_state(root, todo_file)
+            state["last_session"] = {
+                "session_id": session_id,
+                "current_task": "still running",
+                "tasks": ["still running"],
+                "log_file": ".agent/logs/previous.log",
+                "updated_at": "2026-05-31 17:16:16",
+            }
+            runnable_tasks = module.parse_todo(todo_file)
+            captured = {}
+
+            def fake_run_codex(*args, **kwargs):
+                captured["resume_session_id"] = kwargs.get("resume_session_id")
+                return True, root / "fake.log"
+
+            with patch.object(module, "git_status_lines", side_effect=[[" M src/example.uya"], []]):
+                with patch.object(module, "git_head_commit", return_value="before"):
+                    with patch.object(module, "run_codex", side_effect=fake_run_codex):
+                        with patch.object(module, "parse_agent_result", return_value={}):
+                            with patch.object(module, "collect_valid_commits", return_value=[]):
+                                with patch.object(module, "collect_new_commits", return_value=[]):
+                                    recovered = module.run_dirty_worktree_recovery(
+                                        paths,
+                                        state,
+                                        runnable_tasks,
+                                        [],
+                                    )
+
+        self.assertTrue(recovered)
+        self.assertIsNone(captured["resume_session_id"])
 
     def test_kill_stops_runner_and_codex_and_clears_state(self):
         module = load_agent_loop_module({"CODEX_SANDBOX": None})
