@@ -40,6 +40,8 @@ export struct SrtcpContext {
     profile: u16 = 0u16,
     ssrc: u32 = 0u32,
     srtcp_index: u32 = 0u32,
+    recv_largest_index: u32 = 0u32,
+    has_recv_index: bool = false,
     replay_window: u64 = 0u64,
 }
 
@@ -140,5 +142,7 @@ export fn srtcp_context_init(
     ctx.profile = profile;
     ctx.ssrc = ssrc;
     ctx.srtcp_index = 0u32;
+    ctx.recv_largest_index = 0u32;
+    ctx.has_recv_index = false;
     ctx.replay_window = 0u64;
 }

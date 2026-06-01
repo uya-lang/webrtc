@@ -21,6 +21,7 @@ test -f src/webrtc_srtp_index_test_main.uya
 test -f src/webrtc_srtp_replay_test_main.uya
 test -f src/webrtc_srtp_profile80_test_main.uya
 test -f src/webrtc_srtp_profile32_test_main.uya
+test -f src/webrtc_srtcp_test_main.uya
 
 # Validate vectors
 python3 tests/srtp_vectors.py
@@ -32,6 +33,7 @@ python3 tests/srtp_bench_baseline.py
 ../uya/bin/uya run src/webrtc_srtp_replay_test_main.uya
 ../uya/bin/uya run src/webrtc_srtp_profile80_test_main.uya
 ../uya/bin/uya run src/webrtc_srtp_profile32_test_main.uya
+../uya/bin/uya run src/webrtc_srtcp_test_main.uya
 
 # Check key exports
 rg -q "export struct SrtpContext" src/webrtc/srtp/model.uya
