@@ -275,7 +275,7 @@
 - [x] 实现 RTP receiver SSRC/MID route。
 - [x] 实现 RTCP SR/RR。
 - [x] 实现 RTCP SDES CNAME。
-- [ ] 实现 RTCP BYE。
+- [x] 实现 RTCP BYE。
 - [ ] 实现 RTCP NACK。
 - [ ] 实现 RTCP PLI。
 - [ ] 实现 RTCP FIR。

@@ -135,6 +135,51 @@ fn check_sdes_parse_and_roundtrip() i32 {
     return 0i32;
 }
 
+fn check_bye_parse_and_roundtrip() i32 {
+    var bye_packet: [byte: 8] = [
+        0x81 as byte, 0xCB as byte, 0x00 as byte, 0x01 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+    ];
+    const parsed: !RtcpByePacket = rtcp_bye_parse(bye_packet[0:8]);
+    if parsed.error_id != 0 {
+        return 50i32;
+    }
+    if parsed.value.source_count != 1u8 || parsed.value.sources[0] != 0x11223344u32 {
+        return 51i32;
+    }
+    if parsed.value.has_reason {
+        return 52i32;
+    }
+
+    var with_reason: RtcpByePacket = rtcp_bye_packet_make();
+    with_reason.source_count = 2u8;
+    with_reason.sources[0] = 0xAABBCCDDu32;
+    with_reason.sources[1] = 0x01020304u32;
+    with_reason.has_reason = true;
+    with_reason.reason_len = 3usize;
+    with_reason.reason[0] = 'b' as byte;
+    with_reason.reason[1] = 'y' as byte;
+    with_reason.reason[2] = 'e' as byte;
+
+    var out: [byte: 32] = [];
+    const written: !usize = rtcp_bye_write(&with_reason, out[0:32]);
+    if written.error_id != 0 || written.value != 16usize {
+        return 53i32;
+    }
+    const reparsed: !RtcpByePacket = rtcp_bye_parse(out[0:written.value]);
+    if reparsed.error_id != 0 {
+        return 54i32;
+    }
+    if reparsed.value.source_count != 2u8 || reparsed.value.sources[1] != 0x01020304u32 {
+        return 55i32;
+    }
+    if !reparsed.value.has_reason || reparsed.value.reason_len != 3usize || reparsed.value.reason[2] != 'e' as byte {
+        return 56i32;
+    }
+
+    return 0i32;
+}
+
 fn check_error_and_rtt_paths() i32 {
     var bad_version_sr: [byte: 28] = [
         0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
@@ -194,6 +239,27 @@ fn check_error_and_rtt_paths() i32 {
         return 46i32;
     }
 
+    var bad_bye_reason_zero: RtcpByePacket = rtcp_bye_packet_make();
+    bad_bye_reason_zero.source_count = 1u8;
+    bad_bye_reason_zero.sources[0] = 0x12345678u32;
+    bad_bye_reason_zero.has_reason = true;
+    bad_bye_reason_zero.reason_len = 0usize;
+    var bye_out: [byte: 32] = [];
+    const bad_bye_write: !usize = rtcp_bye_write(&bad_bye_reason_zero, bye_out[0:32]);
+    if bad_bye_write.error_id != @error_id(error.RtcpInvalidLength) {
+        return 47i32;
+    }
+
+    var bad_bye_padding: [byte: 12] = [
+        0x81 as byte, 0xCB as byte, 0x00 as byte, 0x02 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x02 as byte, 'o' as byte, 'k' as byte, 0x01 as byte,
+    ];
+    const bad_bye_parse: !RtcpByePacket = rtcp_bye_parse(bad_bye_padding[0:12]);
+    if bad_bye_parse.error_id != @error_id(error.RtcpInvalidPadding) {
+        return 48i32;
+    }
+
     return 0i32;
 }
 
@@ -216,12 +282,18 @@ fn main() i32 {
         return 1i32;
     }
 
-    result = check_error_and_rtt_paths();
+    result = check_bye_parse_and_roundtrip();
     if result != 0i32 {
-        printf("RTCP SR/RR/SDES tests failed: %d\n", result);
+        printf("RTCP BYE tests failed: %d\n", result);
         return 1i32;
     }
 
-    printf("RTCP SR/RR/SDES tests passed\n");
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR/SDES/BYE tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR/SDES/BYE tests passed\n");
     return 0i32;
 }

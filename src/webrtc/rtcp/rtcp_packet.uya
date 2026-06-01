@@ -16,13 +16,18 @@ export error RtcpSdesInvalidChunk;
 export error RtcpSdesInvalidItem;
 export error RtcpSdesCnameRequired;
 export error RtcpSdesCnameTooLong;
+export error RtcpByeTooManySources;
+export error RtcpByeReasonTooLong;
 
 export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
 export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
 export const RTCP_PACKET_TYPE_SDES: u8 = 202u8;
+export const RTCP_PACKET_TYPE_BYE: u8 = 203u8;
 export const RTCP_MAX_REPORT_BLOCKS: usize = 31usize;
 export const RTCP_MAX_SDES_CHUNKS: usize = 31usize;
 export const RTCP_MAX_SDES_CNAME_BYTES: usize = 255usize;
+export const RTCP_MAX_BYE_SOURCES: usize = 31usize;
+export const RTCP_MAX_BYE_REASON_BYTES: usize = 255usize;
 
 const RTCP_VERSION: u8 = 2u8;
 const RTCP_HEADER_BYTES: usize = 4usize;
@@ -76,6 +81,14 @@ export struct RtcpSdesChunk {
 export struct RtcpSdesPacket {
     chunk_count: u8 = 0u8,
     chunks: [RtcpSdesChunk: RTCP_MAX_SDES_CHUNKS] = [],
+}
+
+export struct RtcpByePacket {
+    source_count: u8 = 0u8,
+    sources: [u32: RTCP_MAX_BYE_SOURCES] = [],
+    has_reason: bool = false,
+    reason: [byte: RTCP_MAX_BYE_REASON_BYTES] = [],
+    reason_len: usize = 0usize,
 }
 
 fn rtcp_read_u24(src: &[byte]) !u32 {
@@ -225,6 +238,10 @@ export fn rtcp_receiver_report_make() RtcpReceiverReport {
 
 export fn rtcp_sdes_packet_make() RtcpSdesPacket {
     return RtcpSdesPacket{};
+}
+
+export fn rtcp_bye_packet_make() RtcpByePacket {
+    return RtcpByePacket{};
 }
 
 export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
@@ -487,6 +504,118 @@ export fn rtcp_sdes_write(sdes: &RtcpSdesPacket, buffer: &[byte]) !usize {
         offset = offset + padding;
 
         chunk_index = chunk_index + 1usize;
+    }
+
+    return offset;
+}
+
+export fn rtcp_bye_parse(packet: &[byte]) !RtcpByePacket {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_BYE);
+    if (header.count as usize) > RTCP_MAX_BYE_SOURCES {
+        return error.RtcpByeTooManySources;
+    }
+
+    var bye: RtcpByePacket = rtcp_bye_packet_make();
+    bye.source_count = header.count;
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    var source_index: usize = 0usize;
+    while source_index < (bye.source_count as usize) {
+        if offset + 4usize > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+        bye.sources[source_index] = try read_be_u32(packet[offset:4]);
+        offset = offset + 4usize;
+        source_index = source_index + 1usize;
+    }
+
+    if offset < header.effective_len {
+        const reason_len: usize = packet[offset] as usize;
+        offset = offset + 1usize;
+        if reason_len == 0usize {
+            return error.RtcpInvalidLength;
+        }
+        if reason_len > RTCP_MAX_BYE_REASON_BYTES {
+            return error.RtcpByeReasonTooLong;
+        }
+        if offset + reason_len > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+
+        try rtcp_copy_bytes(bye.reason[0:RTCP_MAX_BYE_REASON_BYTES], packet[offset:reason_len], reason_len);
+        bye.reason_len = reason_len;
+        bye.has_reason = true;
+        offset = offset + reason_len;
+
+        const padding: usize = (4usize - (offset % 4usize)) % 4usize;
+        if offset + padding > header.effective_len {
+            return error.RtcpInvalidLength;
+        }
+        var pad_index: usize = 0usize;
+        while pad_index < padding {
+            if packet[offset + pad_index] != 0u8 {
+                return error.RtcpInvalidPadding;
+            }
+            pad_index = pad_index + 1usize;
+        }
+        offset = offset + padding;
+    }
+
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+    return bye;
+}
+
+export fn rtcp_bye_write(bye: &RtcpByePacket, buffer: &[byte]) !usize {
+    if bye == null {
+        return error.RtcpInvalidLength;
+    }
+    if (bye.source_count as usize) > RTCP_MAX_BYE_SOURCES {
+        return error.RtcpByeTooManySources;
+    }
+
+    var total_len: usize = RTCP_HEADER_BYTES + ((bye.source_count as usize) * 4usize);
+    if bye.has_reason {
+        if bye.reason_len == 0usize {
+            return error.RtcpInvalidLength;
+        }
+        if bye.reason_len > RTCP_MAX_BYE_REASON_BYTES {
+            return error.RtcpByeReasonTooLong;
+        }
+        total_len = total_len + 1usize + bye.reason_len;
+        total_len = total_len + ((4usize - (total_len % 4usize)) % 4usize);
+    }
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (bye.source_count & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_BYE;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+
+    var offset: usize = RTCP_HEADER_BYTES;
+    var source_index: usize = 0usize;
+    while source_index < (bye.source_count as usize) {
+        try write_be_u32(buffer[offset:4], bye.sources[source_index]);
+        offset = offset + 4usize;
+        source_index = source_index + 1usize;
+    }
+
+    if bye.has_reason {
+        buffer[offset] = bye.reason_len as u8;
+        offset = offset + 1usize;
+        try rtcp_copy_bytes(buffer[offset:bye.reason_len], bye.reason[0:RTCP_MAX_BYE_REASON_BYTES], bye.reason_len);
+        offset = offset + bye.reason_len;
+
+        const padding: usize = (4usize - (offset % 4usize)) % 4usize;
+        var pad_index: usize = 0usize;
+        while pad_index < padding {
+            buffer[offset + pad_index] = 0u8;
+            pad_index = pad_index + 1usize;
+        }
+        offset = offset + padding;
     }
 
     return offset;
