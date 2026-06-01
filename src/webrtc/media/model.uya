@@ -1,0 +1,22 @@
+// webrtc.media.model - Encoded frame boundary model
+// Module: src/webrtc/media/model.uya -> use webrtc.media.model;
+
+export const ENCODED_FRAME_NO_SPATIAL_ID: i32 = -1i32;
+export const ENCODED_FRAME_NO_TEMPORAL_ID: i32 = -1i32;
+
+export struct EncodedFrame {
+    codec_id: u16 = 0u16,
+    media_kind: u8 = 0u8,
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    payload: &[byte] = [],
+    is_keyframe: bool = false,
+    sequence_id: u64 = 0u64,
+    spatial_id: i32 = ENCODED_FRAME_NO_SPATIAL_ID,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+    marker: bool = false,
+}
+
+export fn encoded_frame_make() EncodedFrame {
+    return EncodedFrame{};
+}

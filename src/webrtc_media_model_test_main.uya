@@ -1,0 +1,70 @@
+use libc.printf;
+use webrtc.media.model;
+
+fn check_default_frame() i32 {
+    const frame: EncodedFrame = encoded_frame_make();
+    if frame.codec_id != 0u16 || frame.media_kind != 0u8 {
+        return 10i32;
+    }
+    if frame.timestamp != 0u64 || frame.duration_us != 0u32 {
+        return 11i32;
+    }
+    if frame.payload.len != 0usize {
+        return 12i32;
+    }
+    if frame.spatial_id != ENCODED_FRAME_NO_SPATIAL_ID || frame.temporal_id != ENCODED_FRAME_NO_TEMPORAL_ID {
+        return 13i32;
+    }
+    if frame.is_keyframe || frame.marker {
+        return 14i32;
+    }
+    return 0i32;
+}
+
+fn check_assign_payload_and_metadata() i32 {
+    var frame: EncodedFrame = encoded_frame_make();
+    var payload: [byte: 6] = [
+        0x90 as byte, 0x80 as byte, 0x70 as byte,
+        0x60 as byte, 0x50 as byte, 0x40 as byte,
+    ];
+
+    frame.codec_id = 96u16;
+    frame.media_kind = 2u8;
+    frame.timestamp = 90000u64;
+    frame.duration_us = 20000u32;
+    frame.payload = payload[1:4];
+    frame.is_keyframe = true;
+    frame.sequence_id = 12u64;
+    frame.spatial_id = 0i32;
+    frame.temporal_id = 1i32;
+    frame.marker = true;
+
+    if frame.payload.len != 4usize || frame.payload[0] != 0x80u8 || frame.payload[3] != 0x50u8 {
+        return 20i32;
+    }
+    if frame.codec_id != 96u16 || frame.sequence_id != 12u64 {
+        return 21i32;
+    }
+    if !frame.is_keyframe || !frame.marker || frame.temporal_id != 1i32 {
+        return 22i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_default_frame();
+    if result != 0i32 {
+        printf("EncodedFrame default tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_assign_payload_and_metadata();
+    if result != 0i32 {
+        printf("EncodedFrame metadata tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("EncodedFrame tests passed\n");
+    return 0i32;
+}
