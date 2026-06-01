@@ -109,7 +109,9 @@ bench: build
 	test -f benchmarks/bench_stun_parse.uya
 	test -f benchmarks/bench_crypto_phase7.uya
 	test -f benchmarks/bench_jitter.uya
+	test -f benchmarks/bench_datachannel.uya
 	test -f benchmarks/baselines/bench_jitter.jsonl
+	test -f benchmarks/baselines/bench_datachannel.jsonl
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
 	python3 tests/jitter_bench_baseline.py
