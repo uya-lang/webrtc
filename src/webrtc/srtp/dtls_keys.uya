@@ -1,0 +1,79 @@
+// webrtc.srtp.dtls_keys - DTLS exporter key integration for SRTP/SRTCP contexts
+// 模块路径：src/webrtc/srtp/dtls_keys.uya → use webrtc.srtp.dtls_keys;
+
+use webrtc.dtls.handshake;
+use webrtc.errors;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+
+export const DTLS_SRTP_EXPORTER_LABEL_BYTES: usize = 19usize;
+export const DTLS_SRTP_EXPORTER_MATERIAL_BYTES: usize = 60usize;
+
+fn srtp_profile_from_dtls_profile(dtls_profile: u16) !u16 {
+    if dtls_profile == DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+    }
+    if dtls_profile == DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
+        return SRTP_PROFILE_AES128_CM_HMAC_SHA1_32;
+    }
+    return error.UnsupportedProfile;
+}
+
+export fn srtp_dtls_exporter_init_contexts(
+    dtls_profile: u16,
+    local_is_client: bool,
+    local_ssrc: u32,
+    remote_ssrc: u32,
+    master_secret: &[byte],
+    client_random: &[byte],
+    server_random: &[byte],
+    srtp_send: &SrtpContext,
+    srtp_recv: &SrtpContext,
+    srtcp_send: &SrtcpContext,
+    srtcp_recv: &SrtcpContext,
+) !void {
+    if srtp_send == null || srtp_recv == null || srtcp_send == null || srtcp_recv == null {
+        return error.InvalidPacket;
+    }
+
+    const srtp_profile: u16 = try srtp_profile_from_dtls_profile(dtls_profile);
+
+    var label: [byte: DTLS_SRTP_EXPORTER_LABEL_BYTES] = [
+        'E' as byte, 'X' as byte, 'T' as byte, 'R' as byte, 'A' as byte, 'C' as byte, 'T' as byte, 'O' as byte, 'R' as byte,
+        '-' as byte, 'd' as byte, 't' as byte, 'l' as byte, 's' as byte, '_' as byte, 's' as byte, 'r' as byte, 't' as byte, 'p' as byte,
+    ];
+    var material: [byte: DTLS_SRTP_EXPORTER_MATERIAL_BYTES] = [];
+    try dtls_exporter_compute(
+        master_secret,
+        label[0:DTLS_SRTP_EXPORTER_LABEL_BYTES],
+        client_random,
+        server_random,
+        material[0:DTLS_SRTP_EXPORTER_MATERIAL_BYTES],
+    );
+
+    const client_key: &[byte] = material[0:SRTP_KEY_BYTES];
+    const server_key: &[byte] = material[SRTP_KEY_BYTES:SRTP_KEY_BYTES];
+    const client_salt: &[byte] = material[(2usize * SRTP_KEY_BYTES):(SRTP_SALT_BYTES)];
+    const server_salt: &[byte] = material[(2usize * SRTP_KEY_BYTES + SRTP_SALT_BYTES):(SRTP_SALT_BYTES)];
+
+    var send_key: &[byte] = client_key;
+    var send_salt: &[byte] = client_salt;
+    var recv_key: &[byte] = server_key;
+    var recv_salt: &[byte] = server_salt;
+    if !local_is_client {
+        send_key = server_key;
+        send_salt = server_salt;
+        recv_key = client_key;
+        recv_salt = client_salt;
+    }
+
+    try srtp_context_init(srtp_send, srtp_profile, local_ssrc, send_key, send_salt);
+    try srtp_context_init(srtp_recv, srtp_profile, remote_ssrc, recv_key, recv_salt);
+    try srtcp_context_init(srtcp_send, srtp_profile, local_ssrc, send_key, send_salt);
+    try srtcp_context_init(srtcp_recv, srtp_profile, remote_ssrc, recv_key, recv_salt);
+
+    try srtp_derive_session_keys(srtp_send);
+    try srtp_derive_session_keys(srtp_recv);
+    try srtcp_derive_session_keys(srtcp_send);
+    try srtcp_derive_session_keys(srtcp_recv);
+}

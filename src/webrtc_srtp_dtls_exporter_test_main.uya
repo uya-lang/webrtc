@@ -1,0 +1,258 @@
+use libc.printf;
+use webrtc.dtls.handshake;
+use webrtc.srtp.dtls_keys;
+use webrtc.srtp.model;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn all_zero(bytes: &[byte]) bool {
+    var index: usize = 0usize;
+    while index < bytes.len {
+        if bytes[index] != 0 as byte {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn check_client_role_contexts() i32 {
+    var master_secret: [byte: 48] = [
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte,
+        0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte, 0x10 as byte,
+        0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte, 0x18 as byte,
+        0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte, 0x20 as byte,
+        0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte, 0x28 as byte,
+        0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte, 0x30 as byte,
+    ];
+    var client_random: [byte: 32] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+    ];
+    var server_random: [byte: 32] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var expected_client_key: [byte: SRTP_KEY_BYTES] = [
+        0x5e as byte, 0xf1 as byte, 0x64 as byte, 0x75 as byte,
+        0xa4 as byte, 0x18 as byte, 0x6b as byte, 0x6f as byte,
+        0x83 as byte, 0x87 as byte, 0x22 as byte, 0x82 as byte,
+        0xba as byte, 0xca as byte, 0x32 as byte, 0x29 as byte,
+    ];
+    var expected_server_key: [byte: SRTP_KEY_BYTES] = [
+        0xac as byte, 0x58 as byte, 0xe6 as byte, 0x6b as byte,
+        0xa7 as byte, 0x6f as byte, 0x52 as byte, 0x7c as byte,
+        0x98 as byte, 0x18 as byte, 0x58 as byte, 0x2c as byte,
+        0x43 as byte, 0xf1 as byte, 0x8f as byte, 0x87 as byte,
+    ];
+    var expected_client_salt: [byte: SRTP_SALT_BYTES] = [
+        0x5f as byte, 0x23 as byte, 0x07 as byte, 0x96 as byte,
+        0x9d as byte, 0x2a as byte, 0x6f as byte, 0xf6 as byte,
+        0xa0 as byte, 0xa3 as byte, 0x1a as byte, 0x71 as byte,
+        0xd4 as byte, 0xf1 as byte,
+    ];
+    var expected_server_salt: [byte: SRTP_SALT_BYTES] = [
+        0x5c as byte, 0x9d as byte, 0x11 as byte, 0x74 as byte,
+        0x37 as byte, 0x77 as byte, 0xef as byte, 0x92 as byte,
+        0xac as byte, 0xea as byte, 0x22 as byte, 0x6d as byte,
+        0xcb as byte, 0xdd as byte,
+    ];
+
+    var srtp_send: SrtpContext = srtp_context_make();
+    var srtp_recv: SrtpContext = srtp_context_make();
+    var srtcp_send: SrtcpContext = srtcp_context_make();
+    var srtcp_recv: SrtcpContext = srtcp_context_make();
+    if srtp_dtls_exporter_init_contexts(
+        DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        true,
+        0x11223344u32,
+        0x55667788u32,
+        master_secret[0:48],
+        client_random[0:32],
+        server_random[0:32],
+        &srtp_send,
+        &srtp_recv,
+        &srtcp_send,
+        &srtcp_recv,
+    ).error_id != 0 {
+        return 10i32;
+    }
+
+    if srtp_send.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 || srtp_send.ssrc != 0x11223344u32 {
+        return 11i32;
+    }
+    if srtp_recv.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 || srtp_recv.ssrc != 0x55667788u32 {
+        return 12i32;
+    }
+    if !bytes_equal(srtp_send.master_key[0:SRTP_KEY_BYTES], expected_client_key[0:SRTP_KEY_BYTES]) {
+        return 13i32;
+    }
+    if !bytes_equal(srtp_recv.master_key[0:SRTP_KEY_BYTES], expected_server_key[0:SRTP_KEY_BYTES]) {
+        return 14i32;
+    }
+    if !bytes_equal(srtp_send.master_salt[0:SRTP_SALT_BYTES], expected_client_salt[0:SRTP_SALT_BYTES]) {
+        return 15i32;
+    }
+    if !bytes_equal(srtp_recv.master_salt[0:SRTP_SALT_BYTES], expected_server_salt[0:SRTP_SALT_BYTES]) {
+        return 16i32;
+    }
+    if !bytes_equal(srtcp_send.master_key[0:SRTP_KEY_BYTES], expected_client_key[0:SRTP_KEY_BYTES]) {
+        return 17i32;
+    }
+    if !bytes_equal(srtcp_recv.master_key[0:SRTP_KEY_BYTES], expected_server_key[0:SRTP_KEY_BYTES]) {
+        return 18i32;
+    }
+    if !bytes_equal(srtcp_send.master_salt[0:SRTP_SALT_BYTES], expected_client_salt[0:SRTP_SALT_BYTES]) {
+        return 19i32;
+    }
+    if !bytes_equal(srtcp_recv.master_salt[0:SRTP_SALT_BYTES], expected_server_salt[0:SRTP_SALT_BYTES]) {
+        return 20i32;
+    }
+
+    if all_zero(srtp_send.cipher_key[0:SRTP_KEY_BYTES]) || all_zero(srtp_recv.cipher_key[0:SRTP_KEY_BYTES]) {
+        return 21i32;
+    }
+    if all_zero(srtcp_send.cipher_key[0:SRTP_KEY_BYTES]) || all_zero(srtcp_recv.cipher_key[0:SRTP_KEY_BYTES]) {
+        return 22i32;
+    }
+    if all_zero(srtp_send.auth_key[0:SRTP_AUTH_KEY_BYTES]) || all_zero(srtp_recv.auth_key[0:SRTP_AUTH_KEY_BYTES]) {
+        return 23i32;
+    }
+    if all_zero(srtcp_send.auth_key[0:SRTP_AUTH_KEY_BYTES]) || all_zero(srtcp_recv.auth_key[0:SRTP_AUTH_KEY_BYTES]) {
+        return 24i32;
+    }
+    return 0i32;
+}
+
+fn check_server_role_direction() i32 {
+    var master_secret: [byte: 48] = [];
+    var client_random: [byte: 32] = [];
+    var server_random: [byte: 32] = [];
+    var index: usize = 0usize;
+    while index < 48usize {
+        master_secret[index] = (index + 1usize) as byte;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < 32usize {
+        client_random[index] = index as byte;
+        server_random[index] = (index + 32usize) as byte;
+        index = index + 1usize;
+    }
+
+    var srtp_send: SrtpContext = srtp_context_make();
+    var srtp_recv: SrtpContext = srtp_context_make();
+    var srtcp_send: SrtcpContext = srtcp_context_make();
+    var srtcp_recv: SrtcpContext = srtcp_context_make();
+    if srtp_dtls_exporter_init_contexts(
+        DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_32,
+        false,
+        0x01020304u32,
+        0x05060708u32,
+        master_secret[0:48],
+        client_random[0:32],
+        server_random[0:32],
+        &srtp_send,
+        &srtp_recv,
+        &srtcp_send,
+        &srtcp_recv,
+    ).error_id != 0 {
+        return 30i32;
+    }
+
+    if !bytes_equal(srtp_send.master_key[0:SRTP_KEY_BYTES], srtcp_send.master_key[0:SRTP_KEY_BYTES]) {
+        return 31i32;
+    }
+    if !bytes_equal(srtp_recv.master_key[0:SRTP_KEY_BYTES], srtcp_recv.master_key[0:SRTP_KEY_BYTES]) {
+        return 32i32;
+    }
+    if bytes_equal(srtp_send.master_key[0:SRTP_KEY_BYTES], srtp_recv.master_key[0:SRTP_KEY_BYTES]) {
+        return 33i32;
+    }
+    if srtp_send.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32
+        || srtcp_send.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32
+        || srtp_recv.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32
+        || srtcp_recv.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_32 {
+        return 34i32;
+    }
+    return 0i32;
+}
+
+fn check_invalid_cases() i32 {
+    var master_secret: [byte: 48] = [];
+    var short_master_secret: [byte: 47] = [];
+    var client_random: [byte: 32] = [];
+    var server_random: [byte: 32] = [];
+    var srtp_send: SrtpContext = srtp_context_make();
+    var srtp_recv: SrtpContext = srtp_context_make();
+    var srtcp_send: SrtcpContext = srtcp_context_make();
+    var srtcp_recv: SrtcpContext = srtcp_context_make();
+
+    if srtp_dtls_exporter_init_contexts(
+        DTLS_SRTP_PROFILE_AEAD_AES_128_GCM,
+        true,
+        0u32,
+        0u32,
+        master_secret[0:48],
+        client_random[0:32],
+        server_random[0:32],
+        &srtp_send,
+        &srtp_recv,
+        &srtcp_send,
+        &srtcp_recv,
+    ).error_id == 0 {
+        return 40i32;
+    }
+    if srtp_dtls_exporter_init_contexts(
+        DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        true,
+        0u32,
+        0u32,
+        short_master_secret[0:47],
+        client_random[0:32],
+        server_random[0:32],
+        &srtp_send,
+        &srtp_recv,
+        &srtcp_send,
+        &srtcp_recv,
+    ).error_id == 0 {
+        return 41i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_client_role_contexts();
+    if result != 0i32 {
+        printf("SRTP DTLS exporter integration test failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_server_role_direction();
+    if result != 0i32 {
+        printf("SRTP DTLS exporter integration test failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_invalid_cases();
+    if result != 0i32 {
+        printf("SRTP DTLS exporter integration test failed: %d\n", result);
+        return 1i32;
+    }
+    printf("SRTP DTLS exporter integration tests passed\n");
+    return 0i32;
+}

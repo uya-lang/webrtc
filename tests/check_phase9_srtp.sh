@@ -9,6 +9,7 @@ test -d src/webrtc/srtp
 test -f src/webrtc/srtp/model.uya
 test -f src/webrtc/srtp/srtp.uya
 test -f src/webrtc/srtp/protect.uya
+test -f src/webrtc/srtp/dtls_keys.uya
 
 # Check fixtures
 test -f tests/fixtures/srtp/rfc3711_vectors.json
@@ -22,6 +23,7 @@ test -f src/webrtc_srtp_replay_test_main.uya
 test -f src/webrtc_srtp_profile80_test_main.uya
 test -f src/webrtc_srtp_profile32_test_main.uya
 test -f src/webrtc_srtcp_test_main.uya
+test -f src/webrtc_srtp_dtls_exporter_test_main.uya
 
 # Validate vectors
 python3 tests/srtp_vectors.py
@@ -34,6 +36,7 @@ python3 tests/srtp_bench_baseline.py
 ../uya/bin/uya run src/webrtc_srtp_profile80_test_main.uya
 ../uya/bin/uya run src/webrtc_srtp_profile32_test_main.uya
 ../uya/bin/uya run src/webrtc_srtcp_test_main.uya
+../uya/bin/uya run src/webrtc_srtp_dtls_exporter_test_main.uya
 
 # Check key exports
 rg -q "export struct SrtpContext" src/webrtc/srtp/model.uya
@@ -46,6 +49,7 @@ rg -q "export fn srtp_index_guess" src/webrtc/srtp/srtp.uya
 rg -q "export fn srtp_replay_check" src/webrtc/srtp/srtp.uya
 rg -q "export fn srtp_protect" src/webrtc/srtp/protect.uya
 rg -q "export fn srtp_unprotect" src/webrtc/srtp/protect.uya
+rg -q "export fn srtp_dtls_exporter_init_contexts" src/webrtc/srtp/dtls_keys.uya
 
 # Check constants
 rg -q "SRTP_PROFILE_AES128_CM_HMAC_SHA1_80" src/webrtc/srtp/model.uya

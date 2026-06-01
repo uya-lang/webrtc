@@ -516,10 +516,13 @@ fn dtls_tls12_p_hash_sha256(secret: &[byte], seed: &[byte], out: &[byte]) !void 
     if out.len == 0usize {
         return;
     }
+    if seed.len > DTLS_EXPORTER_MAX_SEED_BYTES {
+        return error.InvalidPacket;
+    }
 
     var a: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
     var chunk: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
-    var buffer: [byte: 64] = [];
+    var buffer: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES + DTLS_EXPORTER_MAX_SEED_BYTES] = [];
     try crypto_hmac_sha256_digest(secret, seed, a[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES]);
 
     var written: usize = 0usize;
