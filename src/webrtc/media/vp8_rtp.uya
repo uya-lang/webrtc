@@ -1,0 +1,86 @@
+// webrtc.media.vp8_rtp - VP8 RTP payload descriptor parse/write
+// Module: src/webrtc/media/vp8_rtp.uya -> use webrtc.media.vp8_rtp;
+
+export error Vp8RtpDescriptorTooShort;
+export error Vp8RtpBufferTooSmall;
+export error Vp8RtpInvalidPartitionIndex;
+export error Vp8RtpExtensionNotSupported;
+
+export struct Vp8RtpDescriptor {
+    extension: bool = false,
+    non_reference: bool = false,
+    start_of_partition: bool = false,
+    partition_index: u8 = 0u8,
+    payload_offset: usize = 0usize,
+    payload: &[byte] = [],
+}
+
+fn vp8_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.Vp8RtpBufferTooSmall;
+    }
+
+    var i: usize = 0usize;
+    while i < len {
+        dst[i] = src[i];
+        i = i + 1usize;
+    }
+}
+
+export fn vp8_rtp_descriptor_make() Vp8RtpDescriptor {
+    return Vp8RtpDescriptor{};
+}
+
+export fn vp8_rtp_descriptor_parse(packet: &[byte]) !Vp8RtpDescriptor {
+    if packet.len < 1usize {
+        return error.Vp8RtpDescriptorTooShort;
+    }
+
+    const first: u8 = packet[0] as u8;
+    const extension: bool = (first & 0x80u8) != 0u8;
+    if extension {
+        return error.Vp8RtpExtensionNotSupported;
+    }
+
+    var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
+    descriptor.extension = extension;
+    descriptor.non_reference = (first & 0x20u8) != 0u8;
+    descriptor.start_of_partition = (first & 0x10u8) != 0u8;
+    descriptor.partition_index = first & 0x0Fu8;
+    descriptor.payload_offset = 1usize;
+    descriptor.payload = packet[1:packet.len - 1usize];
+    return descriptor;
+}
+
+export fn vp8_rtp_descriptor_write(
+    descriptor: &Vp8RtpDescriptor,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    if descriptor == null {
+        return error.Vp8RtpDescriptorTooShort;
+    }
+    if descriptor.partition_index > 0x0Fu8 {
+        return error.Vp8RtpInvalidPartitionIndex;
+    }
+    if descriptor.extension {
+        return error.Vp8RtpExtensionNotSupported;
+    }
+
+    const total_len: usize = 1usize + payload.len;
+    if out_packet.len < total_len {
+        return error.Vp8RtpBufferTooSmall;
+    }
+
+    var first: u8 = descriptor.partition_index & 0x0Fu8;
+    if descriptor.non_reference {
+        first = first | 0x20u8;
+    }
+    if descriptor.start_of_partition {
+        first = first | 0x10u8;
+    }
+    out_packet[0] = first as byte;
+
+    try vp8_rtp_copy_bytes(out_packet[1:payload.len], payload, payload.len);
+    return total_len;
+}

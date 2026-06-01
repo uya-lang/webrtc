@@ -1,0 +1,93 @@
+use libc.printf;
+use webrtc.media.vp8_rtp;
+
+fn bytes_equal(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < a.len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn check_parse_minimal_descriptor() i32 {
+    var packet: [byte: 4] = [0x10 as byte, 0xAA as byte, 0xBB as byte, 0xCC as byte];
+    const parsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet[0:4]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value.extension || parsed.value.non_reference || !parsed.value.start_of_partition {
+        return 11i32;
+    }
+    if parsed.value.partition_index != 0u8 || parsed.value.payload_offset != 1usize {
+        return 12i32;
+    }
+    if !bytes_equal(parsed.value.payload, packet[1:3]) {
+        return 13i32;
+    }
+    return 0i32;
+}
+
+fn check_write_minimal_descriptor() i32 {
+    var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
+    descriptor.start_of_partition = true;
+    descriptor.partition_index = 2u8;
+
+    var payload: [byte: 3] = [0x11 as byte, 0x22 as byte, 0x33 as byte];
+    var out: [byte: 8] = [];
+    const written: !usize = vp8_rtp_descriptor_write(&descriptor, payload[0:3], out[0:8]);
+    if written.error_id != 0 || written.value != 4usize {
+        return 20i32;
+    }
+    if out[0] != 0x12u8 {
+        return 21i32;
+    }
+
+    const reparsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(out[0:written.value]);
+    if reparsed.error_id != 0 || reparsed.value.partition_index != 2u8 {
+        return 22i32;
+    }
+    if !bytes_equal(reparsed.value.payload, payload[0:3]) {
+        return 23i32;
+    }
+
+    return 0i32;
+}
+
+fn check_extension_not_supported_yet() i32 {
+    var packet: [byte: 2] = [0x80 as byte, 0x00 as byte];
+    const parsed: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(packet[0:2]);
+    if parsed.error_id != @error_id(error.Vp8RtpExtensionNotSupported) {
+        return 30i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_parse_minimal_descriptor();
+    if result != 0i32 {
+        printf("vp8 descriptor parse tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_write_minimal_descriptor();
+    if result != 0i32 {
+        printf("vp8 descriptor write tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_extension_not_supported_yet();
+    if result != 0i32 {
+        printf("vp8 descriptor extension tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("vp8 descriptor tests passed\n");
+    return 0i32;
+}
