@@ -278,7 +278,7 @@
 - [x] 实现 RTCP BYE。
 - [x] 实现 RTCP NACK。
 - [x] 实现 RTCP PLI。
-- [ ] 实现 RTCP FIR。
+- [x] 实现 RTCP FIR。
 - [ ] 实现 RTCP Transport-CC feedback。
 - [ ] 增加 RTP/RTCP fuzz corpus。
 

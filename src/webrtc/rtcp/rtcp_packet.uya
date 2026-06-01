@@ -21,6 +21,8 @@ export error RtcpByeReasonTooLong;
 export error RtcpNackInvalidFormat;
 export error RtcpNackTooManyEntries;
 export error RtcpPliInvalidFormat;
+export error RtcpFirInvalidFormat;
+export error RtcpFirTooManyEntries;
 
 export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
 export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
@@ -35,7 +37,9 @@ export const RTCP_MAX_BYE_SOURCES: usize = 31usize;
 export const RTCP_MAX_BYE_REASON_BYTES: usize = 255usize;
 export const RTCP_RTPFB_FMT_NACK: u8 = 1u8;
 export const RTCP_PSFB_FMT_PLI: u8 = 1u8;
+export const RTCP_PSFB_FMT_FIR: u8 = 4u8;
 export const RTCP_MAX_NACK_ENTRIES: usize = 128usize;
+export const RTCP_MAX_FIR_ENTRIES: usize = 64usize;
 
 const RTCP_VERSION: u8 = 2u8;
 const RTCP_HEADER_BYTES: usize = 4usize;
@@ -44,6 +48,7 @@ const RTCP_RR_SENDER_SSRC_BYTES: usize = 4usize;
 const RTCP_REPORT_BLOCK_BYTES: usize = 24usize;
 const RTCP_RTPFB_BASE_BYTES: usize = 12usize;
 const RTCP_NACK_ENTRY_BYTES: usize = 4usize;
+const RTCP_FIR_ENTRY_BYTES: usize = 8usize;
 const RTCP_COMPACT_NTP_SCALE: u32 = 65536u32;
 const RTCP_SDES_ITEM_END: u8 = 0u8;
 const RTCP_SDES_ITEM_CNAME: u8 = 1u8;
@@ -116,6 +121,18 @@ export struct RtcpNackPacket {
 export struct RtcpPliPacket {
     sender_ssrc: u32 = 0u32,
     media_ssrc: u32 = 0u32,
+}
+
+export struct RtcpFirEntry {
+    ssrc: u32 = 0u32,
+    seq_nr: u8 = 0u8,
+}
+
+export struct RtcpFirPacket {
+    sender_ssrc: u32 = 0u32,
+    media_ssrc: u32 = 0u32,
+    entry_count: usize = 0usize,
+    entries: [RtcpFirEntry: RTCP_MAX_FIR_ENTRIES] = [],
 }
 
 fn rtcp_read_u24(src: &[byte]) !u32 {
@@ -277,6 +294,10 @@ export fn rtcp_nack_packet_make() RtcpNackPacket {
 
 export fn rtcp_pli_packet_make() RtcpPliPacket {
     return RtcpPliPacket{};
+}
+
+export fn rtcp_fir_packet_make() RtcpFirPacket {
+    return RtcpFirPacket{};
 }
 
 export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
@@ -756,6 +777,79 @@ export fn rtcp_pli_write(pli: &RtcpPliPacket, buffer: &[byte]) !usize {
     try write_be_u32(buffer[4:4], pli.sender_ssrc);
     try write_be_u32(buffer[8:4], pli.media_ssrc);
     return RTCP_RTPFB_BASE_BYTES;
+}
+
+export fn rtcp_fir_parse(packet: &[byte]) !RtcpFirPacket {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_PSFB);
+    if header.count != RTCP_PSFB_FMT_FIR {
+        return error.RtcpFirInvalidFormat;
+    }
+    if header.effective_len < RTCP_RTPFB_BASE_BYTES {
+        return error.RtcpInvalidLength;
+    }
+
+    const entries_len: usize = header.effective_len - RTCP_RTPFB_BASE_BYTES;
+    if (entries_len % RTCP_FIR_ENTRY_BYTES) != 0usize {
+        return error.RtcpInvalidLength;
+    }
+    const entry_count: usize = entries_len / RTCP_FIR_ENTRY_BYTES;
+    if entry_count > RTCP_MAX_FIR_ENTRIES {
+        return error.RtcpFirTooManyEntries;
+    }
+
+    var fir: RtcpFirPacket = rtcp_fir_packet_make();
+    fir.sender_ssrc = try read_be_u32(packet[4:4]);
+    fir.media_ssrc = try read_be_u32(packet[8:4]);
+    fir.entry_count = entry_count;
+
+    var offset: usize = RTCP_RTPFB_BASE_BYTES;
+    var index: usize = 0usize;
+    while index < entry_count {
+        fir.entries[index].ssrc = try read_be_u32(packet[offset:4]);
+        fir.entries[index].seq_nr = packet[offset + 4usize];
+        offset = offset + RTCP_FIR_ENTRY_BYTES;
+        index = index + 1usize;
+    }
+
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+    return fir;
+}
+
+export fn rtcp_fir_write(fir: &RtcpFirPacket, buffer: &[byte]) !usize {
+    if fir == null {
+        return error.RtcpInvalidLength;
+    }
+    if fir.entry_count > RTCP_MAX_FIR_ENTRIES {
+        return error.RtcpFirTooManyEntries;
+    }
+
+    const total_len: usize = RTCP_RTPFB_BASE_BYTES + (fir.entry_count * RTCP_FIR_ENTRY_BYTES);
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (RTCP_PSFB_FMT_FIR & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_PSFB;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+    try write_be_u32(buffer[4:4], fir.sender_ssrc);
+    try write_be_u32(buffer[8:4], fir.media_ssrc);
+
+    var offset: usize = RTCP_RTPFB_BASE_BYTES;
+    var index: usize = 0usize;
+    while index < fir.entry_count {
+        try write_be_u32(buffer[offset:4], fir.entries[index].ssrc);
+        buffer[offset + 4usize] = fir.entries[index].seq_nr;
+        buffer[offset + 5usize] = 0u8;
+        buffer[offset + 6usize] = 0u8;
+        buffer[offset + 7usize] = 0u8;
+        offset = offset + RTCP_FIR_ENTRY_BYTES;
+        index = index + 1usize;
+    }
+
+    return offset;
 }
 
 export fn rtcp_report_rtt_ticks(arrival_compact_ntp: u32, lsr: u32, dlsr: u32) !u32 {
