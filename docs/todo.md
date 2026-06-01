@@ -352,7 +352,7 @@
 - [x] 实现 DATA chunk。
 - [x] 实现 SACK。
 - [x] 实现 HEARTBEAT。
-- [ ] 实现 ABORT / SHUTDOWN。
+- [x] 实现 ABORT / SHUTDOWN。
 - [ ] 实现 TSN tracking。
 - [ ] 实现 retransmission timer。
 - [ ] 实现 ordered / unordered delivery。

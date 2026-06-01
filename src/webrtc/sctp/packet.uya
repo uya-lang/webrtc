@@ -95,6 +95,24 @@ export struct SctpHeartbeatAckChunk {
     info: &[byte] = [],
 }
 
+export struct SctpAbortChunk {
+    flags: u8 = 0u8,
+    error_causes: &[byte] = [],
+}
+
+export struct SctpShutdownChunk {
+    flags: u8 = 0u8,
+    cumulative_tsn_ack: u32 = 0u32,
+}
+
+export struct SctpShutdownAckChunk {
+    flags: u8 = 0u8,
+}
+
+export struct SctpShutdownCompleteChunk {
+    flags: u8 = 0u8,
+}
+
 export struct SctpSackGapAckBlock {
     start: u16 = 0u16,
     end: u16 = 0u16,
@@ -377,6 +395,26 @@ export fn sctp_heartbeat_ack_chunk_make() SctpHeartbeatAckChunk {
     return SctpHeartbeatAckChunk{};
 }
 
+/// Create an empty SCTP ABORT chunk container.
+export fn sctp_abort_chunk_make() SctpAbortChunk {
+    return SctpAbortChunk{};
+}
+
+/// Create an empty SCTP SHUTDOWN chunk container.
+export fn sctp_shutdown_chunk_make() SctpShutdownChunk {
+    return SctpShutdownChunk{};
+}
+
+/// Create an empty SCTP SHUTDOWN_ACK chunk container.
+export fn sctp_shutdown_ack_chunk_make() SctpShutdownAckChunk {
+    return SctpShutdownAckChunk{};
+}
+
+/// Create an empty SCTP SHUTDOWN_COMPLETE chunk container.
+export fn sctp_shutdown_complete_chunk_make() SctpShutdownCompleteChunk {
+    return SctpShutdownCompleteChunk{};
+}
+
 /// Create an empty SCTP SACK gap-ack block container.
 export fn sctp_sack_gap_ack_block_make() SctpSackGapAckBlock {
     return SctpSackGapAckBlock{};
@@ -513,6 +551,68 @@ export fn sctp_heartbeat_ack_chunk_parse(packet: &[byte]) !SctpHeartbeatAckChunk
     var chunk: SctpHeartbeatAckChunk = sctp_heartbeat_ack_chunk_make();
     chunk.flags = header.flags;
     chunk.info = packet[4usize:header.length - 4usize];
+    return chunk;
+}
+
+/// Parse an SCTP ABORT chunk body and preserve the error cause bytes.
+export fn sctp_abort_chunk_parse(packet: &[byte]) !SctpAbortChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_ABORT {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpAbortChunk = sctp_abort_chunk_make();
+    chunk.flags = header.flags;
+    chunk.error_causes = packet[4usize:header.length - 4usize];
+    return chunk;
+}
+
+/// Parse an SCTP SHUTDOWN chunk body.
+export fn sctp_shutdown_chunk_parse(packet: &[byte]) !SctpShutdownChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_SHUTDOWN {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length != 8usize {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpShutdownChunk = sctp_shutdown_chunk_make();
+    chunk.flags = header.flags;
+    chunk.cumulative_tsn_ack = try read_be_u32(packet[4usize:4]);
+    return chunk;
+}
+
+/// Parse an SCTP SHUTDOWN_ACK chunk body.
+export fn sctp_shutdown_ack_chunk_parse(packet: &[byte]) !SctpShutdownAckChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_SHUTDOWN_ACK {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length != SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpShutdownAckChunk = sctp_shutdown_ack_chunk_make();
+    chunk.flags = header.flags;
+    return chunk;
+}
+
+/// Parse an SCTP SHUTDOWN_COMPLETE chunk body.
+export fn sctp_shutdown_complete_chunk_parse(packet: &[byte]) !SctpShutdownCompleteChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_SHUTDOWN_COMPLETE {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length != SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpShutdownCompleteChunk = sctp_shutdown_complete_chunk_make();
+    chunk.flags = header.flags;
     return chunk;
 }
 
@@ -724,6 +824,70 @@ export fn sctp_heartbeat_ack_chunk_write(chunk: &SctpHeartbeatAckChunk, buffer: 
     }
 
     return padded_length;
+}
+
+/// Write an SCTP ABORT chunk.
+export fn sctp_abort_chunk_write(chunk: &SctpAbortChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + chunk.error_causes.len;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_ABORT, chunk.flags, chunk_length);
+    try sctp_copy_bytes(buffer[4usize:chunk.error_causes.len], chunk.error_causes, chunk.error_causes.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+
+    return padded_length;
+}
+
+/// Write an SCTP SHUTDOWN chunk.
+export fn sctp_shutdown_chunk_write(chunk: &SctpShutdownChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if buffer.len < 8usize {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_SHUTDOWN, chunk.flags, 8usize);
+    try write_be_u32(buffer[4usize:4], chunk.cumulative_tsn_ack);
+    return 8usize;
+}
+
+/// Write an SCTP SHUTDOWN_ACK chunk.
+export fn sctp_shutdown_ack_chunk_write(chunk: &SctpShutdownAckChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if buffer.len < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_SHUTDOWN_ACK, chunk.flags, SCTP_CHUNK_HEADER_BYTES);
+    return SCTP_CHUNK_HEADER_BYTES;
+}
+
+/// Write an SCTP SHUTDOWN_COMPLETE chunk.
+export fn sctp_shutdown_complete_chunk_write(chunk: &SctpShutdownCompleteChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if buffer.len < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_SHUTDOWN_COMPLETE, chunk.flags, SCTP_CHUNK_HEADER_BYTES);
+    return SCTP_CHUNK_HEADER_BYTES;
 }
 
 /// Write an SCTP SACK chunk.
