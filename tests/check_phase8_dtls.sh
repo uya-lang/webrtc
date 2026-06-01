@@ -119,6 +119,5 @@ xxd -r -p tests/fixtures/dtls/certs/openssl_self_signed_p256.der.hex \
 
 python3 tests/dtls_vectors.py
 python3 tests/dtls_exporter_reference.py
-python3 tests/dtls_openssl_interop.py validate
-python3 tests/dtls_browser_fixtures.py
+python3 tests/dtls_openssl_interop.py validate-all
 ../uya/bin/uya run src/webrtc_dtls_test_main.uya

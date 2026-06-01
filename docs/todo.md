@@ -230,7 +230,7 @@
 - [x] 实现 alert。
 - [x] 实现 certificate fingerprint 校验。
 - [x] 集成 ICE selected pair。
-- [ ] 增加 OpenSSL/浏览器互通测试脚本。
+- [x] 增加 OpenSSL/浏览器互通测试脚本。
 
 验收标准：
 

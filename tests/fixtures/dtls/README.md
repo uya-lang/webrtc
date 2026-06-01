@@ -12,4 +12,4 @@
 - OpenSSL 握手元数据（`openssl_handshake.json`），覆盖证书、cipher suite、SRTP profile
 - 浏览器握手能力 fixture（`browser_handshake.json`），覆盖 Chrome/Firefox 的 fingerprint、setup role、transport profile、SRTP profile 期望值
 
-这些样本当前用于 fixture 完整性检查和互通前置校验；真正的线上互通仍依赖后续脚本和端到端握手回归。
+这些样本当前用于 fixture 完整性检查和互通前置校验；统一入口：`python3 tests/dtls_openssl_interop.py validate-all`。
