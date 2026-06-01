@@ -16,12 +16,14 @@ test -x tests/srtp_vectors.py
 test -x tests/srtp_sequence_replay_tests.py
 test -f benchmarks/baselines/bench_srtp.jsonl
 test -x tests/srtp_bench_baseline.py
+test -f src/webrtc_srtp_kdf_test_main.uya
 
 # Validate vectors
 python3 tests/srtp_vectors.py
 python3 tests/srtp_sequence_replay_tests.py
 python3 tests/srtp_bench_baseline.py
 ../uya/bin/uya check src/webrtc_srtp_model_check.uya
+../uya/bin/uya run src/webrtc_srtp_kdf_test_main.uya
 
 # Check key exports
 rg -q "export struct SrtpContext" src/webrtc/srtp/model.uya

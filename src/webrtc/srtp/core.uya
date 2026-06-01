@@ -1,0 +1,183 @@
+// webrtc.srtp.core - SRTP core helpers used by Phase 9 tests
+// 模块路径：src/webrtc/srtp/core.uya → use webrtc.srtp.core;
+
+use webrtc.crypto.aes;
+use webrtc.srtp.model;
+use webrtc.errors;
+
+const SRTP_LABEL_ENCRYPTION: byte = 0x00 as byte;
+const SRTP_LABEL_AUTH: byte = 0x01 as byte;
+const SRTP_LABEL_SALT: byte = 0x02 as byte;
+const SRTCP_LABEL_ENCRYPTION: byte = 0x03 as byte;
+const SRTCP_LABEL_AUTH: byte = 0x04 as byte;
+const SRTCP_LABEL_SALT: byte = 0x05 as byte;
+
+const SRTP_COUNTER_BYTES: usize = 16usize;
+const SRTP_KDF_MAX_BYTES: usize = 96usize;
+
+export const SRTP_CORE_VERSION: i32 = 1i32;
+
+fn srtp_kdf_counter_init(master_salt: &[byte], label: byte, out_counter: &[byte]) !void {
+    if master_salt.len != SRTP_SALT_BYTES || out_counter.len != SRTP_COUNTER_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var index: usize = 0usize;
+    while index < SRTP_SALT_BYTES {
+        out_counter[index] = master_salt[index];
+        index = index + 1usize;
+    }
+    out_counter[7usize] = out_counter[7usize] ^ label;
+    out_counter[14usize] = 0 as byte;
+    out_counter[15usize] = 0 as byte;
+}
+
+fn srtp_kdf_derive(master_key: &[byte], master_salt: &[byte], label: byte, out: &[byte]) !void {
+    if master_key.len != SRTP_KEY_BYTES || master_salt.len != SRTP_SALT_BYTES {
+        return error.InvalidPacket;
+    }
+    if out.len == 0usize || out.len > SRTP_KDF_MAX_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+    try crypto_aes_key_schedule_init(&schedule, master_key);
+
+    var counter: [byte: SRTP_COUNTER_BYTES] = [];
+    try srtp_kdf_counter_init(master_salt, label, counter[0:SRTP_COUNTER_BYTES]);
+
+    var zeros: [byte: SRTP_KDF_MAX_BYTES] = [];
+    try crypto_aes_ctr_xor(
+        &schedule,
+        counter[0:SRTP_COUNTER_BYTES],
+        zeros[0:out.len],
+        out,
+    );
+}
+
+export fn srtp_derive_session_keys(ctx: &SrtpContext) !void {
+    if ctx == null {
+        return error.InvalidPacket;
+    }
+
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTP_LABEL_ENCRYPTION,
+        ctx.cipher_key[0:SRTP_KEY_BYTES],
+    );
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTP_LABEL_AUTH,
+        ctx.auth_key[0:SRTP_AUTH_KEY_BYTES],
+    );
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTP_LABEL_SALT,
+        ctx.cipher_salt[0:SRTP_SALT_BYTES],
+    );
+}
+
+export fn srtcp_derive_session_keys(ctx: &SrtcpContext) !void {
+    if ctx == null {
+        return error.InvalidPacket;
+    }
+
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTCP_LABEL_ENCRYPTION,
+        ctx.cipher_key[0:SRTP_KEY_BYTES],
+    );
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTCP_LABEL_AUTH,
+        ctx.auth_key[0:SRTP_AUTH_KEY_BYTES],
+    );
+    try srtp_kdf_derive(
+        ctx.master_key[0:SRTP_KEY_BYTES],
+        ctx.master_salt[0:SRTP_SALT_BYTES],
+        SRTCP_LABEL_SALT,
+        ctx.cipher_salt[0:SRTP_SALT_BYTES],
+    );
+}
+
+export fn srtp_index_guess(current_roc: u32, highest_index: u64, seq: u16) u64 {
+    const s_l: u16 = (highest_index & 0xffffu64) as u16;
+    var guessed_roc: u32 = current_roc;
+
+    if s_l < 0x8000u16 {
+        if seq > s_l + 0x8000u16 {
+            if guessed_roc > 0u32 {
+                guessed_roc = guessed_roc - 1u32;
+            }
+        }
+    } else {
+        if s_l - 0x8000u16 > seq {
+            guessed_roc = guessed_roc + 1u32;
+        }
+    }
+
+    return ((guessed_roc as u64) << 16i32) | (seq as u64);
+}
+
+export fn srtp_replay_check(ctx: &SrtpContext, index: u64) bool {
+    if ctx == null {
+        return false;
+    }
+
+    if ctx.has_recv_index == false {
+        return true;
+    }
+
+    if index > ctx.s_largest_index {
+        return true;
+    }
+
+    const delta: u64 = ctx.s_largest_index - index;
+    if delta >= SRTP_REPLAY_WINDOW_BITS as u64 {
+        return false;
+    }
+
+    const mask: u64 = 1u64 << (delta as i32);
+    return (ctx.replay_window & mask) == 0u64;
+}
+
+export fn srtp_replay_accept(ctx: &SrtpContext, index: u64) !void {
+    if ctx == null {
+        return error.InvalidPacket;
+    }
+
+    if ctx.has_recv_index == false {
+        ctx.has_recv_index = true;
+        ctx.s_largest_index = index;
+        ctx.roc = (index >> 16i32) as u32;
+        ctx.replay_window = 1u64;
+        return;
+    }
+
+    if index > ctx.s_largest_index {
+        const shift: u64 = index - ctx.s_largest_index;
+        if shift >= SRTP_REPLAY_WINDOW_BITS as u64 {
+            ctx.replay_window = 1u64;
+        } else {
+            ctx.replay_window = (ctx.replay_window << (shift as i32)) | (1u64 as u64);
+        }
+        ctx.s_largest_index = index;
+        ctx.roc = (index >> 16i32) as u32;
+        return;
+    }
+
+    const delta: u64 = ctx.s_largest_index - index;
+    if delta >= SRTP_REPLAY_WINDOW_BITS as u64 {
+        return error.ReplayRejected;
+    }
+    const mask: u64 = 1u64 << (delta as i32);
+    if (ctx.replay_window & mask) != 0u64 {
+        return error.ReplayRejected;
+    }
+    ctx.replay_window = ctx.replay_window | mask;
+}

@@ -1,0 +1,96 @@
+use libc.printf;
+use webrtc.srtp.model;
+use webrtc.srtp.core;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn srtp_kdf_test_rfc3711_vector() i32 {
+    var master_key: [byte: SRTP_KEY_BYTES] = [
+        0xe1 as byte, 0xf9 as byte, 0x7a as byte, 0x0d as byte,
+        0x3e as byte, 0x01 as byte, 0x8b as byte, 0xe0 as byte,
+        0xd6 as byte, 0x4f as byte, 0xa3 as byte, 0x2c as byte,
+        0x06 as byte, 0xde as byte, 0x41 as byte, 0x39 as byte,
+    ];
+    var master_salt: [byte: SRTP_SALT_BYTES] = [
+        0x0e as byte, 0xc6 as byte, 0x75 as byte, 0xad as byte,
+        0x49 as byte, 0x8a as byte, 0xfe as byte, 0xeb as byte,
+        0xb6 as byte, 0x96 as byte, 0x0b as byte, 0x3a as byte,
+        0xab as byte, 0xe6 as byte,
+    ];
+
+    var ctx: SrtpContext = srtp_context_make();
+    if srtp_context_init(
+        &ctx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x12345678u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 10;
+    }
+    if srtp_derive_session_keys(&ctx).error_id != 0 {
+        return 11;
+    }
+
+    var expect_cipher_key: [byte: SRTP_KEY_BYTES] = [
+        0xc6 as byte, 0x1e as byte, 0x7a as byte, 0x93 as byte,
+        0x74 as byte, 0x4f as byte, 0x39 as byte, 0xee as byte,
+        0x10 as byte, 0x73 as byte, 0x4a as byte, 0xfe as byte,
+        0x3f as byte, 0xf7 as byte, 0xa0 as byte, 0x87 as byte,
+    ];
+    var expect_cipher_salt: [byte: SRTP_SALT_BYTES] = [
+        0x30 as byte, 0xcb as byte, 0xbc as byte, 0x08 as byte,
+        0x86 as byte, 0x3d as byte, 0x8c as byte, 0x85 as byte,
+        0xd4 as byte, 0x9d as byte, 0xb3 as byte, 0x4a as byte,
+        0x9a as byte, 0xe1 as byte,
+    ];
+    var expect_auth_key: [byte: SRTP_AUTH_KEY_BYTES] = [
+        0xce as byte, 0xbe as byte, 0x32 as byte, 0x1f as byte, 0x6f as byte, 0xf7 as byte, 0x71 as byte, 0x6b as byte,
+        0x6f as byte, 0xd4 as byte, 0xab as byte, 0x49 as byte, 0xaf as byte, 0x25 as byte, 0x6a as byte, 0x15 as byte,
+        0x6d as byte, 0x38 as byte, 0xba as byte, 0xa4 as byte, 0x8f as byte, 0x0a as byte, 0x0a as byte, 0xcf as byte,
+        0x3c as byte, 0x34 as byte, 0xe2 as byte, 0x35 as byte, 0x9e as byte, 0x6c as byte, 0xdb as byte, 0xce as byte,
+        0xe0 as byte, 0x49 as byte, 0x64 as byte, 0x6c as byte, 0x43 as byte, 0xd9 as byte, 0x32 as byte, 0x7a as byte,
+        0xd1 as byte, 0x75 as byte, 0x57 as byte, 0x8e as byte, 0xf7 as byte, 0x22 as byte, 0x70 as byte, 0x98 as byte,
+        0x63 as byte, 0x71 as byte, 0xc1 as byte, 0x0c as byte, 0x9a as byte, 0x36 as byte, 0x9a as byte, 0xc2 as byte,
+        0xf9 as byte, 0x4a as byte, 0x8c as byte, 0x5f as byte, 0xbc as byte, 0xdd as byte, 0xdc as byte, 0x25 as byte,
+        0x6d as byte, 0x6e as byte, 0x91 as byte, 0x9a as byte, 0x48 as byte, 0xb6 as byte, 0x10 as byte, 0xef as byte,
+        0x17 as byte, 0xc2 as byte, 0x04 as byte, 0x1e as byte, 0x47 as byte, 0x40 as byte, 0x35 as byte, 0x76 as byte,
+        0x6b as byte, 0x68 as byte, 0x64 as byte, 0x2c as byte, 0x59 as byte, 0xbb as byte, 0xfc as byte, 0x2f as byte,
+        0x34 as byte, 0xdb as byte, 0x60 as byte, 0xdb as byte, 0xdf as byte, 0xb2 as byte,
+    ];
+
+    if !bytes_equal(ctx.cipher_key[0:SRTP_KEY_BYTES], expect_cipher_key[0:SRTP_KEY_BYTES]) {
+        return 12;
+    }
+    if !bytes_equal(ctx.cipher_salt[0:SRTP_SALT_BYTES], expect_cipher_salt[0:SRTP_SALT_BYTES]) {
+        return 13;
+    }
+    if !bytes_equal(ctx.auth_key[0:SRTP_AUTH_KEY_BYTES], expect_auth_key[0:SRTP_AUTH_KEY_BYTES]) {
+        return 14;
+    }
+
+    return 0;
+}
+
+fn main() i32 {
+    const result: i32 = srtp_kdf_test_rfc3711_vector();
+    if result != 0i32 {
+        printf("SRTP KDF test failed: %d\n", result);
+        return result;
+    }
+
+    printf("SRTP KDF tests passed\n");
+    return 0i32;
+}

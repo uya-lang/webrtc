@@ -245,7 +245,7 @@
 - [x] 先增加 sequence wrap、ROC、replay window failing tests。
 - [x] 先建立 `bench_srtp` 基线和零堆分配断言。
 - [x] 定义 SRTP context。
-- [ ] 实现 key derivation。
+- [x] 实现 key derivation。
 - [ ] 实现 RTP sequence rollover counter。
 - [ ] 实现 replay window。
 - [ ] 实现 `SRTP_AES128_CM_HMAC_SHA1_80`。
