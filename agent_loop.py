@@ -908,6 +908,24 @@ def normalize_task_texts(task_texts):
     return normalize_string_list(task_texts)
 
 
+def normalize_string_value(value):
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+
+    return normalized
+
+
+def resolve_codex_model(state):
+    if not isinstance(state, dict):
+        return None
+
+    return normalize_string_value(state.get("codex_model"))
+
+
 def session_record_matches_tasks(record, task_texts):
     if not isinstance(record, dict):
         return False
@@ -1082,6 +1100,9 @@ def print_status(paths, state, status_lines):
     print(f"[agent] project root: {path_label(root, root)}")
     print(f"[agent] todo: {todo_label(root, resolve_path(root, state['todo_file']))}")
     print(f"[agent] updated at: {state.get('updated_at', '')}")
+    codex_model = resolve_codex_model(state)
+    if codex_model is not None:
+        print(f"[agent] codex model: {codex_model}")
     runner = state.get("runner")
     runner_pid = runner.get("pid") if isinstance(runner, dict) else None
     runner_alive = process_is_alive(runner_pid)
@@ -1864,6 +1885,7 @@ def run_codex(
     display = LiveOutputDisplay(sys.stdout)
     log_path_text = path_label(root, log_file)
     resume_session_id_for_attempt = normalize_session_id(resume_session_id)
+    codex_model = resolve_codex_model(state)
     attempted_without_resume = False
     returncode = 1
 
@@ -1893,6 +1915,7 @@ def run_codex(
                 root,
                 prompt,
                 resume_session_id=resume_session_id_for_attempt,
+                model=codex_model,
             )
             if attempted_without_resume:
                 log_size += write_log_text("[agent] retrying without session resume\n\n")
@@ -2163,15 +2186,22 @@ def run_codex(
     return returncode == 0, log_file
 
 
-def build_codex_exec_command(root, prompt, resume_session_id=None):
+def build_codex_exec_command(root, prompt, resume_session_id=None, model=None):
     cmd = [
         CODEX_CMD,
         "exec",
         "--sandbox",
         CODEX_SANDBOX,
+    ]
+
+    normalized_model = normalize_string_value(model)
+    if normalized_model is not None:
+        cmd.extend(["--model", normalized_model])
+
+    cmd.extend([
         "--cd",
         str(root),
-    ]
+    ])
 
     normalized_session_id = normalize_session_id(resume_session_id)
     if normalized_session_id is not None:

@@ -77,6 +77,33 @@ class AgentLoopSandboxTests(unittest.TestCase):
             ],
         )
 
+    def test_state_codex_model_is_respected(self):
+        module = load_agent_loop_module({"CODEX_SANDBOX": None})
+
+        state = module.empty_state(Path("/tmp/project"), Path("/tmp/project/docs/todo.md"))
+        state["codex_model"] = "o3"
+
+        cmd = module.build_codex_exec_command(
+            Path("/tmp/repo"),
+            "prompt",
+            model=module.resolve_codex_model(state),
+        )
+
+        self.assertEqual(
+            cmd,
+            [
+                "codex",
+                "exec",
+                "--sandbox",
+                "danger-full-access",
+                "--model",
+                "o3",
+                "--cd",
+                "/tmp/repo",
+                "prompt",
+            ],
+        )
+
     def test_invalid_sandbox_still_fails_fast(self):
         with self.assertRaises(SystemExit) as excinfo:
             load_agent_loop_module({"CODEX_SANDBOX": "nope"})
