@@ -8,6 +8,10 @@ export error Vp8RtpExtensionNotSupported;
 export error Vp8RtpInvalidPictureId;
 export error Vp8RtpInvalidTemporalLayerId;
 export error Vp8RtpInvalidKeyIndex;
+export error Vp8RtpReassemblyStateRequired;
+export error Vp8RtpReassemblyFrameNotStarted;
+export error Vp8RtpReassemblyUnexpectedFrameStart;
+export error Vp8RtpReassemblyPictureIdMismatch;
 
 export struct Vp8RtpDescriptor {
     extension: bool = false,
@@ -27,6 +31,13 @@ export struct Vp8RtpDescriptor {
     payload: &[byte] = [],
 }
 
+export struct Vp8RtpFrameReassemblyState {
+    active: bool = false,
+    has_picture_id: bool = false,
+    picture_id: u16 = 0u16,
+    bytes_written: usize = 0usize,
+}
+
 fn vp8_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
     if len > dst.len || len > src.len {
         return error.Vp8RtpBufferTooSmall;
@@ -41,6 +52,21 @@ fn vp8_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
 
 export fn vp8_rtp_descriptor_make() Vp8RtpDescriptor {
     return Vp8RtpDescriptor{};
+}
+
+export fn vp8_rtp_frame_reassembly_state_make() Vp8RtpFrameReassemblyState {
+    return Vp8RtpFrameReassemblyState{};
+}
+
+export fn vp8_rtp_frame_reassembly_reset(state: &Vp8RtpFrameReassemblyState) !void {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+
+    state.active = false;
+    state.has_picture_id = false;
+    state.picture_id = 0u16;
+    state.bytes_written = 0usize;
 }
 
 export fn vp8_rtp_descriptor_parse(packet: &[byte]) !Vp8RtpDescriptor {
@@ -125,6 +151,56 @@ export fn vp8_rtp_descriptor_parse(packet: &[byte]) !Vp8RtpDescriptor {
     descriptor.payload_offset = offset;
     descriptor.payload = packet[offset:packet.len - offset];
     return descriptor;
+}
+
+export fn vp8_rtp_frame_reassembly_absorb(
+    state: &Vp8RtpFrameReassemblyState,
+    packet: &[byte],
+    marker: bool,
+    out_frame: &[byte],
+) !usize {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+
+    const descriptor: Vp8RtpDescriptor = try vp8_rtp_descriptor_parse(packet);
+
+    if !state.active {
+        if !descriptor.start_of_partition || descriptor.partition_index != 0u8 {
+            return error.Vp8RtpReassemblyFrameNotStarted;
+        }
+        state.active = true;
+        state.has_picture_id = descriptor.has_picture_id;
+        state.picture_id = descriptor.picture_id;
+        state.bytes_written = 0usize;
+    } else {
+        if descriptor.start_of_partition && descriptor.partition_index == 0u8 {
+            return error.Vp8RtpReassemblyUnexpectedFrameStart;
+        }
+        if state.has_picture_id != descriptor.has_picture_id {
+            return error.Vp8RtpReassemblyPictureIdMismatch;
+        }
+        if state.has_picture_id && descriptor.picture_id != state.picture_id {
+            return error.Vp8RtpReassemblyPictureIdMismatch;
+        }
+    }
+
+    if state.bytes_written + descriptor.payload.len > out_frame.len {
+        return error.Vp8RtpBufferTooSmall;
+    }
+    try vp8_rtp_copy_bytes(
+        out_frame[state.bytes_written:descriptor.payload.len],
+        descriptor.payload,
+        descriptor.payload.len,
+    );
+    state.bytes_written = state.bytes_written + descriptor.payload.len;
+
+    if marker {
+        const frame_len: usize = state.bytes_written;
+        try vp8_rtp_frame_reassembly_reset(state);
+        return frame_len;
+    }
+    return 0usize;
 }
 
 export fn vp8_rtp_descriptor_write(
