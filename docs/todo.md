@@ -266,7 +266,7 @@
 
 - [x] 先增加 RTP/RTCP parser fixtures、截断包、extension 边界 failing tests。
 - [x] 先建立 RTP/RTCP parser microbench 和 allocation count 基线。
-- [ ] 实现 RTP header parser/writer。
+- [x] 实现 RTP header parser/writer。
 - [ ] 实现 one-byte/two-byte RTP header extension。
 - [ ] 实现 MID extension。
 - [ ] 实现 abs-send-time extension。

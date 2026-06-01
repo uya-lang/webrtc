@@ -1,0 +1,196 @@
+use libc.printf;
+use webrtc.rtp.rtp_packet;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn check_parse_valid_cases() i32 {
+    var minimal: [byte: 12] = [
+        0x80 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+    ];
+    const parsed_minimal: !RtpPacket = rtp_packet_parse(minimal[0:12]);
+    if parsed_minimal.error_id != 0 {
+        return 10i32;
+    }
+    if parsed_minimal.value.header.version != 2u8
+        || parsed_minimal.value.header.sequence_number != 1u16
+        || parsed_minimal.value.header.timestamp != 1u32
+        || parsed_minimal.value.header.ssrc != 0x12345678u32 {
+        return 11i32;
+    }
+
+    var with_extension: [byte: 20] = [
+        0x90 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+        0xbe as byte, 0xde as byte, 0x00 as byte, 0x01 as byte,
+        0x10 as byte, 0x30 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const parsed_extension: !RtpPacket = rtp_packet_parse(with_extension[0:20]);
+    if parsed_extension.error_id != 0 {
+        return 12i32;
+    }
+    if !parsed_extension.value.header.extension || parsed_extension.value.header.extension_profile != 0xbedeu16 {
+        return 13i32;
+    }
+    if parsed_extension.value.header.extension_data.len != 4usize {
+        return 14i32;
+    }
+    const extension_data: &[byte] = parsed_extension.value.header.extension_data;
+    if extension_data[0] != 0x10 as byte {
+        return 15i32;
+    }
+
+    var with_padding: [byte: 16] = [
+        0xa0 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+    ];
+    const parsed_padding: !RtpPacket = rtp_packet_parse(with_padding[0:16]);
+    if parsed_padding.error_id != 0 {
+        return 16i32;
+    }
+    if !parsed_padding.value.header.padding || parsed_padding.value.header.padding_size != 4usize {
+        return 17i32;
+    }
+    if parsed_padding.value.header.payload.len != 0usize {
+        return 18i32;
+    }
+    return 0i32;
+}
+
+fn check_parse_invalid_cases() i32 {
+    var truncated: [byte: 1] = [0x80 as byte];
+    const truncated_result: !RtpPacket = rtp_packet_parse(truncated[0:1]);
+    if truncated_result.error_id != @error_id(error.RtpPacketTooSmall) {
+        return 20i32;
+    }
+
+    var bad_version: [byte: 12] = [
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+    ];
+    const version_result: !RtpPacket = rtp_packet_parse(bad_version[0:12]);
+    if version_result.error_id != @error_id(error.RtpInvalidVersion) {
+        return 21i32;
+    }
+
+    var truncated_csrc: [byte: 14] = [
+        0x81 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+        0x00 as byte, 0x00 as byte,
+    ];
+    const csrc_result: !RtpPacket = rtp_packet_parse(truncated_csrc[0:14]);
+    if csrc_result.error_id != @error_id(error.RtpInvalidHeaderLength) {
+        return 22i32;
+    }
+
+    var bad_ext_len: [byte: 20] = [
+        0x90 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+        0xbe as byte, 0xde as byte, 0x00 as byte, 0x02 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const ext_result: !RtpPacket = rtp_packet_parse(bad_ext_len[0:20]);
+    if ext_result.error_id != @error_id(error.RtpInvalidExtensionLength) {
+        return 23i32;
+    }
+
+    var bad_padding: [byte: 16] = [
+        0xa0 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const padding_result: !RtpPacket = rtp_packet_parse(bad_padding[0:16]);
+    if padding_result.error_id != @error_id(error.RtpInvalidPaddingLength) {
+        return 24i32;
+    }
+
+    return 0i32;
+}
+
+fn check_writer_roundtrip() i32 {
+    var header: RtpHeader = rtp_header_make();
+    header.version = 2u8;
+    header.padding = true;
+    header.padding_size = 4usize;
+    header.extension = true;
+    header.csrc_count = 1u8;
+    header.marker = true;
+    header.payload_type = 96u8;
+    header.sequence_number = 0x1234u16;
+    header.timestamp = 0x01020304u32;
+    header.ssrc = 0x11223344u32;
+    header.csrc[0] = 0x55667788u32;
+
+    var extension_data: [byte: 4] = [0x10 as byte, 0x30 as byte, 0x00 as byte, 0x00 as byte];
+    header.extension_profile = 0xbedeu16;
+    header.extension_data = extension_data[0:4];
+
+    var payload: [byte: 3] = [0xaa as byte, 0xbb as byte, 0xcc as byte];
+    var out: [byte: 64] = [];
+    const written: !usize = rtp_packet_write(&header, payload[0:3], out[0:64]);
+    if written.error_id != 0 || written.value != 31usize {
+        return 30i32;
+    }
+
+    const parsed: !RtpPacket = rtp_packet_parse(out[0:written.value]);
+    if parsed.error_id != 0 {
+        return 31i32;
+    }
+    if parsed.value.header.sequence_number != header.sequence_number
+        || parsed.value.header.timestamp != header.timestamp
+        || parsed.value.header.ssrc != header.ssrc
+        || parsed.value.header.csrc_count != 1u8
+        || parsed.value.header.csrc[0] != header.csrc[0] {
+        return 32i32;
+    }
+    if parsed.value.header.payload_type != 96u8 || !parsed.value.header.marker {
+        return 33i32;
+    }
+    if !bytes_equal(parsed.value.header.payload, payload[0:3]) {
+        return 34i32;
+    }
+    if !parsed.value.header.padding || parsed.value.header.padding_size != 4usize {
+        return 35i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_parse_valid_cases();
+    if result != 0i32 {
+        printf("RTP packet tests failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_parse_invalid_cases();
+    if result != 0i32 {
+        printf("RTP packet tests failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_writer_roundtrip();
+    if result != 0i32 {
+        printf("RTP packet tests failed: %d\n", result);
+        return 1i32;
+    }
+    printf("RTP packet parser/writer tests passed\n");
+    return 0i32;
+}
