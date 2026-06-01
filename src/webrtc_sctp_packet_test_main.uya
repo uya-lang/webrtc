@@ -414,6 +414,135 @@ fn check_data_chunk_malformed_cases() i32 {
     return 0i32;
 }
 
+fn check_sack_chunk_roundtrip() i32 {
+    var empty: SctpSackChunk = sctp_sack_chunk_make();
+    empty.flags = 0x00u8;
+    empty.cumulative_tsn_ack = 0x11223344u32;
+    empty.advertised_receiver_window_credit = 0x55667788u32;
+
+    var empty_buffer: [byte: 32] = [];
+    const empty_written: !usize = sctp_sack_chunk_write(&empty, empty_buffer[0:32]);
+    if empty_written.error_id != 0 || empty_written.value != 16usize {
+        return 120i32;
+    }
+
+    const empty_parsed: !SctpSackChunk = sctp_sack_chunk_parse(empty_buffer[0:empty_written.value]);
+    if empty_parsed.error_id != 0 {
+        return 121i32;
+    }
+    if empty_parsed.value.flags != empty.flags {
+        return 122i32;
+    }
+    if empty_parsed.value.cumulative_tsn_ack != empty.cumulative_tsn_ack {
+        return 123i32;
+    }
+    if empty_parsed.value.advertised_receiver_window_credit != empty.advertised_receiver_window_credit {
+        return 124i32;
+    }
+    if empty_parsed.value.gap_ack_block_count != 0usize || empty_parsed.value.duplicate_tsn_count != 0usize {
+        return 125i32;
+    }
+
+    var populated: SctpSackChunk = sctp_sack_chunk_make();
+    populated.flags = 0x80u8;
+    populated.cumulative_tsn_ack = 0x99aabbccu32;
+    populated.advertised_receiver_window_credit = 0x01020304u32;
+    populated.gap_ack_block_count = 2usize;
+    populated.gap_ack_blocks[0usize].start = 1u16;
+    populated.gap_ack_blocks[0usize].end = 3u16;
+    populated.gap_ack_blocks[1usize].start = 5u16;
+    populated.gap_ack_blocks[1usize].end = 8u16;
+    populated.duplicate_tsn_count = 2usize;
+    populated.duplicate_tsns[0usize] = 0x11223350u32;
+    populated.duplicate_tsns[1usize] = 0x11223351u32;
+
+    var populated_buffer: [byte: 64] = [];
+    const populated_written: !usize = sctp_sack_chunk_write(&populated, populated_buffer[0:64]);
+    if populated_written.error_id != 0 || populated_written.value != 32usize {
+        return 126i32;
+    }
+
+    const populated_parsed: !SctpSackChunk = sctp_sack_chunk_parse(populated_buffer[0:populated_written.value]);
+    if populated_parsed.error_id != 0 {
+        return 127i32;
+    }
+    if populated_parsed.value.flags != 0x80u8 {
+        return 128i32;
+    }
+    if populated_parsed.value.cumulative_tsn_ack != 0x99aabbccu32 {
+        return 129i32;
+    }
+    if populated_parsed.value.advertised_receiver_window_credit != 0x01020304u32 {
+        return 130i32;
+    }
+    if populated_parsed.value.gap_ack_block_count != 2usize || populated_parsed.value.duplicate_tsn_count != 2usize {
+        return 131i32;
+    }
+    if populated_parsed.value.gap_ack_blocks[0usize].start != 1u16 || populated_parsed.value.gap_ack_blocks[0usize].end != 3u16 {
+        return 132i32;
+    }
+    if populated_parsed.value.gap_ack_blocks[1usize].start != 5u16 || populated_parsed.value.gap_ack_blocks[1usize].end != 8u16 {
+        return 133i32;
+    }
+    if populated_parsed.value.duplicate_tsns[0usize] != 0x11223350u32 || populated_parsed.value.duplicate_tsns[1usize] != 0x11223351u32 {
+        return 134i32;
+    }
+
+    return 0i32;
+}
+
+fn check_sack_chunk_malformed_cases() i32 {
+    var too_short: [byte: 3] = [0x03 as byte, 0x00 as byte, 0x00 as byte];
+    const too_short_result: !SctpSackChunk = sctp_sack_chunk_parse(too_short[0:3]);
+    if too_short_result.error_id != @error_id(error.SctpPacketTooSmall) {
+        return 140i32;
+    }
+
+    var bad_length: [byte: 20] = [
+        0x03 as byte, 0x00 as byte, 0x00 as byte, 0x12 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const bad_length_result: !SctpSackChunk = sctp_sack_chunk_parse(bad_length[0:20]);
+    if bad_length_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 141i32;
+    }
+
+    var bad_count: [byte: 16] = [
+        0x03 as byte, 0x00 as byte, 0x00 as byte, 0x10 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x21 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    const bad_count_result: !SctpSackChunk = sctp_sack_chunk_parse(bad_count[0:16]);
+    if bad_count_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 142i32;
+    }
+
+    var wrong_type: [byte: 4] = [
+        0x0b as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x04 as byte,
+    ];
+    const wrong_type_result: !SctpSackChunk = sctp_sack_chunk_parse(wrong_type[0:4]);
+    if wrong_type_result.error_id != @error_id(error.SctpInvalidChunkType) {
+        return 143i32;
+    }
+
+    var too_many: SctpSackChunk = sctp_sack_chunk_make();
+    too_many.gap_ack_block_count = SCTP_SACK_MAX_GAP_ACK_BLOCKS + 1usize;
+    var too_many_buffer: [byte: 32] = [];
+    const too_many_result: !usize = sctp_sack_chunk_write(&too_many, too_many_buffer[0:32]);
+    if too_many_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 144i32;
+    }
+
+    return 0i32;
+}
+
 fn check_handshake_chunk_malformed_cases() i32 {
     var too_short_init: [byte: 3] = [
         0x01 as byte,
@@ -500,6 +629,18 @@ fn main() i32 {
     result = check_data_chunk_malformed_cases();
     if result != 0i32 {
         printf("SCTP DATA malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sack_chunk_roundtrip();
+    if result != 0i32 {
+        printf("SCTP SACK chunk tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sack_chunk_malformed_cases();
+    if result != 0i32 {
+        printf("SCTP SACK malformed tests failed: %d\n", result);
         return 1i32;
     }
 

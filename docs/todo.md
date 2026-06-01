@@ -350,7 +350,7 @@
 - [x] 实现 SCTP packet/chunk parser。
 - [x] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
 - [x] 实现 DATA chunk。
-- [ ] 实现 SACK。
+- [x] 实现 SACK。
 - [ ] 实现 HEARTBEAT。
 - [ ] 实现 ABORT / SHUTDOWN。
 - [ ] 实现 TSN tracking。

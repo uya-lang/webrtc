@@ -35,6 +35,14 @@ rg -q "export fn sctp_init_ack_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_cookie_echo_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_cookie_ack_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export const SCTP_DATA_CHUNK_FLAG_UNORDERED" src/webrtc/sctp/packet.uya
+rg -q "export const SCTP_SACK_MAX_GAP_ACK_BLOCKS" src/webrtc/sctp/packet.uya
+rg -q "export const SCTP_SACK_MAX_DUPLICATE_TSNS" src/webrtc/sctp/packet.uya
+rg -q "export struct SctpSackGapAckBlock" src/webrtc/sctp/packet.uya
+rg -q "export struct SctpSackChunk" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_sack_gap_ack_block_make" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_sack_chunk_make" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_sack_chunk_parse" src/webrtc/sctp/packet.uya
+rg -q "export fn sctp_sack_chunk_write" src/webrtc/sctp/packet.uya
 rg -q "export struct SctpDataChunk" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_data_chunk_make" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_data_chunk_parse" src/webrtc/sctp/packet.uya

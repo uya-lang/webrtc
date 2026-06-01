@@ -11,6 +11,8 @@ export const SCTP_CHUNK_TYPE_DATA: u8 = 0u8;
 export const SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT: u8 = 0x01u8;
 export const SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT: u8 = 0x02u8;
 export const SCTP_DATA_CHUNK_FLAG_UNORDERED: u8 = 0x04u8;
+export const SCTP_SACK_MAX_GAP_ACK_BLOCKS: usize = 32usize;
+export const SCTP_SACK_MAX_DUPLICATE_TSNS: usize = 32usize;
 
 export const SCTP_CHUNK_TYPE_INIT: u8 = 1u8;
 export const SCTP_CHUNK_TYPE_INIT_ACK: u8 = 2u8;
@@ -82,6 +84,22 @@ export struct SctpCookieEchoChunk {
 export struct SctpCookieAckChunk {
     flags: u8 = 0u8,
 }
+
+export struct SctpSackGapAckBlock {
+    start: u16 = 0u16,
+    end: u16 = 0u16,
+}
+
+export struct SctpSackChunk {
+    flags: u8 = 0u8,
+    cumulative_tsn_ack: u32 = 0u32,
+    advertised_receiver_window_credit: u32 = 0u32,
+    gap_ack_block_count: usize = 0usize,
+    gap_ack_blocks: [SctpSackGapAckBlock: SCTP_SACK_MAX_GAP_ACK_BLOCKS] = [],
+    duplicate_tsn_count: usize = 0usize,
+    duplicate_tsns: [u32: SCTP_SACK_MAX_DUPLICATE_TSNS] = [],
+}
+
 export struct SctpDataChunk {
     flags: u8 = 0u8,
     transmission_sequence_number: u32 = 0u32,
@@ -338,6 +356,16 @@ export fn sctp_cookie_echo_chunk_make() SctpCookieEchoChunk {
 export fn sctp_cookie_ack_chunk_make() SctpCookieAckChunk {
     return SctpCookieAckChunk{};
 }
+
+/// Create an empty SCTP SACK gap-ack block container.
+export fn sctp_sack_gap_ack_block_make() SctpSackGapAckBlock {
+    return SctpSackGapAckBlock{};
+}
+
+/// Create an empty SCTP SACK chunk container.
+export fn sctp_sack_chunk_make() SctpSackChunk {
+    return SctpSackChunk{};
+}
 /// Create an empty SCTP DATA chunk container.
 export fn sctp_data_chunk_make() SctpDataChunk {
     return SctpDataChunk{};
@@ -433,6 +461,59 @@ export fn sctp_cookie_ack_chunk_parse(packet: &[byte]) !SctpCookieAckChunk {
 
     var chunk: SctpCookieAckChunk = sctp_cookie_ack_chunk_make();
     chunk.flags = header.flags;
+    return chunk;
+}
+
+/// Parse an SCTP SACK chunk body and preserve gap/duplicate TSN tables.
+export fn sctp_sack_chunk_parse(packet: &[byte]) !SctpSackChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_SACK {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < 16usize {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const gap_ack_block_count: usize = (try read_be_u16(packet[12usize:2])) as usize;
+    const duplicate_tsn_count: usize = (try read_be_u16(packet[14usize:2])) as usize;
+    if gap_ack_block_count > SCTP_SACK_MAX_GAP_ACK_BLOCKS {
+        return error.SctpInvalidChunkLength;
+    }
+    if duplicate_tsn_count > SCTP_SACK_MAX_DUPLICATE_TSNS {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const expected_length: usize =
+        16usize +
+        (gap_ack_block_count * 4usize) +
+        (duplicate_tsn_count * 4usize);
+    if expected_length != header.length {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpSackChunk = sctp_sack_chunk_make();
+    chunk.flags = header.flags;
+    chunk.cumulative_tsn_ack = try read_be_u32(packet[4usize:4]);
+    chunk.advertised_receiver_window_credit = try read_be_u32(packet[8usize:4]);
+    chunk.gap_ack_block_count = gap_ack_block_count;
+    chunk.duplicate_tsn_count = duplicate_tsn_count;
+
+    var offset: usize = 16usize;
+    var block_index: usize = 0usize;
+    while block_index < gap_ack_block_count {
+        chunk.gap_ack_blocks[block_index].start = try read_be_u16(packet[offset:2]);
+        chunk.gap_ack_blocks[block_index].end = try read_be_u16(packet[offset + 2usize:2]);
+        offset = offset + 4usize;
+        block_index = block_index + 1usize;
+    }
+
+    var duplicate_index: usize = 0usize;
+    while duplicate_index < duplicate_tsn_count {
+        chunk.duplicate_tsns[duplicate_index] = try read_be_u32(packet[offset:4]);
+        offset = offset + 4usize;
+        duplicate_index = duplicate_index + 1usize;
+    }
+
     return chunk;
 }
 
@@ -542,6 +623,59 @@ export fn sctp_data_chunk_write(chunk: &SctpDataChunk, buffer: &[byte]) !usize {
         buffer[pad_index] = 0u8;
         pad_index = pad_index + 1usize;
     }
+    return padded_length;
+}
+
+/// Write an SCTP SACK chunk.
+export fn sctp_sack_chunk_write(chunk: &SctpSackChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if chunk.gap_ack_block_count > SCTP_SACK_MAX_GAP_ACK_BLOCKS {
+        return error.SctpInvalidChunkLength;
+    }
+    if chunk.duplicate_tsn_count > SCTP_SACK_MAX_DUPLICATE_TSNS {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const body_length: usize =
+        12usize +
+        (chunk.gap_ack_block_count * 4usize) +
+        (chunk.duplicate_tsn_count * 4usize);
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + body_length;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_SACK, chunk.flags, chunk_length);
+    try write_be_u32(buffer[4usize:4], chunk.cumulative_tsn_ack);
+    try write_be_u32(buffer[8usize:4], chunk.advertised_receiver_window_credit);
+    try write_be_u16(buffer[12usize:2], chunk.gap_ack_block_count as u16);
+    try write_be_u16(buffer[14usize:2], chunk.duplicate_tsn_count as u16);
+
+    var offset: usize = 16usize;
+    var block_index: usize = 0usize;
+    while block_index < chunk.gap_ack_block_count {
+        try write_be_u16(buffer[offset:2], chunk.gap_ack_blocks[block_index].start);
+        try write_be_u16(buffer[offset + 2usize:2], chunk.gap_ack_blocks[block_index].end);
+        offset = offset + 4usize;
+        block_index = block_index + 1usize;
+    }
+
+    var duplicate_index: usize = 0usize;
+    while duplicate_index < chunk.duplicate_tsn_count {
+        try write_be_u32(buffer[offset:4], chunk.duplicate_tsns[duplicate_index]);
+        offset = offset + 4usize;
+        duplicate_index = duplicate_index + 1usize;
+    }
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+
     return padded_length;
 }
 
