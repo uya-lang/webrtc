@@ -1,0 +1,333 @@
+use libc.printf;
+use std.async_frame;
+use webrtc.sctp.packet;
+use webrtc.sctp.stream;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn make_chunk(stream_id: u16, sequence_number: u16, flags: u8, ppi: u32, payload: &[byte]) SctpDataChunk {
+    var chunk: SctpDataChunk = sctp_data_chunk_make();
+    chunk.stream_identifier = stream_id;
+    chunk.stream_sequence_number = sequence_number;
+    chunk.flags = flags;
+    chunk.payload_protocol_identifier = ppi;
+    chunk.payload = payload;
+    return chunk;
+}
+
+fn check_ordered_delivery_and_reordering() i32 {
+    var stream_state: SctpStream = sctp_stream_make();
+    if !sctp_stream_init(&stream_state, 7u16, 100u16) {
+        return 10i32;
+    }
+
+    var payload_102: [byte: 4] = [0x10 as byte, 0x02 as byte, 0x02 as byte, 0x02 as byte];
+    var payload_104: [byte: 4] = [0x10 as byte, 0x04 as byte, 0x04 as byte, 0x04 as byte];
+    var payload_103: [byte: 4] = [0x10 as byte, 0x03 as byte, 0x03 as byte, 0x03 as byte];
+    var payload_100: [byte: 4] = [0x10 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte];
+    var payload_101: [byte: 4] = [0x10 as byte, 0x01 as byte, 0x01 as byte, 0x01 as byte];
+    const ordered_flags: u8 = SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT | SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT;
+
+    var chunk_102: SctpDataChunk = make_chunk(7u16, 102u16, ordered_flags, 1002u32, payload_102[0:4]);
+    var chunk_104: SctpDataChunk = make_chunk(7u16, 104u16, ordered_flags, 1004u32, payload_104[0:4]);
+    var chunk_103: SctpDataChunk = make_chunk(7u16, 103u16, ordered_flags, 1003u32, payload_103[0:4]);
+    var chunk_100: SctpDataChunk = make_chunk(7u16, 100u16, ordered_flags, 1000u32, payload_100[0:4]);
+    var chunk_101: SctpDataChunk = make_chunk(7u16, 101u16, ordered_flags, 1001u32, payload_101[0:4]);
+
+    if !sctp_stream_accept_chunk(&stream_state, &chunk_102) {
+        return 11i32;
+    }
+    if stream_state.ready_count != 0usize || stream_state.pending_count != 1usize {
+        return 12i32;
+    }
+
+    if !sctp_stream_accept_chunk(&stream_state, &chunk_104) {
+        return 13i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &chunk_103) {
+        return 14i32;
+    }
+    if stream_state.pending_count != 3usize {
+        return 15i32;
+    }
+
+    if !sctp_stream_accept_chunk(&stream_state, &chunk_100) {
+        return 16i32;
+    }
+    if stream_state.ready_count != 1usize || stream_state.pending_count != 3usize {
+        return 17i32;
+    }
+
+    if !sctp_stream_accept_chunk(&stream_state, &chunk_101) {
+        return 18i32;
+    }
+    if stream_state.ready_count != 5usize || stream_state.pending_count != 0usize {
+        return 19i32;
+    }
+    if stream_state.ready_high_watermark != 5usize || stream_state.pending_high_watermark != 3usize {
+        return 20i32;
+    }
+
+    var ready_0: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if ready_0.stream_sequence_number != 100u16 {
+        return 21i32;
+    }
+    if ready_0.payload_protocol_identifier != 1000u32 || !bytes_equal(ready_0.payload, payload_100[0:4]) {
+        return 22i32;
+    }
+
+    var ready_1: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if ready_1.stream_sequence_number != 101u16 {
+        return 23i32;
+    }
+    if ready_1.payload_protocol_identifier != 1001u32 || !bytes_equal(ready_1.payload, payload_101[0:4]) {
+        return 24i32;
+    }
+
+    var ready_2: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if ready_2.stream_sequence_number != 102u16 {
+        return 25i32;
+    }
+    if ready_2.payload_protocol_identifier != 1002u32 || !bytes_equal(ready_2.payload, payload_102[0:4]) {
+        return 26i32;
+    }
+
+    var ready_3: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if ready_3.stream_sequence_number != 103u16 {
+        return 27i32;
+    }
+    if ready_3.payload_protocol_identifier != 1003u32 || !bytes_equal(ready_3.payload, payload_103[0:4]) {
+        return 28i32;
+    }
+
+    var ready_4: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if ready_4.stream_sequence_number != 104u16 {
+        return 29i32;
+    }
+    if ready_4.payload_protocol_identifier != 1004u32 || !bytes_equal(ready_4.payload, payload_104[0:4]) {
+        return 30i32;
+    }
+
+    if sctp_stream_has_ready_chunk(&stream_state) {
+        return 31i32;
+    }
+
+    var late_chunk: SctpDataChunk = make_chunk(7u16, 100u16, ordered_flags, 2000u32, payload_100[0:4]);
+    if !sctp_stream_accept_chunk(&stream_state, &late_chunk) {
+        return 32i32;
+    }
+    if stream_state.drop_count != 1u64 {
+        return 33i32;
+    }
+
+    return 0i32;
+}
+
+fn check_ordered_wraparound_and_mismatch() i32 {
+    var stream_state: SctpStream = sctp_stream_make();
+    if !sctp_stream_init(&stream_state, 9u16, 0xFFFEu16) {
+        return 50i32;
+    }
+
+    var payload_fffe: [byte: 1] = [0xFE as byte];
+    var payload_ffff: [byte: 1] = [0xFF as byte];
+    var payload_0000: [byte: 1] = [0x00 as byte];
+    const ordered_flags: u8 = SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT | SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT;
+
+    var wrap_0000: SctpDataChunk = make_chunk(9u16, 0x0000u16, ordered_flags, 3000u32, payload_0000[0:1]);
+    var wrap_ffff: SctpDataChunk = make_chunk(9u16, 0xFFFFu16, ordered_flags, 3001u32, payload_ffff[0:1]);
+    var wrap_fffe: SctpDataChunk = make_chunk(9u16, 0xFFFEu16, ordered_flags, 2999u32, payload_fffe[0:1]);
+
+    if !sctp_stream_accept_chunk(&stream_state, &wrap_0000) {
+        return 51i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &wrap_ffff) {
+        return 52i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &wrap_fffe) {
+        return 53i32;
+    }
+    if stream_state.ready_count != 3usize || stream_state.pending_count != 0usize {
+        return 54i32;
+    }
+
+    var first: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if first.stream_sequence_number != 0xFFFEu16 {
+        return 55i32;
+    }
+    var second: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if second.stream_sequence_number != 0xFFFFu16 {
+        return 56i32;
+    }
+    var third: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if third.stream_sequence_number != 0x0000u16 {
+        return 57i32;
+    }
+
+    var unordered_payload: [byte: 1] = [0xAA as byte];
+    var wrong_stream: SctpDataChunk = make_chunk(10u16, 1u16, ordered_flags, 4000u32, unordered_payload[0:1]);
+    if sctp_stream_accept_chunk(&stream_state, &wrong_stream) {
+        return 58i32;
+    }
+
+    return 0i32;
+}
+
+fn check_unordered_delivery_fifo() i32 {
+    var stream_state: SctpStream = sctp_stream_make();
+    if !sctp_stream_init(&stream_state, 11u16, 0u16) {
+        return 60i32;
+    }
+
+    var payload_a: [byte: 2] = [0x01 as byte, 0xA1 as byte];
+    var payload_b: [byte: 2] = [0x02 as byte, 0xB2 as byte];
+    var payload_c: [byte: 2] = [0x03 as byte, 0xC3 as byte];
+    const unordered_flags: u8 = SCTP_DATA_CHUNK_FLAG_UNORDERED
+        | SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT
+        | SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT;
+
+    var unordered_19: SctpDataChunk = make_chunk(11u16, 19u16, unordered_flags, 5001u32, payload_a[0:2]);
+    var unordered_17: SctpDataChunk = make_chunk(11u16, 17u16, unordered_flags, 5002u32, payload_b[0:2]);
+    var unordered_18: SctpDataChunk = make_chunk(11u16, 18u16, unordered_flags, 5003u32, payload_c[0:2]);
+
+    if !sctp_stream_accept_chunk(&stream_state, &unordered_19) {
+        return 61i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &unordered_17) {
+        return 62i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &unordered_18) {
+        return 63i32;
+    }
+    if stream_state.ready_count != 3usize || stream_state.pending_count != 0usize {
+        return 64i32;
+    }
+
+    var first: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if first.stream_sequence_number != 19u16 {
+        return 65i32;
+    }
+    if !bytes_equal(first.payload, payload_a[0:2]) {
+        return 66i32;
+    }
+
+    var second: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if second.stream_sequence_number != 17u16 {
+        return 67i32;
+    }
+    if !bytes_equal(second.payload, payload_b[0:2]) {
+        return 68i32;
+    }
+
+    var third: SctpDataChunk = sctp_stream_pop_ready_chunk(&stream_state);
+    if third.stream_sequence_number != 18u16 {
+        return 69i32;
+    }
+    if !bytes_equal(third.payload, payload_c[0:2]) {
+        return 70i32;
+    }
+
+    if sctp_stream_has_ready_chunk(&stream_state) {
+        return 71i32;
+    }
+
+    return 0i32;
+}
+
+fn check_stream_reset() i32 {
+    var stream_state: SctpStream = sctp_stream_make();
+    if !sctp_stream_init(&stream_state, 13u16, 7u16) {
+        return 80i32;
+    }
+
+    var payload: [byte: 3] = [0x11 as byte, 0x22 as byte, 0x33 as byte];
+    const ordered_flags: u8 = SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT | SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT;
+    var chunk: SctpDataChunk = make_chunk(13u16, 7u16, ordered_flags, 6000u32, payload[0:3]);
+    if !sctp_stream_accept_chunk(&stream_state, &chunk) {
+        return 81i32;
+    }
+    if !sctp_stream_has_ready_chunk(&stream_state) {
+        return 82i32;
+    }
+
+    if !sctp_stream_reset(&stream_state) {
+        return 83i32;
+    }
+    if stream_state.initialized || stream_state.stream_identifier != 0u16 {
+        return 84i32;
+    }
+    if stream_state.next_expected_stream_sequence_number != 0u16 {
+        return 85i32;
+    }
+    if stream_state.ready_count != 0usize || stream_state.pending_count != 0usize {
+        return 86i32;
+    }
+    if stream_state.ready_high_watermark != 0usize || stream_state.pending_high_watermark != 0usize {
+        return 87i32;
+    }
+    if stream_state.drop_count != 0u64 {
+        return 88i32;
+    }
+    if sctp_stream_has_ready_chunk(&stream_state) {
+        return 89i32;
+    }
+
+    if sctp_stream_accept_chunk(&stream_state, &chunk) {
+        return 90i32;
+    }
+
+    if !sctp_stream_init(&stream_state, 13u16, 7u16) {
+        return 91i32;
+    }
+    if !sctp_stream_accept_chunk(&stream_state, &chunk) {
+        return 92i32;
+    }
+    if stream_state.ready_count != 1usize {
+        return 93i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_ordered_delivery_and_reordering();
+    if result != 0i32 {
+        printf("SCTP stream ordered delivery tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_ordered_wraparound_and_mismatch();
+    if result != 0i32 {
+        printf("SCTP stream wrap-around tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_unordered_delivery_fifo();
+    if result != 0i32 {
+        printf("SCTP stream unordered delivery tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_stream_reset();
+    if result != 0i32 {
+        printf("SCTP stream reset tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("SCTP stream delivery tests passed\n");
+    return 0i32;
+}

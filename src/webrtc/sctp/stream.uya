@@ -1,0 +1,288 @@
+// webrtc.sctp.stream - SCTP ordered / unordered delivery helpers
+// Module: src/webrtc/sctp/stream.uya -> use webrtc.sctp.stream;
+
+use webrtc.sctp.packet;
+
+export const SCTP_STREAM_MAX_BUFFERED_CHUNKS: usize = 64usize;
+export const SCTP_STREAM_FLAG_UNORDERED: u8 = SCTP_DATA_CHUNK_FLAG_UNORDERED;
+
+export error SctpStreamInvalidState;
+export error SctpStreamOverflow;
+export error SctpStreamNotReady;
+export error SctpStreamStreamIdentifierMismatch;
+
+export struct SctpStream {
+    initialized: bool = false,
+    stream_identifier: u16 = 0u16,
+    next_expected_stream_sequence_number: u16 = 0u16,
+    ready_head: usize = 0usize,
+    ready_count: usize = 0usize,
+    ready_high_watermark: usize = 0usize,
+    pending_count: usize = 0usize,
+    pending_high_watermark: usize = 0usize,
+    drop_count: u64 = 0u64,
+    ready_chunks: [SctpDataChunk: SCTP_STREAM_MAX_BUFFERED_CHUNKS] = [],
+    pending_present: [bool: SCTP_STREAM_MAX_BUFFERED_CHUNKS] = [],
+    pending_chunks: [SctpDataChunk: SCTP_STREAM_MAX_BUFFERED_CHUNKS] = [],
+}
+
+fn sctp_stream_make_default() SctpStream {
+    return SctpStream{};
+}
+
+fn sctp_stream_sequence_next(sequence: u16) u16 {
+    if sequence == 0xFFFFu16 {
+        return 0u16;
+    }
+    return sequence + 1u16;
+}
+
+fn sctp_stream_sequence_distance_forward(sequence: u16, base: u16) u32 {
+    if sequence >= base {
+        return (sequence as u32) - (base as u32);
+    }
+    return 65536u32 - ((base as u32) - (sequence as u32));
+}
+
+fn sctp_stream_sequence_is_newer(sequence: u16, base: u16) bool {
+    const distance: u32 = sctp_stream_sequence_distance_forward(sequence, base);
+    return distance != 0u32 && distance < 32768u32;
+}
+
+fn sctp_stream_reset_buffers(stream: &SctpStream) void {
+    if stream == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.ready_chunks[index] = SctpDataChunk{};
+        stream.pending_present[index] = false;
+        stream.pending_chunks[index] = SctpDataChunk{};
+        index = index + 1usize;
+    }
+
+    stream.ready_head = 0usize;
+    stream.ready_count = 0usize;
+    stream.ready_high_watermark = 0usize;
+    stream.pending_count = 0usize;
+    stream.pending_high_watermark = 0usize;
+    stream.drop_count = 0u64;
+}
+
+fn sctp_stream_ready_push(stream: &SctpStream, chunk: &SctpDataChunk) bool {
+    if stream.ready_count >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.drop_count = stream.drop_count + 1u64;
+        return false;
+    }
+
+    var slot: usize = stream.ready_head + stream.ready_count;
+    if slot >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        slot = slot - SCTP_STREAM_MAX_BUFFERED_CHUNKS;
+    }
+    stream.ready_chunks[slot] = *chunk;
+    stream.ready_count = stream.ready_count + 1usize;
+    if stream.ready_count > stream.ready_high_watermark {
+        stream.ready_high_watermark = stream.ready_count;
+    }
+    return true;
+}
+
+fn sctp_stream_ready_shift(stream: &SctpStream) void {
+    if stream.ready_count == 0usize {
+        return;
+    }
+    if stream.ready_head >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        return;
+    }
+
+    stream.ready_chunks[stream.ready_head] = SctpDataChunk{};
+    stream.ready_head = stream.ready_head + 1usize;
+    if stream.ready_head >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.ready_head = 0usize;
+    }
+    stream.ready_count = stream.ready_count - 1usize;
+}
+
+fn sctp_stream_pending_find_slot(stream: &SctpStream, sequence_number: u16) usize {
+    var index: usize = 0usize;
+    while index < SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        if stream.pending_present[index] && stream.pending_chunks[index].stream_sequence_number == sequence_number {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return SCTP_STREAM_MAX_BUFFERED_CHUNKS;
+}
+
+fn sctp_stream_pending_find_free_slot(stream: &SctpStream) usize {
+    var index: usize = 0usize;
+    while index < SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        if !stream.pending_present[index] {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return SCTP_STREAM_MAX_BUFFERED_CHUNKS;
+}
+
+fn sctp_stream_pending_insert_sorted(stream: &SctpStream, chunk: &SctpDataChunk) bool {
+    if stream.pending_count >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.drop_count = stream.drop_count + 1u64;
+        return false;
+    }
+
+    const duplicate_slot: usize = sctp_stream_pending_find_slot(stream, chunk.stream_sequence_number);
+    if duplicate_slot != SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.drop_count = stream.drop_count + 1u64;
+        return true;
+    }
+
+    const slot_index: usize = sctp_stream_pending_find_free_slot(stream);
+    if slot_index == SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        stream.drop_count = stream.drop_count + 1u64;
+        return false;
+    }
+    stream.pending_present[slot_index] = true;
+    stream.pending_chunks[slot_index] = *chunk;
+    stream.pending_count = stream.pending_count + 1usize;
+    if stream.pending_count > stream.pending_high_watermark {
+        stream.pending_high_watermark = stream.pending_count;
+    }
+    return true;
+}
+
+fn sctp_stream_pending_drain(stream: &SctpStream) bool {
+    while true {
+        const slot_index: usize = sctp_stream_pending_find_slot(stream, stream.next_expected_stream_sequence_number);
+        if slot_index == SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+            return true;
+        }
+        if stream.ready_count >= SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+            stream.drop_count = stream.drop_count + 1u64;
+            return false;
+        }
+        if !sctp_stream_ready_push(stream, &stream.pending_chunks[slot_index]) {
+            return false;
+        }
+        stream.pending_present[slot_index] = false;
+        stream.pending_chunks[slot_index] = SctpDataChunk{};
+        stream.pending_count = stream.pending_count - 1usize;
+        stream.next_expected_stream_sequence_number = sctp_stream_sequence_next(
+            stream.next_expected_stream_sequence_number,
+        );
+    }
+}
+
+fn sctp_stream_accept_ordered_chunk(stream: &SctpStream, chunk: &SctpDataChunk) bool {
+    if chunk.stream_sequence_number == stream.next_expected_stream_sequence_number {
+        if stream.ready_count + 1usize > SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+            stream.drop_count = stream.drop_count + 1u64;
+            return false;
+        }
+
+        if !sctp_stream_ready_push(stream, chunk) {
+            return false;
+        }
+        stream.next_expected_stream_sequence_number = sctp_stream_sequence_next(
+            stream.next_expected_stream_sequence_number,
+        );
+        if !sctp_stream_pending_drain(stream) {
+            return false;
+        }
+        return true;
+    }
+
+    if !sctp_stream_sequence_is_newer(chunk.stream_sequence_number, stream.next_expected_stream_sequence_number) {
+        stream.drop_count = stream.drop_count + 1u64;
+        return true;
+    }
+
+    return sctp_stream_pending_insert_sorted(stream, chunk);
+}
+
+fn sctp_stream_accept_unordered_chunk(stream: &SctpStream, chunk: &SctpDataChunk) bool {
+    return sctp_stream_ready_push(stream, chunk);
+}
+
+/// Create an empty SCTP stream queue.
+export fn sctp_stream_make() SctpStream {
+    return sctp_stream_make_default();
+}
+
+/// Reset the stream queue back to an empty, uninitialized state.
+export fn sctp_stream_reset(stream: &SctpStream) bool {
+    if stream == null {
+        return false;
+    }
+
+    sctp_stream_reset_buffers(stream);
+    stream.initialized = false;
+    stream.stream_identifier = 0u16;
+    stream.next_expected_stream_sequence_number = 0u16;
+    return true;
+}
+
+/// Initialize an SCTP stream queue with its stream identifier and initial SSN.
+export fn sctp_stream_init(
+    stream: &SctpStream,
+    stream_identifier: u16,
+    initial_stream_sequence_number: u16,
+) bool {
+    if stream == null {
+        return false;
+    }
+
+    sctp_stream_reset_buffers(stream);
+    stream.initialized = true;
+    stream.stream_identifier = stream_identifier;
+    stream.next_expected_stream_sequence_number = initial_stream_sequence_number;
+    return true;
+}
+
+/// Return whether there is at least one deliverable chunk waiting at the front of the queue.
+export fn sctp_stream_has_ready_chunk(stream: &SctpStream) bool {
+    if stream == null || !stream.initialized {
+        return false;
+    }
+    return stream.ready_count > 0usize;
+}
+
+/// Push one complete DATA chunk into the stream delivery queue.
+export fn sctp_stream_accept_chunk(stream: &SctpStream, chunk: &SctpDataChunk) bool {
+    if stream == null || !stream.initialized || chunk == null {
+        return false;
+    }
+    if chunk.stream_identifier != stream.stream_identifier {
+        return false;
+    }
+
+    if (chunk.flags & SCTP_STREAM_FLAG_UNORDERED) != 0u8 {
+        return sctp_stream_accept_unordered_chunk(stream, chunk);
+    }
+
+    if chunk.stream_sequence_number < stream.next_expected_stream_sequence_number
+        && !sctp_stream_sequence_is_newer(chunk.stream_sequence_number, stream.next_expected_stream_sequence_number) {
+        stream.drop_count = stream.drop_count + 1u64;
+        return true;
+    }
+
+    return sctp_stream_accept_ordered_chunk(stream, chunk);
+}
+
+/// Pop the next ready chunk from the stream delivery queue.
+export fn sctp_stream_pop_ready_chunk(stream: &SctpStream) SctpDataChunk {
+    if stream == null || !stream.initialized {
+        return SctpDataChunk{};
+    }
+    if stream.ready_count == 0usize {
+        return SctpDataChunk{};
+    }
+    const head: usize = stream.ready_head;
+    if head < SCTP_STREAM_MAX_BUFFERED_CHUNKS {
+        const chunk: SctpDataChunk = stream.ready_chunks[head];
+        sctp_stream_ready_shift(stream);
+        return chunk;
+    }
+    return SctpDataChunk{};
+}

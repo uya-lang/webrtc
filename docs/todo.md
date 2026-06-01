@@ -355,9 +355,9 @@
 - [x] 实现 ABORT / SHUTDOWN。
 - [x] 实现 TSN tracking。
 - [x] 实现 retransmission timer。
-- [ ] 实现 ordered / unordered delivery。
+- [x] 实现 ordered / unordered delivery。
 - [x] 实现 reliable / max_retransmits / max_packet_lifetime。
-- [ ] 实现 stream reset。
+- [x] 实现 stream reset。
 - [x] 实现 DCEP OPEN / ACK。
 - [ ] 实现 DataChannel public API。
 - [ ] 增加 Uya loopback DataChannel echo 示例。

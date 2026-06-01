@@ -22,6 +22,8 @@ test -f src/webrtc/sctp/tsn.uya
 test -f src/webrtc_sctp_tsn_test_main.uya
 test -f src/webrtc/sctp/retransmit.uya
 test -f src/webrtc_sctp_retransmit_test_main.uya
+test -f src/webrtc/sctp/stream.uya
+test -f src/webrtc_sctp_stream_test_main.uya
 
 rg -q "export struct SctpPacket" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_packet_parse" src/webrtc/sctp/packet.uya
@@ -101,6 +103,13 @@ rg -q "export fn sctp_retransmission_timer_start" src/webrtc/sctp/retransmit.uya
 rg -q "export fn sctp_retransmission_timer_stop" src/webrtc/sctp/retransmit.uya
 rg -q "export fn sctp_retransmission_timer_should_fire" src/webrtc/sctp/retransmit.uya
 rg -q "export fn sctp_retransmission_timer_fire" src/webrtc/sctp/retransmit.uya
+rg -q "export struct SctpStream" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_make" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_reset" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_init" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_accept_chunk" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_has_ready_chunk" src/webrtc/sctp/stream.uya
+rg -q "export fn sctp_stream_pop_ready_chunk" src/webrtc/sctp/stream.uya
 rg -q "export struct SctpDcepOpenMessage" src/webrtc/sctp/dcep.uya
 rg -q "export struct SctpDcepAckMessage" src/webrtc/sctp/dcep.uya
 rg -q "export fn sctp_dcep_open_parse" src/webrtc/sctp/dcep.uya
@@ -124,5 +133,6 @@ PY
 ../uya/bin/uya run src/webrtc_sctp_model_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_tsn_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_retransmit_test_main.uya
+../uya/bin/uya run src/webrtc_sctp_stream_test_main.uya
 
 echo "Phase 13 SCTP parser checks passed"
