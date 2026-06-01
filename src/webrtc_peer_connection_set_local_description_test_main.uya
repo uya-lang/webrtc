@@ -1,0 +1,93 @@
+use libc.printf;
+use webrtc.binary;
+use webrtc.peer_connection;
+use webrtc.runtime;
+
+fn check_default_shell_rejects_description_access() i32 {
+    var pc: PeerConnection = peer_connection_make();
+    if peer_connection_has_local_description(&pc) {
+        return 10i32;
+    }
+
+    return 0i32;
+}
+
+fn check_set_local_description_and_overwrite() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 20i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 21i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    const first_description: &[byte] = "v=0\r\ns=local\r\n" as &[byte];
+    const second_description: &[byte] = "v=0\r\ns=updated\r\n" as &[byte];
+
+    const first_result: !void = peer_connection_set_local_description(&pc, first_description);
+    if first_result.error_id != 0 {
+        return 22i32;
+    }
+    if !peer_connection_has_local_description(&pc) {
+        return 23i32;
+    }
+    if peer_connection_local_description_len(&pc) != first_description.len {
+        return 24i32;
+    }
+    if !constant_time_bytes_equal(peer_connection_local_description_bytes(&pc), first_description) {
+        return 25i32;
+    }
+
+    const second_result: !void = peer_connection_set_local_description(&pc, second_description);
+    if second_result.error_id != 0 {
+        return 26i32;
+    }
+    if peer_connection_local_description_len(&pc) != second_description.len {
+        return 27i32;
+    }
+    if !constant_time_bytes_equal(peer_connection_local_description_bytes(&pc), second_description) {
+        return 28i32;
+    }
+
+    return 0i32;
+}
+
+fn check_closed_peer_rejects_description() i32 {
+    var pc: PeerConnection = peer_connection_make();
+    const description: &[byte] = "v=0\r\ns=closed\r\n" as &[byte];
+
+    const result: !void = peer_connection_set_local_description(&pc, description);
+    if result.error_id != @error_id(error.PeerConnectionInvalidState) {
+        return 30i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_default_shell_rejects_description_access();
+    if result != 0i32 {
+        printf("PeerConnection local description default shell tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_set_local_description_and_overwrite();
+    if result != 0i32 {
+        printf("PeerConnection local description tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_closed_peer_rejects_description();
+    if result != 0i32 {
+        printf("PeerConnection local description invalid state tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("PeerConnection local description tests passed\n");
+    return 0i32;
+}

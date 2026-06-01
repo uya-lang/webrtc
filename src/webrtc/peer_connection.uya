@@ -4,6 +4,16 @@
 use webrtc.runtime;
 export const PEER_CONNECTION_STATE_NEW: u8 = 0u8;
 export const PEER_CONNECTION_STATE_CLOSED: u8 = 1u8;
+export const PEER_CONNECTION_MAX_DESCRIPTION_BYTES: usize = 4096usize;
+
+export error PeerConnectionInvalidState;
+export error PeerConnectionDescriptionEmpty;
+export error PeerConnectionDescriptionTooLong;
+
+export struct PeerConnectionDescription {
+    text: [byte: PEER_CONNECTION_MAX_DESCRIPTION_BYTES] = [],
+    text_len: usize = 0usize,
+}
 
 export struct PeerConnection {
     id: u64 = 0u64,
@@ -12,6 +22,8 @@ export struct PeerConnection {
     state: u8 = PEER_CONNECTION_STATE_CLOSED,
     has_local_description: bool = false,
     has_remote_description: bool = false,
+    local_description: PeerConnectionDescription = PeerConnectionDescription{},
+    remote_description: PeerConnectionDescription = PeerConnectionDescription{},
 }
 
 fn peer_connection_clear_descriptions(pc: &PeerConnection) void {
@@ -21,6 +33,28 @@ fn peer_connection_clear_descriptions(pc: &PeerConnection) void {
 
     pc.has_local_description = false;
     pc.has_remote_description = false;
+    pc.local_description = PeerConnectionDescription{};
+    pc.remote_description = PeerConnectionDescription{};
+}
+
+fn peer_connection_copy_description(description: &PeerConnectionDescription, bytes: &[byte]) !void {
+    if description == null {
+        return error.PeerConnectionInvalidState;
+    }
+    if bytes.len == 0usize {
+        return error.PeerConnectionDescriptionEmpty;
+    }
+    if bytes.len > PEER_CONNECTION_MAX_DESCRIPTION_BYTES {
+        return error.PeerConnectionDescriptionTooLong;
+    }
+
+    var index: usize = 0usize;
+    while index < bytes.len {
+        description.text[index] = bytes[index];
+        index = index + 1usize;
+    }
+    description.text_len = bytes.len;
+    return;
 }
 
 fn peer_connection_make_default() PeerConnection {
@@ -95,6 +129,19 @@ export fn peer_connection_has_remote_description(pc: &PeerConnection) bool {
     return pc.has_remote_description;
 }
 
+/// Return the current local description bytes, if any.
+export fn peer_connection_local_description_bytes(pc: &PeerConnection) &[byte] {
+    return pc.local_description.text[0:pc.local_description.text_len];
+}
+
+/// Return the current local description length.
+export fn peer_connection_local_description_len(pc: &PeerConnection) usize {
+    if pc == null || !pc.has_local_description {
+        return 0usize;
+    }
+    return pc.local_description.text_len;
+}
+
 /// Return a borrowed runtime reference.
 export fn peer_connection_runtime(pc: &PeerConnection) &RtcRuntime {
     if pc == null {
@@ -109,6 +156,17 @@ export fn peer_connection_config(pc: &PeerConnection) &RtcConfiguration {
         return null;
     }
     return &pc.config;
+}
+
+/// Attach a local SDP description to the PeerConnection.
+export fn peer_connection_set_local_description(pc: &PeerConnection, description: &[byte]) !void {
+    if pc == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+
+    try peer_connection_copy_description(&pc.local_description, description);
+    pc.has_local_description = true;
+    return;
 }
 
 /// Close the PeerConnection and unregister it from the runtime.

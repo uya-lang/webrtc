@@ -373,7 +373,7 @@
 
 - [x] 实现 `RtcRuntime`。
 - [x] 实现 `PeerConnection` 生命周期。
-- [ ] 实现 `set_local_description`。
+- [x] 实现 `set_local_description`。
 - [ ] 实现 `set_remote_description`。
 - [ ] 实现 `create_offer`。
 - [ ] 实现 `create_answer`。
