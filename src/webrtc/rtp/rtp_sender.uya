@@ -1,0 +1,87 @@
+// webrtc.rtp.rtp_sender - RTP sender sequence/timestamp state
+// Module: src/webrtc/rtp/rtp_sender.uya -> use webrtc.rtp.rtp_sender;
+
+export error RtpSenderInvalidState;
+export error RtpSenderInvalidClockRate;
+
+const RTP_TIMESTAMP_NANOS_PER_SECOND: u64 = 1000000000u64;
+
+export struct RtpSenderState {
+    ssrc: u32 = 0u32,
+    next_sequence: u16 = 0u16,
+    next_timestamp: u32 = 0u32,
+    clock_rate_hz: u32 = 0u32,
+}
+
+export struct RtpSenderStamp {
+    ssrc: u32 = 0u32,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+}
+
+fn rtp_sender_sequence_increment(sequence: u16) u16 {
+    if sequence == 0xFFFFu16 {
+        return 0u16;
+    }
+    return sequence + 1u16;
+}
+
+export fn rtp_sender_state_make() RtpSenderState {
+    return RtpSenderState{};
+}
+
+export fn rtp_sender_state_init(
+    state: &RtpSenderState,
+    ssrc: u32,
+    initial_sequence: u16,
+    initial_timestamp: u32,
+    clock_rate_hz: u32,
+) !void {
+    if state == null {
+        return error.RtpSenderInvalidState;
+    }
+    if clock_rate_hz == 0u32 {
+        return error.RtpSenderInvalidClockRate;
+    }
+
+    state.ssrc = ssrc;
+    state.next_sequence = initial_sequence;
+    state.next_timestamp = initial_timestamp;
+    state.clock_rate_hz = clock_rate_hz;
+}
+
+export fn rtp_sender_stamp_packet(state: &RtpSenderState, timestamp_increment: u32) !RtpSenderStamp {
+    if state == null {
+        return error.RtpSenderInvalidState;
+    }
+
+    const stamp: RtpSenderStamp = RtpSenderStamp{
+        ssrc: state.ssrc,
+        sequence_number: state.next_sequence,
+        timestamp: state.next_timestamp,
+    };
+
+    state.next_sequence = rtp_sender_sequence_increment(state.next_sequence);
+    state.next_timestamp = state.next_timestamp + timestamp_increment;
+    return stamp;
+}
+
+export fn rtp_sender_advance_timestamp_by_duration_ns(
+    state: &RtpSenderState,
+    duration_ns: u64,
+) !u32 {
+    if state == null {
+        return error.RtpSenderInvalidState;
+    }
+    if state.clock_rate_hz == 0u32 {
+        return error.RtpSenderInvalidClockRate;
+    }
+
+    const whole_seconds: u64 = duration_ns / RTP_TIMESTAMP_NANOS_PER_SECOND;
+    const remainder_ns: u64 = duration_ns % RTP_TIMESTAMP_NANOS_PER_SECOND;
+    var increment: u64 = whole_seconds * (state.clock_rate_hz as u64);
+    increment = increment + ((remainder_ns * (state.clock_rate_hz as u64)) / RTP_TIMESTAMP_NANOS_PER_SECOND);
+
+    state.next_timestamp = state.next_timestamp + (increment as u32);
+    return state.next_timestamp;
+}

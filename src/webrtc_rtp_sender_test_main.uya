@@ -1,0 +1,96 @@
+use libc.printf;
+use webrtc.rtp.rtp_sender;
+
+fn check_state_init() i32 {
+    var state: RtpSenderState = rtp_sender_state_make();
+    const init: !void = rtp_sender_state_init(&state, 0x11223344u32, 10u16, 1000u32, 48000u32);
+    if init.error_id != 0 {
+        return 10i32;
+    }
+    if state.ssrc != 0x11223344u32 || state.next_sequence != 10u16 || state.next_timestamp != 1000u32 || state.clock_rate_hz != 48000u32 {
+        return 11i32;
+    }
+
+    var invalid_state: RtpSenderState = rtp_sender_state_make();
+    const invalid_init: !void = rtp_sender_state_init(&invalid_state, 1u32, 0u16, 0u32, 0u32);
+    if invalid_init.error_id != @error_id(error.RtpSenderInvalidClockRate) {
+        return 12i32;
+    }
+
+    return 0i32;
+}
+
+fn check_stamp_progression_and_wrap() i32 {
+    var state: RtpSenderState = rtp_sender_state_make();
+    const init: !void = rtp_sender_state_init(&state, 0x99887766u32, 0xFFFEu16, 0xFFFFFFFEu32, 90000u32);
+    if init.error_id != 0 {
+        return 20i32;
+    }
+
+    const first: !RtpSenderStamp = rtp_sender_stamp_packet(&state, 2u32);
+    if first.error_id != 0 {
+        return 21i32;
+    }
+    if first.value.ssrc != 0x99887766u32 || first.value.sequence_number != 0xFFFEu16 || first.value.timestamp != 0xFFFFFFFEu32 {
+        return 22i32;
+    }
+    if state.next_sequence != 0xFFFFu16 || state.next_timestamp != 0u32 {
+        return 23i32;
+    }
+
+    const second: !RtpSenderStamp = rtp_sender_stamp_packet(&state, 4u32);
+    if second.error_id != 0 {
+        return 24i32;
+    }
+    if second.value.sequence_number != 0xFFFFu16 || second.value.timestamp != 0u32 {
+        return 25i32;
+    }
+    if state.next_sequence != 0u16 || state.next_timestamp != 4u32 {
+        return 26i32;
+    }
+
+    return 0i32;
+}
+
+fn check_timestamp_advance_by_duration() i32 {
+    var state: RtpSenderState = rtp_sender_state_make();
+    const init: !void = rtp_sender_state_init(&state, 0x12345678u32, 1u16, 0u32, 48000u32);
+    if init.error_id != 0 {
+        return 30i32;
+    }
+
+    const plus_20ms: !u32 = rtp_sender_advance_timestamp_by_duration_ns(&state, 20000000u64);
+    if plus_20ms.error_id != 0 || plus_20ms.value != 960u32 {
+        return 31i32;
+    }
+
+    const plus_1_5s: !u32 = rtp_sender_advance_timestamp_by_duration_ns(&state, 1500000000u64);
+    if plus_1_5s.error_id != 0 || plus_1_5s.value != 72960u32 {
+        return 32i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_state_init();
+    if result != 0i32 {
+        printf("RTP sender tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_stamp_progression_and_wrap();
+    if result != 0i32 {
+        printf("RTP sender tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_timestamp_advance_by_duration();
+    if result != 0i32 {
+        printf("RTP sender tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP sender sequence/timestamp tests passed\n");
+    return 0i32;
+}

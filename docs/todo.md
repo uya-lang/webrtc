@@ -271,7 +271,7 @@
 - [x] 实现 MID extension。
 - [x] 实现 abs-send-time extension。
 - [x] 实现 transport-wide sequence number extension。
-- [ ] 实现 RTP sender sequence/timestamp。
+- [x] 实现 RTP sender sequence/timestamp。
 - [ ] 实现 RTP receiver SSRC/MID route。
 - [ ] 实现 RTCP SR/RR。
 - [ ] 实现 RTCP SDES CNAME。
