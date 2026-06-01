@@ -61,6 +61,28 @@ fn peer_connection_make_default() PeerConnection {
     return PeerConnection{};
 }
 
+fn peer_connection_offer_append_bytes(buf: &[byte], cursor: &usize, bytes: &[byte]) !void {
+    if cursor == null {
+        return error.PeerConnectionInvalidState;
+    }
+    if *cursor + bytes.len > buf.len {
+        return error.PeerConnectionDescriptionTooLong;
+    }
+
+    var index: usize = 0usize;
+    while index < bytes.len {
+        buf[*cursor + index] = bytes[index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + bytes.len;
+    return;
+}
+
+fn peer_connection_offer_append_line(buf: &[byte], cursor: &usize, line: &[byte]) !void {
+    try peer_connection_offer_append_bytes(buf, cursor, line);
+    try peer_connection_offer_append_bytes(buf, cursor, "\r\n" as &[byte]);
+}
+
 /// Create an empty PeerConnection shell.
 export fn peer_connection_make() PeerConnection {
     return peer_connection_make_default();
@@ -169,6 +191,37 @@ export fn peer_connection_config(pc: &PeerConnection) &RtcConfiguration {
         return null;
     }
     return &pc.config;
+}
+
+/// Build a canonical DataChannel-only SDP offer.
+export fn peer_connection_create_offer(pc: &PeerConnection, offer: &PeerConnectionDescription) !void {
+    if pc == null || offer == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+
+    var buffer: [byte: PEER_CONNECTION_MAX_DESCRIPTION_BYTES] = [];
+    var cursor: usize = 0usize;
+    const writable: &[byte] = buffer[0:PEER_CONNECTION_MAX_DESCRIPTION_BYTES];
+
+    try peer_connection_offer_append_line(writable, &cursor, "v=0" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "o=- 1 1 IN IP4 127.0.0.1" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "s=Uya WebRTC Offer" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "t=0 0" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=group:BUNDLE data" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "c=IN IP4 0.0.0.0" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=mid:data" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=sendrecv" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=ice-ufrag:uya-offer" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=ice-pwd:uya-offer-pwd" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=setup:actpass" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=rtcp-mux" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=sctp-port:5000" as &[byte]);
+    try peer_connection_offer_append_line(writable, &cursor, "a=max-message-size:262144" as &[byte]);
+
+    const written_len: usize = cursor;
+    try peer_connection_copy_description(offer, buffer[0:written_len]);
+    return;
 }
 
 /// Attach a local SDP description to the PeerConnection.
