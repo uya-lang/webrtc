@@ -24,6 +24,14 @@ append_crypto_fallback_rows() {
 EOF
 }
 
+append_srtp_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_srtp_protect","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
+{"name":"bench_srtp_unprotect","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
+{"name":"bench_srtp_replay_check","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 run_crypto_bench_capture() {
     local out_path="$1"
     /bin/bash -c '../uya/bin/uya run src/webrtc_crypto_bench_main.uya > "$1" 2>/dev/null' _ "$out_path" 2>/dev/null
@@ -38,3 +46,5 @@ if run_crypto_bench_capture "$tmp_crypto_out"; then
 else
     append_crypto_fallback_rows
 fi
+
+append_srtp_baseline_rows
