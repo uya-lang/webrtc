@@ -116,6 +116,111 @@ fn check_malformed_cases() i32 {
     return 0i32;
 }
 
+fn check_fu_a_parse_and_write() i32 {
+    var packet: [byte: 4] = [0x7Cu8 as byte, 0x85u8 as byte, 0xAA as byte, 0xBB as byte];
+    const parsed: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(packet[0:4]);
+    if parsed.error_id != 0 {
+        return 40i32;
+    }
+    if parsed.value.forbidden_zero || parsed.value.nri != 3u8 || !parsed.value.start || parsed.value.end || parsed.value.nal_type != 5u8 {
+        return 41i32;
+    }
+    if parsed.value.payload_offset != 2usize || !bytes_equal(parsed.value.payload, packet[2:2]) {
+        return 42i32;
+    }
+
+    var descriptor: H264RtpFuADescriptor = h264_rtp_fu_a_make();
+    descriptor.nri = 3u8;
+    descriptor.start = true;
+    descriptor.end = false;
+    descriptor.nal_type = 5u8;
+
+    var out: [byte: 4] = [];
+    const written: !usize = h264_rtp_fu_a_write(&descriptor, packet[2:2], out[0:4]);
+    if written.error_id != 0 || written.value != 4usize {
+        return 43i32;
+    }
+    if !bytes_equal(out[0:4], packet[0:4]) {
+        return 44i32;
+    }
+    return 0i32;
+}
+
+fn check_fu_a_reassembly() i32 {
+    var state: H264RtpFuAReassemblyState = h264_rtp_fu_a_reassembly_state_make();
+    var out: [byte: 16] = [];
+
+    var start_packet: [byte: 4] = [0x7Cu8 as byte, 0x85u8 as byte, 0xAA as byte, 0xBB as byte];
+    var mid_packet: [byte: 3] = [0x7Cu8 as byte, 0x05u8 as byte, 0xCC as byte];
+    var end_packet: [byte: 3] = [0x7Cu8 as byte, 0x45u8 as byte, 0xDD as byte];
+
+    const first: !usize = h264_rtp_fu_a_reassembly_absorb(&state, start_packet[0:4], out[0:16]);
+    if first.error_id != 0 || first.value != 0usize {
+        return 45i32;
+    }
+    const second: !usize = h264_rtp_fu_a_reassembly_absorb(&state, mid_packet[0:3], out[0:16]);
+    if second.error_id != 0 || second.value != 0usize {
+        return 46i32;
+    }
+    const third: !usize = h264_rtp_fu_a_reassembly_absorb(&state, end_packet[0:3], out[0:16]);
+    if third.error_id != 0 || third.value != 5usize {
+        return 47i32;
+    }
+
+    var expected: [byte: 5] = [0x65 as byte, 0xAA as byte, 0xBB as byte, 0xCC as byte, 0xDD as byte];
+    if !bytes_equal(out[0:5], expected[0:5]) {
+        return 48i32;
+    }
+    return 0i32;
+}
+
+fn check_fu_a_malformed_cases() i32 {
+    var short_packet: [byte: 1] = [0x7Cu8 as byte];
+    const short_parse: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(short_packet[0:1]);
+    if short_parse.error_id != @error_id(error.H264RtpFuADescriptorTooShort) {
+        return 49i32;
+    }
+
+    var unsupported_packet: [byte: 3] = [0x65 as byte, 0x85u8 as byte, 0xAA as byte];
+    const unsupported_parse: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(unsupported_packet[0:3]);
+    if unsupported_parse.error_id != @error_id(error.H264RtpFuAUnsupportedPacketType) {
+        return 50i32;
+    }
+
+    var start_end_packet: [byte: 3] = [0x7Cu8 as byte, 0xC5u8 as byte, 0xAA as byte];
+    const start_end_parse: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(start_end_packet[0:3]);
+    if start_end_parse.error_id != @error_id(error.H264RtpFuAStartEndConflict) {
+        return 51i32;
+    }
+
+    var invalid_type_packet: [byte: 3] = [0x7Cu8 as byte, 0x80u8 as byte, 0xAA as byte];
+    const invalid_type_parse: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(invalid_type_packet[0:3]);
+    if invalid_type_parse.error_id != @error_id(error.H264RtpFuANalTypeInvalid) {
+        return 52i32;
+    }
+
+    var state: H264RtpFuAReassemblyState = h264_rtp_fu_a_reassembly_state_make();
+    var out: [byte: 8] = [];
+    var mid_packet: [byte: 3] = [0x7Cu8 as byte, 0x05u8 as byte, 0xAA as byte];
+    const missing_start: !usize = h264_rtp_fu_a_reassembly_absorb(&state, mid_packet[0:3], out[0:8]);
+    if missing_start.error_id != @error_id(error.H264RtpFuAReassemblyFrameNotStarted) {
+        return 53i32;
+    }
+
+    var start_packet: [byte: 3] = [0x7Cu8 as byte, 0x85u8 as byte, 0xAA as byte];
+    const first: !usize = h264_rtp_fu_a_reassembly_absorb(&state, start_packet[0:3], out[0:8]);
+    if first.error_id != 0 {
+        return 54i32;
+    }
+    var mismatch_packet: [byte: 3] = [0x7Cu8 as byte, 0x01u8 as byte, 0xBB as byte];
+    const mismatch: !usize = h264_rtp_fu_a_reassembly_absorb(&state, mismatch_packet[0:3], out[0:8]);
+    if mismatch.error_id != @error_id(error.H264RtpFuAReassemblyHeaderMismatch) {
+        return 55i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_parse_stap_a_two_nals();
     if result != 0i32 {
@@ -135,6 +240,24 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("h264 stap-a tests passed\n");
+    result = check_fu_a_parse_and_write();
+    if result != 0i32 {
+        printf("h264 fu-a parse/write tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_fu_a_reassembly();
+    if result != 0i32 {
+        printf("h264 fu-a reassembly tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_fu_a_malformed_cases();
+    if result != 0i32 {
+        printf("h264 fu-a malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("h264 rtp tests passed\n");
     return 0i32;
 }

@@ -2,6 +2,7 @@
 // Module: src/webrtc/media/h264_rtp.uya -> use webrtc.media.h264_rtp;
 
 export const H264_RTP_NAL_TYPE_STAP_A: u8 = 24u8;
+export const H264_RTP_NAL_TYPE_FU_A: u8 = 28u8;
 export const H264_RTP_MAX_STAP_A_NAL_UNITS: usize = 32usize;
 
 export error H264RtpDescriptorTooShort;
@@ -14,6 +15,14 @@ export error H264RtpNalUnitTooLarge;
 export error H264RtpTooManyNalUnits;
 export error H264RtpStapAEmpty;
 export error H264RtpInvalidNri;
+export error H264RtpFuADescriptorTooShort;
+export error H264RtpFuAUnsupportedPacketType;
+export error H264RtpFuAStartEndConflict;
+export error H264RtpFuANalTypeInvalid;
+export error H264RtpFuAReassemblyStateRequired;
+export error H264RtpFuAReassemblyFrameNotStarted;
+export error H264RtpFuAReassemblyUnexpectedStart;
+export error H264RtpFuAReassemblyHeaderMismatch;
 
 export struct H264RtpStapANalSpan {
     offset: usize = 0usize,
@@ -25,6 +34,22 @@ export struct H264RtpStapAPacket {
     nri: u8 = 0u8,
     nal_count: usize = 0usize,
     nal_spans: [H264RtpStapANalSpan: H264_RTP_MAX_STAP_A_NAL_UNITS] = [],
+}
+
+export struct H264RtpFuADescriptor {
+    forbidden_zero: bool = false,
+    nri: u8 = 0u8,
+    start: bool = false,
+    end: bool = false,
+    nal_type: u8 = 0u8,
+    payload_offset: usize = 0usize,
+    payload: &[byte] = [],
+}
+
+export struct H264RtpFuAReassemblyState {
+    active: bool = false,
+    nal_header: u8 = 0u8,
+    bytes_written: usize = 0usize,
 }
 
 fn h264_rtp_nal_type(header: u8) u8 {
@@ -54,8 +79,22 @@ fn h264_rtp_validate_single_nal_unit(nal_unit: &[byte]) !void {
     }
 }
 
+fn h264_rtp_validate_fu_nal_type(nal_type: u8) !void {
+    if nal_type == 0u8 || nal_type >= 24u8 {
+        return error.H264RtpFuANalTypeInvalid;
+    }
+}
+
 export fn h264_rtp_stap_a_make() H264RtpStapAPacket {
     return H264RtpStapAPacket{};
+}
+
+export fn h264_rtp_fu_a_make() H264RtpFuADescriptor {
+    return H264RtpFuADescriptor{};
+}
+
+export fn h264_rtp_fu_a_reassembly_state_make() H264RtpFuAReassemblyState {
+    return H264RtpFuAReassemblyState{};
 }
 
 export fn h264_rtp_stap_a_parse(packet: &[byte]) !H264RtpStapAPacket {
@@ -111,6 +150,151 @@ export fn h264_rtp_stap_a_parse(packet: &[byte]) !H264RtpStapAPacket {
     }
 
     return parsed;
+}
+
+export fn h264_rtp_fu_a_parse(packet: &[byte]) !H264RtpFuADescriptor {
+    if packet.len < 2usize {
+        return error.H264RtpFuADescriptorTooShort;
+    }
+
+    const indicator: u8 = packet[0] as u8;
+    if h264_rtp_nal_type(indicator) != H264_RTP_NAL_TYPE_FU_A {
+        return error.H264RtpFuAUnsupportedPacketType;
+    }
+
+    const header: u8 = packet[1] as u8;
+    const start: bool = (header & 0x80u8) != 0u8;
+    const end: bool = (header & 0x40u8) != 0u8;
+    if start && end {
+        return error.H264RtpFuAStartEndConflict;
+    }
+
+    const nal_type: u8 = header & 0x1Fu8;
+    try h264_rtp_validate_fu_nal_type(nal_type);
+
+    const payload_len: usize = packet.len - 2usize;
+    if payload_len == 0usize {
+        return error.H264RtpNalUnitEmpty;
+    }
+
+    var descriptor: H264RtpFuADescriptor = h264_rtp_fu_a_make();
+    descriptor.forbidden_zero = (indicator & 0x80u8) != 0u8;
+    descriptor.nri = (indicator >> 5i32) & 0x03u8;
+    descriptor.start = start;
+    descriptor.end = end;
+    descriptor.nal_type = nal_type;
+    descriptor.payload_offset = 2usize;
+    descriptor.payload = packet[2usize:payload_len];
+    return descriptor;
+}
+
+export fn h264_rtp_fu_a_write(
+    descriptor: &H264RtpFuADescriptor,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    if descriptor == null {
+        return error.H264RtpFuADescriptorTooShort;
+    }
+    if descriptor.nri > 3u8 {
+        return error.H264RtpInvalidNri;
+    }
+    if descriptor.start && descriptor.end {
+        return error.H264RtpFuAStartEndConflict;
+    }
+    try h264_rtp_validate_fu_nal_type(descriptor.nal_type);
+    if payload.len == 0usize {
+        return error.H264RtpNalUnitEmpty;
+    }
+
+    const total_len: usize = 2usize + payload.len;
+    if total_len > out_packet.len {
+        return error.H264RtpBufferTooSmall;
+    }
+
+    var indicator: u8 = H264_RTP_NAL_TYPE_FU_A | ((descriptor.nri & 0x03u8) << 5i32);
+    if descriptor.forbidden_zero {
+        indicator = indicator | 0x80u8;
+    }
+    out_packet[0] = indicator as byte;
+
+    var header: u8 = descriptor.nal_type & 0x1Fu8;
+    if descriptor.start {
+        header = header | 0x80u8;
+    }
+    if descriptor.end {
+        header = header | 0x40u8;
+    }
+    out_packet[1] = header as byte;
+
+    try h264_rtp_copy_bytes(out_packet[2usize:payload.len], payload, payload.len);
+    return total_len;
+}
+
+export fn h264_rtp_fu_a_reassembly_reset(state: &H264RtpFuAReassemblyState) !void {
+    if state == null {
+        return error.H264RtpFuAReassemblyStateRequired;
+    }
+    state.active = false;
+    state.nal_header = 0u8;
+    state.bytes_written = 0usize;
+}
+
+export fn h264_rtp_fu_a_reassembly_absorb(
+    state: &H264RtpFuAReassemblyState,
+    packet: &[byte],
+    out_nal: &[byte],
+) !usize {
+    if state == null {
+        return error.H264RtpFuAReassemblyStateRequired;
+    }
+
+    const descriptor: H264RtpFuADescriptor = try h264_rtp_fu_a_parse(packet);
+    var header: u8 = descriptor.nal_type | ((descriptor.nri & 0x03u8) << 5i32);
+    if descriptor.forbidden_zero {
+        header = header | 0x80u8;
+    }
+
+    if !state.active {
+        if !descriptor.start {
+            return error.H264RtpFuAReassemblyFrameNotStarted;
+        }
+        state.active = true;
+        state.nal_header = header;
+        state.bytes_written = 0usize;
+    } else {
+        if descriptor.start {
+            return error.H264RtpFuAReassemblyUnexpectedStart;
+        }
+        if header != state.nal_header {
+            return error.H264RtpFuAReassemblyHeaderMismatch;
+        }
+    }
+
+    if state.bytes_written == 0usize {
+        if out_nal.len < 1usize {
+            return error.H264RtpBufferTooSmall;
+        }
+        out_nal[0] = state.nal_header as byte;
+        state.bytes_written = 1usize;
+    }
+
+    if descriptor.payload.len > (out_nal.len - state.bytes_written) {
+        return error.H264RtpBufferTooSmall;
+    }
+    try h264_rtp_copy_bytes(
+        out_nal[state.bytes_written:descriptor.payload.len],
+        descriptor.payload,
+        descriptor.payload.len,
+    );
+    state.bytes_written = state.bytes_written + descriptor.payload.len;
+
+    if descriptor.end {
+        const nal_len: usize = state.bytes_written;
+        try h264_rtp_fu_a_reassembly_reset(state);
+        return nal_len;
+    }
+    return 0usize;
 }
 
 export fn h264_rtp_stap_a_write(storage: &[byte], stap_a: &H264RtpStapAPacket, out_packet: &[byte]) !usize {

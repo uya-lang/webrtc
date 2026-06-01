@@ -304,7 +304,7 @@
 - [x] 对齐 `../vp8` 的 VP8 RTP malformed 错误、keyframe 检测和 frame boundary 语义。
 - [x] 增加 VP8 keyframe、inter frame、partition start、picture id wrap、丢包重组失败 golden tests。
 - [x] 实现 H264 STAP-A。
-- [ ] 实现 H264 FU-A。
+- [x] 实现 H264 FU-A。
 - [ ] 实现 Annex-B / AVCC 转换 helper。
 - [ ] 实现 AV1 RTP payload descriptor。
 - [ ] 实现 keyframe 检测。
