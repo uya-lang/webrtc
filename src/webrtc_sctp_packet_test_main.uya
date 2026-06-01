@@ -89,6 +89,377 @@ fn check_parse_bad_chunk_length() i32 {
     return 0i32;
 }
 
+fn check_init_chunk_roundtrip() i32 {
+    var params: [byte: 5] = [
+        0x01 as byte,
+        0x02 as byte,
+        0x03 as byte,
+        0x04 as byte,
+        0x05 as byte,
+    ];
+
+    var init: SctpInitChunk = sctp_init_chunk_make();
+    init.flags = 0x00u8;
+    init.initiate_tag = 0x11223344u32;
+    init.a_rwnd = 0x55667788u32;
+    init.outbound_streams = 12u16;
+    init.inbound_streams = 34u16;
+    init.initial_tsn = 0x99aabbccu32;
+    init.parameters = params[0:5];
+
+    var init_buffer: [byte: 64] = [];
+    const written: !usize = sctp_init_chunk_write(&init, init_buffer[0:64]);
+    if written.error_id != 0 || written.value != 28usize {
+        return 40i32;
+    }
+
+    const parsed: !SctpInitChunk = sctp_init_chunk_parse(init_buffer[0:written.value]);
+    if parsed.error_id != 0 {
+        return 41i32;
+    }
+    if parsed.value.flags != 0x00u8 {
+        return 42i32;
+    }
+    if parsed.value.initiate_tag != 0x11223344u32 || parsed.value.a_rwnd != 0x55667788u32 {
+        return 43i32;
+    }
+    if parsed.value.outbound_streams != 12u16 || parsed.value.inbound_streams != 34u16 {
+        return 44i32;
+    }
+    if parsed.value.initial_tsn != 0x99aabbccu32 {
+        return 45i32;
+    }
+    if !bytes_equal(parsed.value.parameters, params[0:5]) {
+        return 46i32;
+    }
+
+    var init_body: [byte: 21] = [
+        0x11 as byte,
+        0x22 as byte,
+        0x33 as byte,
+        0x44 as byte,
+        0x55 as byte,
+        0x66 as byte,
+        0x77 as byte,
+        0x88 as byte,
+        0x00 as byte,
+        0x0c as byte,
+        0x00 as byte,
+        0x22 as byte,
+        0x99 as byte,
+        0xaa as byte,
+        0xbb as byte,
+        0xcc as byte,
+        0x01 as byte,
+        0x02 as byte,
+        0x03 as byte,
+        0x04 as byte,
+        0x05 as byte,
+    ];
+    var packet: SctpPacket = sctp_packet_make_empty();
+    packet.source_port = 5000u16;
+    packet.destination_port = 5001u16;
+    packet.verification_tag = 0x01020304u32;
+    packet.checksum = 0x11223344u32;
+    packet.chunk_count = 1usize;
+    packet.chunks[0usize].chunk_type = SCTP_CHUNK_TYPE_INIT;
+    packet.chunks[0usize].flags = 0x00u8;
+    packet.chunks[0usize].length = 25usize;
+    packet.chunks[0usize].payload = init_body[0:21];
+
+    var packet_buffer: [byte: 64] = [];
+    const packet_written: !usize = sctp_packet_write(&packet, packet_buffer[0:64]);
+    if packet_written.error_id != 0 {
+        return 47i32;
+    }
+
+    const packet_parsed: !SctpPacket = sctp_packet_parse(packet_buffer[0:packet_written.value]);
+    if packet_parsed.error_id != 0 {
+        return 48i32;
+    }
+    if packet_parsed.value.chunk_count != 1usize {
+        return 49i32;
+    }
+    if packet_parsed.value.chunks[0usize].chunk_type != SCTP_CHUNK_TYPE_INIT {
+        return 50i32;
+    }
+    if packet_parsed.value.chunks[0usize].length != 25usize {
+        return 51i32;
+    }
+    if !bytes_equal(packet_parsed.value.chunks[0usize].payload, init_body[0:21]) {
+        return 52i32;
+    }
+
+    return 0i32;
+}
+
+fn check_init_ack_cookie_echo_ack_roundtrip() i32 {
+    var cookie: [byte: 6] = [
+        0xAA as byte,
+        0xBB as byte,
+        0xCC as byte,
+        0xDD as byte,
+        0xEE as byte,
+        0xFF as byte,
+    ];
+
+    var init_ack: SctpInitAckChunk = sctp_init_ack_chunk_make();
+    init_ack.flags = 0x00u8;
+    init_ack.initiate_tag = 0x0a0b0c0du32;
+    init_ack.a_rwnd = 0x10203040u32;
+    init_ack.outbound_streams = 4u16;
+    init_ack.inbound_streams = 8u16;
+    init_ack.initial_tsn = 0x55667788u32;
+    init_ack.state_cookie = cookie[0:6];
+
+    var init_ack_buffer: [byte: 64] = [];
+    const init_ack_written: !usize = sctp_init_ack_chunk_write(&init_ack, init_ack_buffer[0:64]);
+    if init_ack_written.error_id != 0 || init_ack_written.value != 28usize {
+        return 60i32;
+    }
+
+    const init_ack_parsed: !SctpInitAckChunk = sctp_init_ack_chunk_parse(init_ack_buffer[0:init_ack_written.value]);
+    if init_ack_parsed.error_id != 0 {
+        return 61i32;
+    }
+    if init_ack_parsed.value.initiate_tag != 0x0a0b0c0du32 || init_ack_parsed.value.a_rwnd != 0x10203040u32 {
+        return 62i32;
+    }
+    if init_ack_parsed.value.outbound_streams != 4u16 || init_ack_parsed.value.inbound_streams != 8u16 {
+        return 63i32;
+    }
+    if init_ack_parsed.value.initial_tsn != 0x55667788u32 {
+        return 64i32;
+    }
+    if !bytes_equal(init_ack_parsed.value.state_cookie, cookie[0:6]) {
+        return 65i32;
+    }
+
+    var cookie_echo: SctpCookieEchoChunk = sctp_cookie_echo_chunk_make();
+    cookie_echo.flags = 0x00u8;
+    cookie_echo.cookie = cookie[0:6];
+
+    var cookie_echo_buffer: [byte: 32] = [];
+    const cookie_echo_written: !usize = sctp_cookie_echo_chunk_write(&cookie_echo, cookie_echo_buffer[0:32]);
+    if cookie_echo_written.error_id != 0 || cookie_echo_written.value != 12usize {
+        return 66i32;
+    }
+
+    const cookie_echo_parsed: !SctpCookieEchoChunk = sctp_cookie_echo_chunk_parse(cookie_echo_buffer[0:cookie_echo_written.value]);
+    if cookie_echo_parsed.error_id != 0 {
+        return 67i32;
+    }
+    if !bytes_equal(cookie_echo_parsed.value.cookie, cookie[0:6]) {
+        return 68i32;
+    }
+
+    var cookie_ack: SctpCookieAckChunk = sctp_cookie_ack_chunk_make();
+    cookie_ack.flags = 0x00u8;
+    var cookie_ack_buffer: [byte: 8] = [];
+    const cookie_ack_written: !usize = sctp_cookie_ack_chunk_write(&cookie_ack, cookie_ack_buffer[0:8]);
+    if cookie_ack_written.error_id != 0 || cookie_ack_written.value != 4usize {
+        return 69i32;
+    }
+    const cookie_ack_parsed: !SctpCookieAckChunk = sctp_cookie_ack_chunk_parse(cookie_ack_buffer[0:cookie_ack_written.value]);
+    if cookie_ack_parsed.error_id != 0 {
+        return 70i32;
+    }
+
+    return 0i32;
+}
+
+fn check_data_chunk_roundtrip() i32 {
+    var payload: [byte: 5] = [
+        0x10 as byte,
+        0x20 as byte,
+        0x30 as byte,
+        0x40 as byte,
+        0x50 as byte,
+    ];
+
+    var data: SctpDataChunk = sctp_data_chunk_make();
+    data.flags = SCTP_DATA_CHUNK_FLAG_UNORDERED | SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT | SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT;
+    data.transmission_sequence_number = 0x11223344u32;
+    data.stream_identifier = 0x5566u16;
+    data.stream_sequence_number = 0x7788u16;
+    data.payload_protocol_identifier = 0x99aabbccu32;
+    data.payload = payload[0:5];
+
+    var buffer: [byte: 64] = [];
+    const written: !usize = sctp_data_chunk_write(&data, buffer[0:64]);
+    if written.error_id != 0 || written.value != 24usize {
+        return 90i32;
+    }
+
+    const parsed: !SctpDataChunk = sctp_data_chunk_parse(buffer[0:written.value]);
+    if parsed.error_id != 0 {
+        return 91i32;
+    }
+    if parsed.value.flags != data.flags {
+        return 92i32;
+    }
+    if parsed.value.transmission_sequence_number != data.transmission_sequence_number {
+        return 93i32;
+    }
+    if parsed.value.stream_identifier != data.stream_identifier || parsed.value.stream_sequence_number != data.stream_sequence_number {
+        return 94i32;
+    }
+    if parsed.value.payload_protocol_identifier != data.payload_protocol_identifier {
+        return 95i32;
+    }
+    if !bytes_equal(parsed.value.payload, payload[0:5]) {
+        return 96i32;
+    }
+
+    var data_body: [byte: 17] = [
+        0x11 as byte,
+        0x22 as byte,
+        0x33 as byte,
+        0x44 as byte,
+        0x55 as byte,
+        0x66 as byte,
+        0x77 as byte,
+        0x88 as byte,
+        0x99 as byte,
+        0xaa as byte,
+        0xbb as byte,
+        0xcc as byte,
+        0x10 as byte,
+        0x20 as byte,
+        0x30 as byte,
+        0x40 as byte,
+        0x50 as byte,
+    ];
+
+    var packet: SctpPacket = sctp_packet_make_empty();
+    packet.source_port = 5000u16;
+    packet.destination_port = 5001u16;
+    packet.verification_tag = 0x01020304u32;
+    packet.checksum = 0x11223344u32;
+    packet.chunk_count = 1usize;
+    packet.chunks[0usize].chunk_type = SCTP_CHUNK_TYPE_DATA;
+    packet.chunks[0usize].flags = data.flags;
+    packet.chunks[0usize].length = 21usize;
+    packet.chunks[0usize].payload = data_body[0:17];
+
+    var packet_buffer: [byte: 64] = [];
+    const packet_written: !usize = sctp_packet_write(&packet, packet_buffer[0:64]);
+    if packet_written.error_id != 0 {
+        return 97i32;
+    }
+    const packet_parsed: !SctpPacket = sctp_packet_parse(packet_buffer[0:packet_written.value]);
+    if packet_parsed.error_id != 0 {
+        return 98i32;
+    }
+    if packet_parsed.value.chunks[0usize].chunk_type != SCTP_CHUNK_TYPE_DATA {
+        return 99i32;
+    }
+    if packet_parsed.value.chunks[0usize].length != 21usize {
+        return 100i32;
+    }
+    if !bytes_equal(packet_parsed.value.chunks[0usize].payload, data_body[0:17]) {
+        return 101i32;
+    }
+
+    return 0i32;
+}
+
+fn check_data_chunk_malformed_cases() i32 {
+    var too_short: [byte: 3] = [0x00 as byte, 0x00 as byte, 0x00 as byte];
+    const too_short_result: !SctpDataChunk = sctp_data_chunk_parse(too_short[0:3]);
+    if too_short_result.error_id != @error_id(error.SctpPacketTooSmall) {
+        return 110i32;
+    }
+
+    var too_small_length: [byte: 16] = [
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x0f as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x99 as byte, 0xaa as byte, 0xbb as byte, 0x00 as byte,
+    ];
+    const too_small_length_result: !SctpDataChunk = sctp_data_chunk_parse(too_small_length[0:16]);
+    if too_small_length_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 111i32;
+    }
+
+    var payload: [byte: 1] = [0x01 as byte];
+    var bad_padding: SctpDataChunk = sctp_data_chunk_make();
+    bad_padding.transmission_sequence_number = 0x11223344u32;
+    bad_padding.stream_identifier = 0x5566u16;
+    bad_padding.stream_sequence_number = 0x7788u16;
+    bad_padding.payload_protocol_identifier = 0x99aabbccu32;
+    bad_padding.payload = payload[0:1];
+    var bad_padding_buffer: [byte: 32] = [];
+    const bad_padding_written: !usize = sctp_data_chunk_write(&bad_padding, bad_padding_buffer[0:32]);
+    if bad_padding_written.error_id != 0 || bad_padding_written.value != 20usize {
+        return 112i32;
+    }
+    bad_padding_buffer[19usize] = 0x01 as byte;
+    const bad_padding_result: !SctpDataChunk = sctp_data_chunk_parse(bad_padding_buffer[0:bad_padding_written.value]);
+    if bad_padding_result.error_id != @error_id(error.SctpInvalidChunkPadding) {
+        return 113i32;
+    }
+
+    var wrong_type: [byte: 4] = [
+        0x0b as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x04 as byte,
+    ];
+    const wrong_type_result: !SctpDataChunk = sctp_data_chunk_parse(wrong_type[0:4]);
+    if wrong_type_result.error_id != @error_id(error.SctpInvalidChunkType) {
+        return 114i32;
+    }
+
+    return 0i32;
+}
+
+fn check_handshake_chunk_malformed_cases() i32 {
+    var too_short_init: [byte: 3] = [
+        0x01 as byte,
+        0x00 as byte,
+        0x00 as byte,
+    ];
+    const too_short_result: !SctpInitChunk = sctp_init_chunk_parse(too_short_init[0:3]);
+    if too_short_result.error_id != @error_id(error.SctpPacketTooSmall) {
+        return 80i32;
+    }
+
+    var bad_length: [byte: 20] = [
+        0x01 as byte, 0x00 as byte, 0x00 as byte, 0x13 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x0c as byte,
+        0x00 as byte, 0x22 as byte,
+        0x99 as byte, 0xaa as byte, 0xbb as byte, 0x00 as byte,
+    ];
+    const bad_length_result: !SctpInitChunk = sctp_init_chunk_parse(bad_length[0:20]);
+    if bad_length_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 81i32;
+    }
+
+    var bad_padding_chunk: SctpCookieEchoChunk = sctp_cookie_echo_chunk_make();
+    bad_padding_chunk.cookie = too_short_init[0:3];
+    var bad_padding_buffer: [byte: 16] = [];
+    const bad_padding_written: !usize = sctp_cookie_echo_chunk_write(&bad_padding_chunk, bad_padding_buffer[0:16]);
+    if bad_padding_written.error_id != 0 || bad_padding_written.value != 8usize {
+        return 82i32;
+    }
+    bad_padding_buffer[7usize] = 0x01 as byte;
+    const bad_padding_result: !SctpCookieEchoChunk = sctp_cookie_echo_chunk_parse(bad_padding_buffer[0:bad_padding_written.value]);
+    if bad_padding_result.error_id != @error_id(error.SctpInvalidChunkPadding) {
+        return 83i32;
+    }
+
+    var wrong_type: [byte: 4] = [0x0b as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte];
+    const wrong_type_result: !SctpInitAckChunk = sctp_init_ack_chunk_parse(wrong_type[0:4]);
+    if wrong_type_result.error_id != @error_id(error.SctpInvalidChunkType) {
+        return 84i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_parse_minimal_cookie_ack();
     if result != 0i32 {
@@ -105,6 +476,36 @@ fn main() i32 {
     result = check_parse_bad_chunk_length();
     if result != 0i32 {
         printf("SCTP parser tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_init_chunk_roundtrip();
+    if result != 0i32 {
+        printf("SCTP INIT chunk tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_init_ack_cookie_echo_ack_roundtrip();
+    if result != 0i32 {
+        printf("SCTP INIT_ACK / COOKIE_ECHO / COOKIE_ACK tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_data_chunk_roundtrip();
+    if result != 0i32 {
+        printf("SCTP DATA chunk tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_data_chunk_malformed_cases();
+    if result != 0i32 {
+        printf("SCTP DATA malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_handshake_chunk_malformed_cases();
+    if result != 0i32 {
+        printf("SCTP handshake malformed tests failed: %d\n", result);
         return 1i32;
     }
 

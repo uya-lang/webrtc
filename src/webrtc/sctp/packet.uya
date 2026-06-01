@@ -8,6 +8,10 @@ export const SCTP_CHUNK_HEADER_BYTES: usize = 4usize;
 export const SCTP_MAX_CHUNKS: usize = 32usize;
 
 export const SCTP_CHUNK_TYPE_DATA: u8 = 0u8;
+export const SCTP_DATA_CHUNK_FLAG_ENDING_FRAGMENT: u8 = 0x01u8;
+export const SCTP_DATA_CHUNK_FLAG_BEGINNING_FRAGMENT: u8 = 0x02u8;
+export const SCTP_DATA_CHUNK_FLAG_UNORDERED: u8 = 0x04u8;
+
 export const SCTP_CHUNK_TYPE_INIT: u8 = 1u8;
 export const SCTP_CHUNK_TYPE_INIT_ACK: u8 = 2u8;
 export const SCTP_CHUNK_TYPE_SACK: u8 = 3u8;
@@ -27,6 +31,7 @@ export error SctpPacketTooSmall;
 export error SctpBufferTooSmall;
 export error SctpInvalidChunkLength;
 export error SctpInvalidChunkPadding;
+export error SctpInvalidChunkType;
 export error SctpTooManyChunks;
 
 /// Parsed SCTP chunk with header and payload slice.
@@ -48,6 +53,44 @@ export struct SctpPacket {
     chunks: [SctpChunk: SCTP_MAX_CHUNKS] = [],
     raw: &[byte] = [],
 }
+
+export struct SctpInitChunk {
+    flags: u8 = 0u8,
+    initiate_tag: u32 = 0u32,
+    a_rwnd: u32 = 0u32,
+    outbound_streams: u16 = 0u16,
+    inbound_streams: u16 = 0u16,
+    initial_tsn: u32 = 0u32,
+    parameters: &[byte] = [],
+}
+
+export struct SctpInitAckChunk {
+    flags: u8 = 0u8,
+    initiate_tag: u32 = 0u32,
+    a_rwnd: u32 = 0u32,
+    outbound_streams: u16 = 0u16,
+    inbound_streams: u16 = 0u16,
+    initial_tsn: u32 = 0u32,
+    state_cookie: &[byte] = [],
+}
+
+export struct SctpCookieEchoChunk {
+    flags: u8 = 0u8,
+    cookie: &[byte] = [],
+}
+
+export struct SctpCookieAckChunk {
+    flags: u8 = 0u8,
+}
+export struct SctpDataChunk {
+    flags: u8 = 0u8,
+    transmission_sequence_number: u32 = 0u32,
+    stream_identifier: u16 = 0u16,
+    stream_sequence_number: u16 = 0u16,
+    payload_protocol_identifier: u32 = 0u32,
+    payload: &[byte] = [],
+}
+
 
 fn sctp_packet_make() SctpPacket {
     return SctpPacket{};
@@ -88,6 +131,61 @@ fn sctp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
         dst[index] = src[index];
         index = index + 1usize;
     }
+}
+
+struct SctpChunkHeaderView {
+    chunk_type: u8 = 0u8,
+    flags: u8 = 0u8,
+    length: usize = 0usize,
+    padded_length: usize = 0usize,
+}
+
+fn sctp_chunk_header_view_make() SctpChunkHeaderView {
+    return SctpChunkHeaderView{};
+}
+
+fn sctp_chunk_header_parse(packet: &[byte]) !SctpChunkHeaderView {
+    if packet.len < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpPacketTooSmall;
+    }
+
+    const length: usize = (try read_be_u16(packet[2usize:2])) as usize;
+    if length < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const padded_length: usize = try sctp_align_up_4(length);
+    if packet.len != padded_length {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var pad_index: usize = length;
+    while pad_index < padded_length {
+        if packet[pad_index] != 0u8 {
+            return error.SctpInvalidChunkPadding;
+        }
+        pad_index = pad_index + 1usize;
+    }
+
+    var header: SctpChunkHeaderView = sctp_chunk_header_view_make();
+    header.chunk_type = packet[0usize] as u8;
+    header.flags = packet[1usize] as u8;
+    header.length = length;
+    header.padded_length = padded_length;
+    return header;
+}
+
+fn sctp_chunk_write_header(buffer: &[byte], chunk_type: u8, flags: u8, length: usize) !void {
+    if length > 65535usize {
+        return error.SctpInvalidChunkLength;
+    }
+    if buffer.len < length {
+        return error.SctpBufferTooSmall;
+    }
+
+    buffer[0usize] = chunk_type as byte;
+    buffer[1usize] = flags as byte;
+    try write_be_u16(buffer[2usize:2], length as u16);
 }
 
 /// Create an empty SCTP packet container.
@@ -219,4 +317,243 @@ export fn sctp_packet_write(packet: &SctpPacket, buffer: &[byte]) !usize {
     }
 
     return total_length;
+}
+
+/// Create an empty SCTP INIT chunk container.
+export fn sctp_init_chunk_make() SctpInitChunk {
+    return SctpInitChunk{};
+}
+
+/// Create an empty SCTP INIT_ACK chunk container.
+export fn sctp_init_ack_chunk_make() SctpInitAckChunk {
+    return SctpInitAckChunk{};
+}
+
+/// Create an empty SCTP COOKIE_ECHO chunk container.
+export fn sctp_cookie_echo_chunk_make() SctpCookieEchoChunk {
+    return SctpCookieEchoChunk{};
+}
+
+/// Create an empty SCTP COOKIE_ACK chunk container.
+export fn sctp_cookie_ack_chunk_make() SctpCookieAckChunk {
+    return SctpCookieAckChunk{};
+}
+/// Create an empty SCTP DATA chunk container.
+export fn sctp_data_chunk_make() SctpDataChunk {
+    return SctpDataChunk{};
+}
+
+/// Parse an SCTP INIT chunk body and preserve trailing parameters.
+export fn sctp_init_chunk_parse(packet: &[byte]) !SctpInitChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_INIT {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < 20usize {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpInitChunk = sctp_init_chunk_make();
+    chunk.flags = header.flags;
+    chunk.initiate_tag = try read_be_u32(packet[4usize:4]);
+    chunk.a_rwnd = try read_be_u32(packet[8usize:4]);
+    chunk.outbound_streams = try read_be_u16(packet[12usize:2]);
+    chunk.inbound_streams = try read_be_u16(packet[14usize:2]);
+    chunk.initial_tsn = try read_be_u32(packet[16usize:4]);
+    chunk.parameters = packet[20usize:header.length - 20usize];
+    return chunk;
+}
+
+/// Parse an SCTP INIT_ACK chunk body and preserve the state cookie bytes.
+export fn sctp_init_ack_chunk_parse(packet: &[byte]) !SctpInitAckChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_INIT_ACK {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < 20usize {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpInitAckChunk = sctp_init_ack_chunk_make();
+    chunk.flags = header.flags;
+    chunk.initiate_tag = try read_be_u32(packet[4usize:4]);
+    chunk.a_rwnd = try read_be_u32(packet[8usize:4]);
+    chunk.outbound_streams = try read_be_u16(packet[12usize:2]);
+    chunk.inbound_streams = try read_be_u16(packet[14usize:2]);
+    chunk.initial_tsn = try read_be_u32(packet[16usize:4]);
+    chunk.state_cookie = packet[20usize:header.length - 20usize];
+    return chunk;
+}
+
+/// Parse an SCTP COOKIE_ECHO chunk body and preserve the cookie bytes.
+export fn sctp_cookie_echo_chunk_parse(packet: &[byte]) !SctpCookieEchoChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_COOKIE_ECHO {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpCookieEchoChunk = sctp_cookie_echo_chunk_make();
+    chunk.flags = header.flags;
+    chunk.cookie = packet[4usize:header.length - 4usize];
+    return chunk;
+}
+
+/// Parse an SCTP DATA chunk body and preserve the user payload.
+export fn sctp_data_chunk_parse(packet: &[byte]) !SctpDataChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_DATA {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length < 16usize {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpDataChunk = sctp_data_chunk_make();
+    chunk.flags = header.flags;
+    chunk.transmission_sequence_number = try read_be_u32(packet[4usize:4]);
+    chunk.stream_identifier = try read_be_u16(packet[8usize:2]);
+    chunk.stream_sequence_number = try read_be_u16(packet[10usize:2]);
+    chunk.payload_protocol_identifier = try read_be_u32(packet[12usize:4]);
+    chunk.payload = packet[16usize:header.length - 16usize];
+    return chunk;
+}
+
+/// Parse an SCTP COOKIE_ACK chunk body.
+export fn sctp_cookie_ack_chunk_parse(packet: &[byte]) !SctpCookieAckChunk {
+    const header: SctpChunkHeaderView = try sctp_chunk_header_parse(packet);
+    if header.chunk_type != SCTP_CHUNK_TYPE_COOKIE_ACK {
+        return error.SctpInvalidChunkType;
+    }
+    if header.length != SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk: SctpCookieAckChunk = sctp_cookie_ack_chunk_make();
+    chunk.flags = header.flags;
+    return chunk;
+}
+
+/// Write an SCTP INIT chunk.
+export fn sctp_init_chunk_write(chunk: &SctpInitChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const body_length: usize = 16usize + chunk.parameters.len;
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + body_length;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_INIT, chunk.flags, chunk_length);
+    try write_be_u32(buffer[4usize:4], chunk.initiate_tag);
+    try write_be_u32(buffer[8usize:4], chunk.a_rwnd);
+    try write_be_u16(buffer[12usize:2], chunk.outbound_streams);
+    try write_be_u16(buffer[14usize:2], chunk.inbound_streams);
+    try write_be_u32(buffer[16usize:4], chunk.initial_tsn);
+    try sctp_copy_bytes(buffer[20usize:chunk.parameters.len], chunk.parameters, chunk.parameters.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+    return padded_length;
+}
+
+/// Write an SCTP INIT_ACK chunk.
+export fn sctp_init_ack_chunk_write(chunk: &SctpInitAckChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const body_length: usize = 16usize + chunk.state_cookie.len;
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + body_length;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_INIT_ACK, chunk.flags, chunk_length);
+    try write_be_u32(buffer[4usize:4], chunk.initiate_tag);
+    try write_be_u32(buffer[8usize:4], chunk.a_rwnd);
+    try write_be_u16(buffer[12usize:2], chunk.outbound_streams);
+    try write_be_u16(buffer[14usize:2], chunk.inbound_streams);
+    try write_be_u32(buffer[16usize:4], chunk.initial_tsn);
+    try sctp_copy_bytes(buffer[20usize:chunk.state_cookie.len], chunk.state_cookie, chunk.state_cookie.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+    return padded_length;
+}
+
+/// Write an SCTP COOKIE_ECHO chunk.
+export fn sctp_cookie_echo_chunk_write(chunk: &SctpCookieEchoChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + chunk.cookie.len;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_COOKIE_ECHO, chunk.flags, chunk_length);
+    try sctp_copy_bytes(buffer[4usize:chunk.cookie.len], chunk.cookie, chunk.cookie.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+    return padded_length;
+}
+
+/// Write an SCTP DATA chunk.
+export fn sctp_data_chunk_write(chunk: &SctpDataChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    const body_length: usize = 12usize + chunk.payload.len;
+    const chunk_length: usize = SCTP_CHUNK_HEADER_BYTES + body_length;
+    const padded_length: usize = try sctp_align_up_4(chunk_length);
+    if padded_length > buffer.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_DATA, chunk.flags, chunk_length);
+    try write_be_u32(buffer[4usize:4], chunk.transmission_sequence_number);
+    try write_be_u16(buffer[8usize:2], chunk.stream_identifier);
+    try write_be_u16(buffer[10usize:2], chunk.stream_sequence_number);
+    try write_be_u32(buffer[12usize:4], chunk.payload_protocol_identifier);
+    try sctp_copy_bytes(buffer[16usize:chunk.payload.len], chunk.payload, chunk.payload.len);
+
+    var pad_index: usize = chunk_length;
+    while pad_index < padded_length {
+        buffer[pad_index] = 0u8;
+        pad_index = pad_index + 1usize;
+    }
+    return padded_length;
+}
+
+/// Write an SCTP COOKIE_ACK chunk.
+export fn sctp_cookie_ack_chunk_write(chunk: &SctpCookieAckChunk, buffer: &[byte]) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if buffer.len < SCTP_CHUNK_HEADER_BYTES {
+        return error.SctpBufferTooSmall;
+    }
+
+    try sctp_chunk_write_header(buffer, SCTP_CHUNK_TYPE_COOKIE_ACK, chunk.flags, SCTP_CHUNK_HEADER_BYTES);
+    return SCTP_CHUNK_HEADER_BYTES;
 }

@@ -348,8 +348,8 @@
 - [x] 先增加大消息 fragment/reassembly cap 和 unordered/reliable 行为测试。
 - [x] 先建立 `bench_datachannel` 的 Sans-I/O 基线。
 - [x] 实现 SCTP packet/chunk parser。
-- [~] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
-- [ ] 实现 DATA chunk。
+- [x] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
+- [x] 实现 DATA chunk。
 - [ ] 实现 SACK。
 - [ ] 实现 HEARTBEAT。
 - [ ] 实现 ABORT / SHUTDOWN。
