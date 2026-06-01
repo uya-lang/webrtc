@@ -1,0 +1,145 @@
+use libc.printf;
+use webrtc.runtime;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn check_configuration_helpers() i32 {
+    var server: IceServer = rtc_ice_server_make();
+    const add_url: !void = rtc_ice_server_add_url(&server, "stun:stun.l.google.com:19302" as &[byte]);
+    if add_url.error_id != 0 {
+        return 10i32;
+    }
+    const set_username: !void = rtc_ice_server_set_username(&server, "user" as &[byte]);
+    if set_username.error_id != 0 {
+        return 11i32;
+    }
+    const set_credential: !void = rtc_ice_server_set_credential(&server, "secret" as &[byte]);
+    if set_credential.error_id != 0 {
+        return 12i32;
+    }
+    if server.url_len == 0usize {
+        return 13i32;
+    }
+    if !bytes_equal(server.url[0:server.url_len], "stun:stun.l.google.com:19302" as &[byte]) {
+        return 14i32;
+    }
+    if !bytes_equal(server.username[0:server.username_len], "user" as &[byte]) {
+        return 15i32;
+    }
+    if !bytes_equal(server.credential[0:server.credential_len], "secret" as &[byte]) {
+        return 16i32;
+    }
+
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 2i32;
+    const add_server: !void = rtc_configuration_add_ice_server(&config, &server);
+    if add_server.error_id != 0 {
+        return 17i32;
+    }
+    if config.ice_server_count != 1usize {
+        return 18i32;
+    }
+
+    var invalid_config: RtcConfiguration = rtc_configuration_make();
+    invalid_config.worker_count = 0i32;
+    const invalid_worker_count: !void = rtc_configuration_validate(&invalid_config);
+    if invalid_worker_count.error_id != @error_id(error.RtcRuntimeConfigInvalid) {
+        return 19i32;
+    }
+
+    return 0i32;
+}
+
+fn check_runtime_lifecycle() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 3i32;
+
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 30i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+    if !rtc_runtime_is_initialized(&runtime) {
+        return 31i32;
+    }
+    if rtc_runtime_worker_count(&runtime) != 3i32 {
+        return 32i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 0usize {
+        return 33i32;
+    }
+
+    const first_id: !u64 = rtc_runtime_register_peer_connection(&runtime);
+    if first_id.error_id != 0 || first_id.value != 1u64 {
+        return 34i32;
+    }
+    const second_id: !u64 = rtc_runtime_register_peer_connection(&runtime);
+    if second_id.error_id != 0 || second_id.value != 2u64 {
+        return 35i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 2usize {
+        return 36i32;
+    }
+    if rtc_runtime_peer_connection_high_watermark(&runtime) != 2usize {
+        return 37i32;
+    }
+    if !rtc_runtime_has_peer_connection(&runtime, first_id.value) {
+        return 38i32;
+    }
+    if (rtc_runtime_unregister_peer_connection(&runtime, first_id.value)).error_id != 0 {
+        return 39i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 1usize {
+        return 40i32;
+    }
+    if rtc_runtime_has_peer_connection(&runtime, first_id.value) {
+        return 41i32;
+    }
+
+    rtc_runtime_reset(&runtime);
+    if rtc_runtime_is_initialized(&runtime) {
+        return 42i32;
+    }
+    if rtc_runtime_peer_connection_count(&runtime) != 0usize {
+        return 43i32;
+    }
+    if rtc_runtime_worker_count(&runtime) != 1i32 {
+        return 44i32;
+    }
+    if rtc_runtime_has_peer_connection(&runtime, second_id.value) {
+        return 45i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_configuration_helpers();
+    if result != 0i32 {
+        printf("RtcRuntime configuration tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_runtime_lifecycle();
+    if result != 0i32 {
+        printf("RtcRuntime lifecycle tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RtcRuntime tests passed\n");
+    return 0i32;
+}

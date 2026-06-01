@@ -1,0 +1,389 @@
+// webrtc.runtime - WebRTC 运行时配置与 PeerConnection 注册表
+// 模块路径：src/webrtc/runtime.uya → use webrtc.runtime;
+
+use webrtc.errors;
+
+export const RTC_MAX_ICE_SERVERS: usize = 8usize;
+export const RTC_MAX_ICE_SERVER_URL_BYTES: usize = 128usize;
+export const RTC_MAX_ICE_SERVER_USERNAME_BYTES: usize = 64usize;
+export const RTC_MAX_ICE_SERVER_CREDENTIAL_BYTES: usize = 256usize;
+export const RTC_MAX_PEER_CONNECTIONS: usize = 16usize;
+export const RTC_MAX_WORKER_COUNT: i32 = 32i32;
+
+export const RTC_BUNDLE_POLICY_BALANCED: u8 = 0u8;
+export const RTC_BUNDLE_POLICY_MAX_BUNDLE: u8 = 1u8;
+export const RTC_BUNDLE_POLICY_MAX_COMPAT: u8 = 2u8;
+
+export const RTC_RTCP_MUX_POLICY_REQUIRE: u8 = 0u8;
+export const RTC_RTCP_MUX_POLICY_NEGOTIATE: u8 = 1u8;
+
+export error RtcRuntimeInvalidState;
+export error RtcRuntimeConfigInvalid;
+export error RtcRuntimeLimitReached;
+export error RtcRuntimePeerConnectionNotFound;
+export error RtcRuntimeIceServerUrlTooLong;
+export error RtcRuntimeIceServerUsernameTooLong;
+export error RtcRuntimeIceServerCredentialTooLong;
+
+export struct IceServer {
+    url: [byte: RTC_MAX_ICE_SERVER_URL_BYTES] = [],
+    url_len: usize = 0usize,
+    username: [byte: RTC_MAX_ICE_SERVER_USERNAME_BYTES] = [],
+    username_len: usize = 0usize,
+    credential: [byte: RTC_MAX_ICE_SERVER_CREDENTIAL_BYTES] = [],
+    credential_len: usize = 0usize,
+}
+
+export struct RtcConfiguration {
+    ice_servers: [IceServer: RTC_MAX_ICE_SERVERS] = [],
+    ice_server_count: usize = 0usize,
+    bundle_policy: u8 = RTC_BUNDLE_POLICY_BALANCED,
+    rtcp_mux_policy: u8 = RTC_RTCP_MUX_POLICY_REQUIRE,
+    worker_count: i32 = 1i32,
+}
+
+struct RtcRuntimePeerConnectionSlot {
+    present: bool = false,
+    peer_connection_id: u64 = 0u64,
+}
+
+export struct RtcRuntime {
+    initialized: bool = false,
+    config: RtcConfiguration = RtcConfiguration{},
+    next_peer_connection_id: u64 = 1u64,
+    peer_connection_count: usize = 0usize,
+    peer_connection_high_watermark: usize = 0usize,
+    peer_connection_slots: [RtcRuntimePeerConnectionSlot: RTC_MAX_PEER_CONNECTIONS] = [],
+}
+
+fn rtc_copy_bytes(dst: &[byte], src: &[byte]) !void {
+    if src.len > dst.len {
+        return error.RtcRuntimeConfigInvalid;
+    }
+
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn rtc_runtime_peer_connection_slot_make() RtcRuntimePeerConnectionSlot {
+    return RtcRuntimePeerConnectionSlot{};
+}
+
+fn rtc_runtime_default_slots() [RtcRuntimePeerConnectionSlot: RTC_MAX_PEER_CONNECTIONS] {
+    var slots: [RtcRuntimePeerConnectionSlot: RTC_MAX_PEER_CONNECTIONS] = [];
+    var index: usize = 0usize;
+    while index < RTC_MAX_PEER_CONNECTIONS {
+        slots[index] = rtc_runtime_peer_connection_slot_make();
+        index = index + 1usize;
+    }
+    return slots;
+}
+
+fn rtc_runtime_validate_bundle_policy(policy: u8) !void {
+    if policy == RTC_BUNDLE_POLICY_BALANCED
+        || policy == RTC_BUNDLE_POLICY_MAX_BUNDLE
+        || policy == RTC_BUNDLE_POLICY_MAX_COMPAT {
+        return;
+    }
+    return error.RtcRuntimeConfigInvalid;
+}
+
+fn rtc_runtime_validate_rtcp_mux_policy(policy: u8) !void {
+    if policy == RTC_RTCP_MUX_POLICY_REQUIRE || policy == RTC_RTCP_MUX_POLICY_NEGOTIATE {
+        return;
+    }
+    return error.RtcRuntimeConfigInvalid;
+}
+
+fn rtc_runtime_validate_ice_server(server: &IceServer) !void {
+    if server == null {
+        return error.RtcRuntimeConfigInvalid;
+    }
+    if server.url_len == 0usize || server.url_len > RTC_MAX_ICE_SERVER_URL_BYTES {
+        return error.RtcRuntimeConfigInvalid;
+    }
+    if server.username_len > RTC_MAX_ICE_SERVER_USERNAME_BYTES {
+        return error.RtcRuntimeIceServerUsernameTooLong;
+    }
+    if server.credential_len > RTC_MAX_ICE_SERVER_CREDENTIAL_BYTES {
+        return error.RtcRuntimeIceServerCredentialTooLong;
+    }
+    return;
+}
+
+fn rtc_runtime_find_peer_slot(runtime: &RtcRuntime, peer_connection_id: u64) !usize {
+    if runtime == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    var index: usize = 0usize;
+    while index < RTC_MAX_PEER_CONNECTIONS {
+        if runtime.peer_connection_slots[index].present
+            && runtime.peer_connection_slots[index].peer_connection_id == peer_connection_id {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return error.RtcRuntimePeerConnectionNotFound;
+}
+
+/// Create an empty ICE server record.
+export fn rtc_ice_server_make() IceServer {
+    return IceServer{};
+}
+
+/// Append a URL to the ICE server.
+export fn rtc_ice_server_add_url(server: &IceServer, url: &[byte]) !void {
+    if server == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if url.len == 0usize {
+        return error.RtcRuntimeConfigInvalid;
+    }
+    if server.url_len != 0usize {
+        return error.RtcRuntimeLimitReached;
+    }
+    if url.len > RTC_MAX_ICE_SERVER_URL_BYTES {
+        return error.RtcRuntimeIceServerUrlTooLong;
+    }
+    try rtc_copy_bytes(server.url[0:RTC_MAX_ICE_SERVER_URL_BYTES], url);
+    server.url_len = url.len;
+    return;
+}
+
+/// Set the ICE server username.
+export fn rtc_ice_server_set_username(server: &IceServer, username: &[byte]) !void {
+    if server == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if username.len > RTC_MAX_ICE_SERVER_USERNAME_BYTES {
+        return error.RtcRuntimeIceServerUsernameTooLong;
+    }
+
+    server.username_len = username.len;
+    var index: usize = 0usize;
+    while index < username.len {
+        server.username[index] = username[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+/// Set the ICE server credential.
+export fn rtc_ice_server_set_credential(server: &IceServer, credential: &[byte]) !void {
+    if server == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if credential.len > RTC_MAX_ICE_SERVER_CREDENTIAL_BYTES {
+        return error.RtcRuntimeIceServerCredentialTooLong;
+    }
+
+    server.credential_len = credential.len;
+    var index: usize = 0usize;
+    while index < credential.len {
+        server.credential[index] = credential[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+/// Create a default RTC configuration.
+export fn rtc_configuration_make() RtcConfiguration {
+    var ice_servers: [IceServer: RTC_MAX_ICE_SERVERS] = [];
+    return RtcConfiguration{
+        ice_servers: ice_servers,
+        ice_server_count: 0usize,
+        bundle_policy: RTC_BUNDLE_POLICY_BALANCED,
+        rtcp_mux_policy: RTC_RTCP_MUX_POLICY_REQUIRE,
+        worker_count: 1i32,
+    };
+}
+
+/// Append an ICE server to the configuration.
+export fn rtc_configuration_add_ice_server(config: &RtcConfiguration, server: &IceServer) !void {
+    if config == null || server == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if config.ice_server_count >= RTC_MAX_ICE_SERVERS {
+        return error.RtcRuntimeLimitReached;
+    }
+    try rtc_runtime_validate_ice_server(server);
+
+    const slot: usize = config.ice_server_count;
+    if slot >= RTC_MAX_ICE_SERVERS {
+        return error.RtcRuntimeLimitReached;
+    }
+    config.ice_servers[slot] = *server;
+    config.ice_server_count = slot + 1usize;
+    return;
+}
+
+/// Validate the runtime configuration before initialization.
+export fn rtc_configuration_validate(config: &RtcConfiguration) !void {
+    if config == null {
+        return error.RtcRuntimeInvalidState;
+    }
+    if config.worker_count <= 0i32 || config.worker_count > RTC_MAX_WORKER_COUNT {
+        return error.RtcRuntimeConfigInvalid;
+    }
+    try rtc_runtime_validate_bundle_policy(config.bundle_policy);
+    try rtc_runtime_validate_rtcp_mux_policy(config.rtcp_mux_policy);
+    if config.ice_server_count > RTC_MAX_ICE_SERVERS {
+        return error.RtcRuntimeConfigInvalid;
+    }
+
+    var index: usize = 0usize;
+    while index < config.ice_server_count {
+        try rtc_runtime_validate_ice_server(&config.ice_servers[index]);
+        index = index + 1usize;
+    }
+    return;
+}
+
+/// Create a default runtime shell.
+export fn rtc_runtime_make() RtcRuntime {
+    var slots: [RtcRuntimePeerConnectionSlot: RTC_MAX_PEER_CONNECTIONS] = rtc_runtime_default_slots();
+    return RtcRuntime{
+        initialized: false,
+        config: rtc_configuration_make(),
+        next_peer_connection_id: 1u64,
+        peer_connection_count: 0usize,
+        peer_connection_high_watermark: 0usize,
+        peer_connection_slots: slots,
+    };
+}
+
+/// Initialize a runtime from a validated configuration.
+export fn rtc_runtime_init(config: &RtcConfiguration) !RtcRuntime {
+    try rtc_configuration_validate(config);
+
+    var runtime: RtcRuntime = rtc_runtime_make();
+    runtime.initialized = true;
+    runtime.config = *config;
+    return runtime;
+}
+
+/// Return whether the runtime is initialized.
+export fn rtc_runtime_is_initialized(runtime: &RtcRuntime) bool {
+    if runtime == null {
+        return false;
+    }
+    return runtime.initialized;
+}
+
+/// Return the current worker count.
+export fn rtc_runtime_worker_count(runtime: &RtcRuntime) i32 {
+    if runtime == null {
+        return 0i32;
+    }
+    return runtime.config.worker_count;
+}
+
+/// Return the number of registered PeerConnections.
+export fn rtc_runtime_peer_connection_count(runtime: &RtcRuntime) usize {
+    if runtime == null {
+        return 0usize;
+    }
+    return runtime.peer_connection_count;
+}
+
+/// Return the observed high-watermark of registered PeerConnections.
+export fn rtc_runtime_peer_connection_high_watermark(runtime: &RtcRuntime) usize {
+    if runtime == null {
+        return 0usize;
+    }
+    return runtime.peer_connection_high_watermark;
+}
+
+/// Return a borrowed reference to the runtime configuration.
+export fn rtc_runtime_config(runtime: &RtcRuntime) &RtcConfiguration {
+    if runtime == null {
+        return null;
+    }
+    return &runtime.config;
+}
+
+/// Register a new PeerConnection id inside the runtime.
+export fn rtc_runtime_register_peer_connection(runtime: &RtcRuntime) !u64 {
+    if runtime == null || !runtime.initialized {
+        return error.RtcRuntimeInvalidState;
+    }
+    if runtime.peer_connection_count >= RTC_MAX_PEER_CONNECTIONS {
+        return error.RtcRuntimeLimitReached;
+    }
+
+    var slot_index: usize = 0usize;
+    while slot_index < RTC_MAX_PEER_CONNECTIONS {
+        if !runtime.peer_connection_slots[slot_index].present {
+            const peer_connection_id: u64 = runtime.next_peer_connection_id;
+            runtime.peer_connection_slots[slot_index].present = true;
+            runtime.peer_connection_slots[slot_index].peer_connection_id = peer_connection_id;
+            runtime.peer_connection_count = runtime.peer_connection_count + 1usize;
+            if runtime.peer_connection_count > runtime.peer_connection_high_watermark {
+                runtime.peer_connection_high_watermark = runtime.peer_connection_count;
+            }
+            if runtime.next_peer_connection_id == 0xFFFFFFFFFFFFFFFFu64 {
+                runtime.next_peer_connection_id = 1u64;
+            } else {
+                runtime.next_peer_connection_id = runtime.next_peer_connection_id + 1u64;
+            }
+            return peer_connection_id;
+        }
+        slot_index = slot_index + 1usize;
+    }
+
+    return error.RtcRuntimeLimitReached;
+}
+
+/// Check whether a PeerConnection id is still registered.
+export fn rtc_runtime_has_peer_connection(runtime: &RtcRuntime, peer_connection_id: u64) bool {
+    if runtime == null || !runtime.initialized {
+        return false;
+    }
+
+    var slot_index: usize = 0usize;
+    while slot_index < RTC_MAX_PEER_CONNECTIONS {
+        if runtime.peer_connection_slots[slot_index].present
+            && runtime.peer_connection_slots[slot_index].peer_connection_id == peer_connection_id {
+            return true;
+        }
+        slot_index = slot_index + 1usize;
+    }
+    return false;
+}
+
+/// Unregister an existing PeerConnection id from the runtime.
+export fn rtc_runtime_unregister_peer_connection(runtime: &RtcRuntime, peer_connection_id: u64) !void {
+    const slot_index: usize = try rtc_runtime_find_peer_slot(runtime, peer_connection_id);
+    if slot_index >= RTC_MAX_PEER_CONNECTIONS {
+        return error.RtcRuntimePeerConnectionNotFound;
+    }
+    runtime.peer_connection_slots[slot_index].present = false;
+    runtime.peer_connection_slots[slot_index].peer_connection_id = 0u64;
+    if runtime.peer_connection_count > 0usize {
+        runtime.peer_connection_count = runtime.peer_connection_count - 1usize;
+    }
+    return;
+}
+
+/// Reset runtime state and return to the default uninitialized shell.
+export fn rtc_runtime_reset(runtime: &RtcRuntime) void {
+    if runtime == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < RTC_MAX_PEER_CONNECTIONS {
+        runtime.peer_connection_slots[index] = rtc_runtime_peer_connection_slot_make();
+        index = index + 1usize;
+    }
+
+    runtime.initialized = false;
+    runtime.config = rtc_configuration_make();
+    runtime.next_peer_connection_id = 1u64;
+    runtime.peer_connection_count = 0usize;
+    runtime.peer_connection_high_watermark = 0usize;
+}
