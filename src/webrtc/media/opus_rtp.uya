@@ -9,6 +9,8 @@ export error OpusRtpInvalidClockRate;
 export error OpusRtpInvalidPtime;
 export error OpusRtpInvalidFmtpValue;
 export error OpusRtpUnsupportedFmtpKey;
+export error OpusRtpDurationInvalid;
+export error OpusRtpDurationExceedsMaxptime;
 
 export const OPUS_RTP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1200usize;
 export const OPUS_RTP_CLOCK_RATE_HZ: u32 = 48000u32;
@@ -146,6 +148,35 @@ export fn opus_rtp_semantics_apply_fmtp_param(
     }
 
     return error.OpusRtpUnsupportedFmtpKey;
+}
+
+export fn opus_rtp_duration_ms_from_samples(sample_count: u32) !u32 {
+    if sample_count == 0u32 {
+        return 0u32;
+    }
+
+    const numerator: u64 = (sample_count as u64) * 1000u64;
+    const denominator: u64 = OPUS_RTP_CLOCK_RATE_HZ as u64;
+    if (numerator % denominator) != 0u64 {
+        return error.OpusRtpDurationInvalid;
+    }
+
+    return (numerator / denominator) as u32;
+}
+
+export fn opus_rtp_validate_packet_duration_ms(semantics: &OpusRtpSemantics, duration_ms: u32) !void {
+    if semantics == null {
+        return error.OpusRtpInvalidConfig;
+    }
+    if duration_ms == 0u32 {
+        return;
+    }
+    if duration_ms > OPUS_RTP_MAX_PTIME_MS {
+        return error.OpusRtpInvalidPtime;
+    }
+    if duration_ms > semantics.maxptime_ms {
+        return error.OpusRtpDurationExceedsMaxptime;
+    }
 }
 
 export fn opus_rtp_packetize(

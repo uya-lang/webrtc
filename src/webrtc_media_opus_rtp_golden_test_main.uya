@@ -1,0 +1,130 @@
+use libc.printf;
+use webrtc.media.opus_rtp;
+
+fn bytes_equal(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+    var i: usize = 0usize;
+    while i < a.len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+    return true;
+}
+
+fn check_single_packet_golden() i32 {
+    var payload: [byte: 3] = [0xF8 as byte, 0xAA as byte, 0xBB as byte];
+    var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    cfg.max_payload_bytes = 1200usize;
+
+    var out: [byte: 8] = [];
+    const written: !usize = opus_rtp_packetize(payload[0:3], &cfg, out[0:8]);
+    if written.error_id != 0 || written.value != 3usize {
+        return 10i32;
+    }
+    if !bytes_equal(out[0:written.value], payload[0:3]) {
+        return 11i32;
+    }
+    return 0i32;
+}
+
+fn check_multi_frame_golden() i32 {
+    var payload: [byte: 7] = [0xF9 as byte, 0x10 as byte, 0x20 as byte, 0x30 as byte, 0x40 as byte, 0x50 as byte, 0x60 as byte];
+    var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    cfg.max_payload_bytes = 1200usize;
+
+    var out: [byte: 16] = [];
+    const written: !usize = opus_rtp_packetize(payload[0:7], &cfg, out[0:16]);
+    if written.error_id != 0 || written.value != 7usize {
+        return 20i32;
+    }
+
+    var dep_cfg: OpusRtpDepacketizeConfig = opus_rtp_depacketize_config_make();
+    var recovered: [byte: 16] = [];
+    const decoded: !usize = opus_rtp_depacketize(out[0:written.value], &dep_cfg, recovered[0:16]);
+    if decoded.error_id != 0 || decoded.value != 7usize {
+        return 21i32;
+    }
+    if !bytes_equal(recovered[0:decoded.value], payload[0:7]) {
+        return 22i32;
+    }
+
+    return 0i32;
+}
+
+fn check_dtx_empty_payload_golden() i32 {
+    var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    cfg.allow_empty_payload = true;
+
+    var out: [byte: 1] = [];
+    const written: !usize = opus_rtp_packetize(out[0:0], &cfg, out[0:1]);
+    if written.error_id != 0 || written.value != 0usize {
+        return 30i32;
+    }
+
+    var dep_cfg: OpusRtpDepacketizeConfig = opus_rtp_depacketize_config_make();
+    dep_cfg.allow_empty_payload = true;
+    var recovered: [byte: 1] = [];
+    const decoded: !usize = opus_rtp_depacketize(out[0:0], &dep_cfg, recovered[0:1]);
+    if decoded.error_id != 0 || decoded.value != 0usize {
+        return 31i32;
+    }
+
+    return 0i32;
+}
+
+fn check_maxptime_overflow_golden() i32 {
+    var semantics: OpusRtpSemantics = opus_rtp_semantics_make();
+    if (opus_rtp_semantics_set_maxptime_ms(&semantics, 60u32)).error_id != 0 {
+        return 40i32;
+    }
+
+    const duration_ms: !u32 = opus_rtp_duration_ms_from_samples(3840u32);
+    if duration_ms.error_id != 0 || duration_ms.value != 80u32 {
+        return 41i32;
+    }
+
+    const overflow: !void = opus_rtp_validate_packet_duration_ms(&semantics, duration_ms.value);
+    if overflow.error_id != @error_id(error.OpusRtpDurationExceedsMaxptime) {
+        return 42i32;
+    }
+
+    const ok: !void = opus_rtp_validate_packet_duration_ms(&semantics, 40u32);
+    if ok.error_id != 0 {
+        return 43i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_single_packet_golden();
+    if result != 0i32 {
+        printf("opus golden single packet failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_multi_frame_golden();
+    if result != 0i32 {
+        printf("opus golden multi frame failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_dtx_empty_payload_golden();
+    if result != 0i32 {
+        printf("opus golden dtx/empty failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_maxptime_overflow_golden();
+    if result != 0i32 {
+        printf("opus golden maxptime failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("opus golden tests passed\n");
+    return 0i32;
+}
