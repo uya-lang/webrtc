@@ -1,0 +1,222 @@
+// webrtc.sctp.packet - SCTP packet and chunk parser/writer
+// Module: src/webrtc/sctp/packet.uya -> use webrtc.sctp.packet;
+
+use webrtc.binary;
+
+export const SCTP_COMMON_HEADER_BYTES: usize = 12usize;
+export const SCTP_CHUNK_HEADER_BYTES: usize = 4usize;
+export const SCTP_MAX_CHUNKS: usize = 32usize;
+
+export const SCTP_CHUNK_TYPE_DATA: u8 = 0u8;
+export const SCTP_CHUNK_TYPE_INIT: u8 = 1u8;
+export const SCTP_CHUNK_TYPE_INIT_ACK: u8 = 2u8;
+export const SCTP_CHUNK_TYPE_SACK: u8 = 3u8;
+export const SCTP_CHUNK_TYPE_HEARTBEAT: u8 = 4u8;
+export const SCTP_CHUNK_TYPE_HEARTBEAT_ACK: u8 = 5u8;
+export const SCTP_CHUNK_TYPE_ABORT: u8 = 6u8;
+export const SCTP_CHUNK_TYPE_SHUTDOWN: u8 = 7u8;
+export const SCTP_CHUNK_TYPE_SHUTDOWN_ACK: u8 = 8u8;
+export const SCTP_CHUNK_TYPE_ERROR: u8 = 9u8;
+export const SCTP_CHUNK_TYPE_COOKIE_ECHO: u8 = 10u8;
+export const SCTP_CHUNK_TYPE_COOKIE_ACK: u8 = 11u8;
+export const SCTP_CHUNK_TYPE_ECNE: u8 = 12u8;
+export const SCTP_CHUNK_TYPE_CWR: u8 = 13u8;
+export const SCTP_CHUNK_TYPE_SHUTDOWN_COMPLETE: u8 = 14u8;
+
+export error SctpPacketTooSmall;
+export error SctpBufferTooSmall;
+export error SctpInvalidChunkLength;
+export error SctpInvalidChunkPadding;
+export error SctpTooManyChunks;
+
+/// Parsed SCTP chunk with header and payload slice.
+export struct SctpChunk {
+    chunk_type: u8 = 0u8,
+    flags: u8 = 0u8,
+    length: usize = 0usize,
+    payload_offset: usize = 0usize,
+    payload: &[byte] = [],
+}
+
+/// Parsed SCTP packet with the common header and chunk table.
+export struct SctpPacket {
+    source_port: u16 = 0u16,
+    destination_port: u16 = 0u16,
+    verification_tag: u32 = 0u32,
+    checksum: u32 = 0u32,
+    chunk_count: usize = 0usize,
+    chunks: [SctpChunk: SCTP_MAX_CHUNKS] = [],
+    raw: &[byte] = [],
+}
+
+fn sctp_packet_make() SctpPacket {
+    return SctpPacket{};
+}
+
+fn sctp_chunk_make() SctpChunk {
+    return SctpChunk{};
+}
+
+fn sctp_align_up_4(value: usize) !usize {
+    return try checked_align_up_usize(value, 4usize);
+}
+
+fn sctp_chunk_wire_length(chunk: &SctpChunk) !usize {
+    if chunk == null {
+        return error.SctpInvalidChunkLength;
+    }
+
+    var chunk_length: usize = 0usize;
+    if chunk.length >= SCTP_CHUNK_HEADER_BYTES {
+        chunk_length = chunk.length;
+    } else {
+        chunk_length = chunk.payload.len + SCTP_CHUNK_HEADER_BYTES;
+    }
+    if chunk_length > 65535usize {
+        return error.SctpInvalidChunkLength;
+    }
+    return chunk_length;
+}
+
+fn sctp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.SctpBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+/// Create an empty SCTP packet container.
+export fn sctp_packet_make_empty() SctpPacket {
+    return sctp_packet_make();
+}
+
+/// Create an empty SCTP chunk container.
+export fn sctp_chunk_make_empty() SctpChunk {
+    return sctp_chunk_make();
+}
+
+/// Parse a raw SCTP packet into a typed packet with chunk slices.
+export fn sctp_packet_parse(packet: &[byte]) !SctpPacket {
+    if packet.len < SCTP_COMMON_HEADER_BYTES {
+        return error.SctpPacketTooSmall;
+    }
+
+    var parsed: SctpPacket = sctp_packet_make();
+    parsed.source_port = try read_be_u16(packet[0:2]);
+    parsed.destination_port = try read_be_u16(packet[2:2]);
+    parsed.verification_tag = try read_be_u32(packet[4:4]);
+    parsed.checksum = try read_be_u32(packet[8:4]);
+    parsed.raw = packet;
+
+    var offset: usize = SCTP_COMMON_HEADER_BYTES;
+    while offset < packet.len {
+        if parsed.chunk_count >= SCTP_MAX_CHUNKS {
+            return error.SctpTooManyChunks;
+        }
+        if (packet.len - offset) < SCTP_CHUNK_HEADER_BYTES {
+            return error.SctpInvalidChunkLength;
+        }
+
+        const chunk_type: u8 = packet[offset] as u8;
+        const flags: u8 = packet[offset + 1usize] as u8;
+        const chunk_length: usize = (try read_be_u16(packet[offset + 2usize:2])) as usize;
+        if chunk_length < SCTP_CHUNK_HEADER_BYTES {
+            return error.SctpInvalidChunkLength;
+        }
+        if chunk_length > (packet.len - offset) {
+            return error.SctpInvalidChunkLength;
+        }
+
+        const padded_length: usize = try sctp_align_up_4(chunk_length);
+        if padded_length > (packet.len - offset) {
+            return error.SctpInvalidChunkLength;
+        }
+
+        var pad_index: usize = chunk_length;
+        while pad_index < padded_length {
+            if packet[offset + pad_index] != 0u8 {
+                return error.SctpInvalidChunkPadding;
+            }
+            pad_index = pad_index + 1usize;
+        }
+
+        const payload_offset: usize = offset + SCTP_CHUNK_HEADER_BYTES;
+        const payload_length: usize = chunk_length - SCTP_CHUNK_HEADER_BYTES;
+
+        const chunk_index: usize = parsed.chunk_count;
+        parsed.chunks[chunk_index] = sctp_chunk_make();
+        parsed.chunks[chunk_index].chunk_type = chunk_type;
+        parsed.chunks[chunk_index].flags = flags;
+        parsed.chunks[chunk_index].length = chunk_length;
+        parsed.chunks[chunk_index].payload_offset = payload_offset;
+        parsed.chunks[chunk_index].payload = packet[payload_offset:payload_length];
+        parsed.chunk_count = chunk_index + 1usize;
+
+        offset = offset + padded_length;
+    }
+
+    return parsed;
+}
+
+/// Write an SCTP packet and its chunks into a caller-provided buffer.
+export fn sctp_packet_write(packet: &SctpPacket, buffer: &[byte]) !usize {
+    if packet == null {
+        return error.SctpInvalidChunkLength;
+    }
+    if packet.chunk_count > SCTP_MAX_CHUNKS {
+        return error.SctpTooManyChunks;
+    }
+
+    var total_length: usize = SCTP_COMMON_HEADER_BYTES;
+    var chunk_index: usize = 0usize;
+    while chunk_index < packet.chunk_count {
+        const chunk: SctpChunk = packet.chunks[chunk_index];
+        const chunk_length: usize = try sctp_chunk_wire_length(&chunk);
+        const padded_length: usize = try sctp_align_up_4(chunk_length);
+        total_length = total_length + padded_length;
+        chunk_index = chunk_index + 1usize;
+    }
+
+    if buffer.len < total_length {
+        return error.SctpBufferTooSmall;
+    }
+
+    try write_be_u16(buffer[0:2], packet.source_port);
+    try write_be_u16(buffer[2:2], packet.destination_port);
+    try write_be_u32(buffer[4:4], packet.verification_tag);
+    try write_be_u32(buffer[8:4], packet.checksum);
+
+    var offset: usize = SCTP_COMMON_HEADER_BYTES;
+    chunk_index = 0usize;
+    while chunk_index < packet.chunk_count {
+        const chunk: SctpChunk = packet.chunks[chunk_index];
+        const chunk_length: usize = try sctp_chunk_wire_length(&chunk);
+        const payload_length: usize = chunk_length - SCTP_CHUNK_HEADER_BYTES;
+        const padded_length: usize = try sctp_align_up_4(chunk_length);
+
+        buffer[offset] = chunk.chunk_type as byte;
+        buffer[offset + 1usize] = chunk.flags as byte;
+        try write_be_u16(buffer[offset + 2usize:2], chunk_length as u16);
+        try sctp_copy_bytes(
+            buffer[offset + SCTP_CHUNK_HEADER_BYTES:payload_length],
+            chunk.payload,
+            payload_length,
+        );
+
+        var pad_index: usize = chunk_length;
+        while pad_index < padded_length {
+            buffer[offset + pad_index] = 0 as byte;
+            pad_index = pad_index + 1usize;
+        }
+
+        offset = offset + padded_length;
+        chunk_index = chunk_index + 1usize;
+    }
+
+    return total_length;
+}

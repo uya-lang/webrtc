@@ -1,0 +1,113 @@
+use libc.printf;
+use webrtc.sctp.packet;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < lhs.len {
+        if lhs[i] != rhs[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+
+    return true;
+}
+
+fn check_parse_minimal_cookie_ack() i32 {
+    var packet_bytes: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+    ];
+
+    const parsed: !SctpPacket = sctp_packet_parse(packet_bytes[0:16]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value.source_port != 5000u16 || parsed.value.destination_port != 5001u16 {
+        return 11i32;
+    }
+    if parsed.value.verification_tag != 0x11223344u32 || parsed.value.checksum != 0x55667788u32 {
+        return 12i32;
+    }
+    if parsed.value.chunk_count != 1usize {
+        return 13i32;
+    }
+    if parsed.value.chunks[0].chunk_type != 0x0bu8 || parsed.value.chunks[0].length != 4usize {
+        return 14i32;
+    }
+    if parsed.value.chunks[0].payload.len != 0usize {
+        return 15i32;
+    }
+
+    return 0i32;
+}
+
+fn check_parse_truncated_header() i32 {
+    var packet_bytes: [byte: 11] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte,
+    ];
+
+    const parsed: !SctpPacket = sctp_packet_parse(packet_bytes[0:11]);
+    if parsed.error_id != @error_id(error.SctpPacketTooSmall) {
+        return 20i32;
+    }
+
+    return 0i32;
+}
+
+fn check_parse_bad_chunk_length() i32 {
+    var too_small: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte,
+    ];
+    const small_result: !SctpPacket = sctp_packet_parse(too_small[0:16]);
+    if small_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 30i32;
+    }
+
+    var overflow: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte,
+    ];
+    const overflow_result: !SctpPacket = sctp_packet_parse(overflow[0:16]);
+    if overflow_result.error_id != @error_id(error.SctpInvalidChunkLength) {
+        return 31i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_parse_minimal_cookie_ack();
+    if result != 0i32 {
+        printf("SCTP parser tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_parse_truncated_header();
+    if result != 0i32 {
+        printf("SCTP parser tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_parse_bad_chunk_length();
+    if result != 0i32 {
+        printf("SCTP parser tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("SCTP parser tests passed\n");
+    return 0i32;
+}

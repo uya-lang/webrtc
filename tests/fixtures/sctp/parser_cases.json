@@ -1,0 +1,29 @@
+{
+  "description": "Phase 13 SCTP packet/chunk parser fixtures",
+  "valid_packets": [
+    {
+      "name": "minimal_cookie_ack",
+      "hex": "1388138911223344556677880b000004",
+      "packet_type": "COOKIE_ACK",
+      "chunk_count": 1
+    }
+  ],
+  "invalid_packets": [
+    {
+      "name": "truncated_header",
+      "hex": "1388138911223344556677",
+      "error": "SctpPacketTooSmall"
+    },
+    {
+      "name": "bad_chunk_length_too_small",
+      "hex": "1388138911223344556677880b000003",
+      "error": "SctpInvalidChunkLength"
+    },
+    {
+      "name": "bad_chunk_length_overflow",
+      "hex": "1388138911223344556677880b000008",
+      "error": "SctpInvalidChunkLength"
+    }
+  ]
+}
+

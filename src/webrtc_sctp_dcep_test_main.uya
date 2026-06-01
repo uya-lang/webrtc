@@ -1,0 +1,136 @@
+use libc.printf;
+use webrtc.sctp.dcep;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn check_open_parse_and_write_roundtrip() i32 {
+    var packet: [byte: 34] = [
+        0x03 as byte,
+        0x00 as byte,
+        0x00 as byte, 0x64 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x12 as byte,
+        'c' as byte, 'h' as byte, 'a' as byte, 't' as byte,
+        'w' as byte, 'e' as byte, 'b' as byte, 'r' as byte,
+        't' as byte, 'c' as byte, '-' as byte, 'd' as byte,
+        'a' as byte, 't' as byte, 'a' as byte, 'c' as byte,
+        'h' as byte, 'a' as byte, 'n' as byte, 'n' as byte,
+        'e' as byte, 'l' as byte,
+    ];
+
+    const parsed: !SctpDcepOpenMessage = sctp_dcep_open_parse(packet[0:34]);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value.channel_type != SCTP_DCEP_CHANNEL_TYPE_RELIABLE {
+        return 11i32;
+    }
+    if parsed.value.priority != 100u16 || parsed.value.reliability_parameter != 0u32 {
+        return 12i32;
+    }
+    if parsed.value.label.len != 4usize || parsed.value.protocol.len != 18usize {
+        return 13i32;
+    }
+    if !bytes_equal(parsed.value.label, "chat" as &[byte]) {
+        return 14i32;
+    }
+    if !bytes_equal(parsed.value.protocol, "webrtc-datachannel" as &[byte]) {
+        return 15i32;
+    }
+
+    var out: [byte: 64] = [];
+    const written: !usize = sctp_dcep_open_write(&parsed.value, out[0:64]);
+    if written.error_id != 0 || written.value != 34usize {
+        return 16i32;
+    }
+    if !bytes_equal(out[0:written.value], packet[0:34]) {
+        return 17i32;
+    }
+
+    return 0i32;
+}
+
+fn check_ack_parse_and_write_roundtrip() i32 {
+    var packet: [byte: 1] = [0x02 as byte];
+    const parsed: !SctpDcepAckMessage = sctp_dcep_ack_parse(packet[0:1]);
+    if parsed.error_id != 0 {
+        return 20i32;
+    }
+
+    var out: [byte: 4] = [];
+    const written: !usize = sctp_dcep_ack_write(&parsed.value, out[0:4]);
+    if written.error_id != 0 || written.value != 1usize {
+        return 21i32;
+    }
+    if out[0] != 0x02u8 {
+        return 22i32;
+    }
+    return 0i32;
+}
+
+fn check_malformed_cases() i32 {
+    var too_short: [byte: 3] = [0x03 as byte, 0x00 as byte, 0x00 as byte];
+    const short_result: !SctpDcepOpenMessage = sctp_dcep_open_parse(too_short[0:3]);
+    if short_result.error_id != @error_id(error.SctpDcepPacketTooSmall) {
+        return 30i32;
+    }
+
+    var bad_type: [byte: 12] = [
+        0x02 as byte,
+        0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+    ];
+    const bad_type_result: !SctpDcepOpenMessage = sctp_dcep_open_parse(bad_type[0:12]);
+    if bad_type_result.error_id != @error_id(error.SctpDcepInvalidMessageType) {
+        return 31i32;
+    }
+
+    var bad_ack: [byte: 2] = [0x02 as byte, 0x00 as byte];
+    const bad_ack_result: !SctpDcepAckMessage = sctp_dcep_ack_parse(bad_ack[0:2]);
+    if bad_ack_result.error_id != @error_id(error.SctpDcepInvalidLength) {
+        return 32i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_open_parse_and_write_roundtrip();
+    if result != 0i32 {
+        printf("DCEP open tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_ack_parse_and_write_roundtrip();
+    if result != 0i32 {
+        printf("DCEP ack tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_malformed_cases();
+    if result != 0i32 {
+        printf("DCEP malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("DCEP tests passed\n");
+    return 0i32;
+}

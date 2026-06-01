@@ -1,0 +1,174 @@
+// webrtc.sctp.dcep - Data Channel Establishment Protocol helpers
+// Module: src/webrtc/sctp/dcep.uya -> use webrtc.sctp.dcep;
+
+use webrtc.binary;
+
+export const SCTP_DCEP_MESSAGE_TYPE_ACK: u8 = 0x02u8;
+export const SCTP_DCEP_MESSAGE_TYPE_OPEN: u8 = 0x03u8;
+
+export const SCTP_DCEP_CHANNEL_TYPE_RELIABLE: u8 = 0x00u8;
+export const SCTP_DCEP_CHANNEL_TYPE_RELIABLE_UNORDERED: u8 = 0x80u8;
+export const SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT: u8 = 0x01u8;
+export const SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED: u8 = 0x81u8;
+export const SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED: u8 = 0x02u8;
+export const SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED_UNORDERED: u8 = 0x82u8;
+
+export error SctpDcepPacketTooSmall;
+export error SctpDcepInvalidMessageType;
+export error SctpDcepInvalidLength;
+export error SctpDcepBufferTooSmall;
+export error SctpDcepUnsupportedChannelType;
+
+/// Parsed DATA_CHANNEL_OPEN message.
+export struct SctpDcepOpenMessage {
+    channel_type: u8 = SCTP_DCEP_CHANNEL_TYPE_RELIABLE,
+    priority: u16 = 0u16,
+    reliability_parameter: u32 = 0u32,
+    label: &[byte] = [],
+    protocol: &[byte] = [],
+}
+
+/// Parsed DATA_CHANNEL_ACK message.
+export struct SctpDcepAckMessage {
+    present: bool = true,
+}
+
+fn sctp_dcep_open_make() SctpDcepOpenMessage {
+    return SctpDcepOpenMessage{};
+}
+
+fn sctp_dcep_ack_make() SctpDcepAckMessage {
+    return SctpDcepAckMessage{};
+}
+
+fn sctp_dcep_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.SctpDcepBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn sctp_dcep_channel_type_is_supported(channel_type: u8) bool {
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_RELIABLE {
+        return true;
+    }
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_RELIABLE_UNORDERED {
+        return true;
+    }
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT {
+        return true;
+    }
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED {
+        return true;
+    }
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED {
+        return true;
+    }
+    if channel_type == SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED_UNORDERED {
+        return true;
+    }
+    return false;
+}
+
+/// Create an empty DCEP OPEN message container.
+export fn sctp_dcep_open_message_make() SctpDcepOpenMessage {
+    return sctp_dcep_open_make();
+}
+
+/// Create an empty DCEP ACK message container.
+export fn sctp_dcep_ack_message_make() SctpDcepAckMessage {
+    return sctp_dcep_ack_make();
+}
+
+/// Parse a DCEP DATA_CHANNEL_OPEN message.
+export fn sctp_dcep_open_parse(packet: &[byte]) !SctpDcepOpenMessage {
+    if packet.len < 12usize {
+        return error.SctpDcepPacketTooSmall;
+    }
+    if packet[0] as u8 != SCTP_DCEP_MESSAGE_TYPE_OPEN {
+        return error.SctpDcepInvalidMessageType;
+    }
+
+    const channel_type: u8 = packet[1] as u8;
+    if !sctp_dcep_channel_type_is_supported(channel_type) {
+        return error.SctpDcepUnsupportedChannelType;
+    }
+
+    const priority: u16 = try read_be_u16(packet[2:2]);
+    const reliability_parameter: u32 = try read_be_u32(packet[4:4]);
+    const label_len: usize = (try read_be_u16(packet[8:2])) as usize;
+    const protocol_len: usize = (try read_be_u16(packet[10:2])) as usize;
+    const total_len: usize = 12usize + label_len + protocol_len;
+    if total_len != packet.len {
+        return error.SctpDcepInvalidLength;
+    }
+
+    var message: SctpDcepOpenMessage = sctp_dcep_open_make();
+    message.channel_type = channel_type;
+    message.priority = priority;
+    message.reliability_parameter = reliability_parameter;
+    message.label = packet[12usize:label_len];
+    message.protocol = packet[12usize + label_len:protocol_len];
+    return message;
+}
+
+/// Parse a DCEP DATA_CHANNEL_ACK message.
+export fn sctp_dcep_ack_parse(packet: &[byte]) !SctpDcepAckMessage {
+    if packet.len < 1usize {
+        return error.SctpDcepPacketTooSmall;
+    }
+    if packet[0] as u8 != SCTP_DCEP_MESSAGE_TYPE_ACK {
+        return error.SctpDcepInvalidMessageType;
+    }
+    if packet.len != 1usize {
+        return error.SctpDcepInvalidLength;
+    }
+    return sctp_dcep_ack_make();
+}
+
+/// Write a DCEP DATA_CHANNEL_OPEN message into a caller-provided buffer.
+export fn sctp_dcep_open_write(message: &SctpDcepOpenMessage, buffer: &[byte]) !usize {
+    if message == null {
+        return error.SctpDcepInvalidLength;
+    }
+    if !sctp_dcep_channel_type_is_supported(message.channel_type) {
+        return error.SctpDcepUnsupportedChannelType;
+    }
+
+    const total_len: usize = 12usize + message.label.len + message.protocol.len;
+    if buffer.len < total_len {
+        return error.SctpDcepBufferTooSmall;
+    }
+
+    buffer[0] = SCTP_DCEP_MESSAGE_TYPE_OPEN as byte;
+    buffer[1] = message.channel_type as byte;
+    try write_be_u16(buffer[2:2], message.priority);
+    try write_be_u32(buffer[4:4], message.reliability_parameter);
+    try write_be_u16(buffer[8:2], message.label.len as u16);
+    try write_be_u16(buffer[10:2], message.protocol.len as u16);
+
+    try sctp_dcep_copy_bytes(buffer[12usize:message.label.len], message.label, message.label.len);
+    try sctp_dcep_copy_bytes(
+        buffer[12usize + message.label.len:message.protocol.len],
+        message.protocol,
+        message.protocol.len,
+    );
+    return total_len;
+}
+
+/// Write a DCEP DATA_CHANNEL_ACK message into a caller-provided buffer.
+export fn sctp_dcep_ack_write(message: &SctpDcepAckMessage, buffer: &[byte]) !usize {
+    if message == null {
+        return error.SctpDcepInvalidLength;
+    }
+    if buffer.len < 1usize {
+        return error.SctpDcepBufferTooSmall;
+    }
+    buffer[0] = SCTP_DCEP_MESSAGE_TYPE_ACK as byte;
+    return 1usize;
+}
