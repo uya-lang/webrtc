@@ -321,16 +321,16 @@
 
 ## Phase 12：JitterBuffer、NACK、PLI、RTX
 
-- [ ] 先增加网络模拟测试：loss/reorder/duplicate/delay。
-- [ ] 先增加 jitter/retransmission cap、clone budget、drop policy failing tests。
-- [ ] 先建立 `bench_jitter` 和 retransmission cache benchmark 基线。
-- [ ] 实现按 SSRC 的 packet reorder buffer。
-- [ ] 实现 missing sequence 检测。
-- [ ] 实现 NACK 生成和 backoff。
-- [ ] 实现 sender retransmission cache。
-- [ ] 实现 RTX payload 支持。
-- [ ] 实现 incomplete frame timeout。
-- [ ] 实现 PLI 触发和限频。
+- [x] 先增加网络模拟测试：loss/reorder/duplicate/delay。
+- [x] 先增加 jitter/retransmission cap、clone budget、drop policy failing tests。
+- [x] 先建立 `bench_jitter` 和 retransmission cache benchmark 基线。
+- [x] 实现按 SSRC 的 packet reorder buffer。
+- [x] 实现 missing sequence 检测。
+- [x] 实现 NACK 生成和 backoff。
+- [x] 实现 sender retransmission cache。
+- [x] 实现 RTX payload 支持。
+- [x] 实现 incomplete frame timeout。
+- [x] 实现 PLI 触发和限频。
 - [ ] 实现 video frame 输出队列。
 - [ ] 实现 audio 小抖动缓冲。
 

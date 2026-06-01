@@ -59,6 +59,18 @@ export struct PacketArena {
     high_watermark: u64 = 0u64,
 }
 
+/// Construct an empty packet clone budget with zeroed counters.
+/// Returns: a budget object that can be initialized with `packet_clone_budget_init`.
+export fn packet_clone_budget_make() PacketCloneBudget {
+    return PacketCloneBudget{};
+}
+
+/// Construct an empty packet arena shell before `packet_arena_init`.
+/// Returns: a zeroed arena object.
+export fn packet_arena_make() PacketArena {
+    return PacketArena{};
+}
+
 fn packet_arena_slot_base(slot: usize) usize {
     return slot * PACKET_ARENA_MAX_SLAB_BYTES;
 }

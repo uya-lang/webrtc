@@ -148,7 +148,7 @@ test "slab token transfer invalidates moved ref and preserves payload" {
 test "packet arena clone budget tracks clone stats and rejects overflow" {
     var src_arena: PacketArena = new_packet_arena();
     var owner_arena: PacketArena = new_packet_arena();
-    var clone_budget: PacketCloneBudget = PacketCloneBudget{};
+    var clone_budget: PacketCloneBudget = packet_clone_budget_make();
     try packet_arena_init(&src_arena, 37u32, 1, 16);
     try packet_arena_init(&owner_arena, 41u32, 1, 16);
     packet_clone_budget_init(&clone_budget, 4u64, 1u64);

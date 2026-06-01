@@ -1,0 +1,517 @@
+use libc.printf;
+use webrtc.arena;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = 96u8;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn make_rtp_packet_ref(
+    arena: &PacketArena,
+    packet_bytes: &[byte],
+    recv_time_us: u64,
+    five_tuple_id: u32,
+    kind: u16,
+) !PacketRef {
+    return packet_arena_alloc(arena, packet_bytes, recv_time_us, five_tuple_id, kind, 0u16);
+}
+
+fn check_default_configs() i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    if buffer.config.max_packets == 0usize || buffer.config.max_missing == 0usize {
+        return 10i32;
+    }
+    if buffer.config.nack_initial_backoff_us == 0u64 || buffer.config.pli_initial_backoff_us == 0u64 {
+        return 11i32;
+    }
+    if buffer.config.frame_timeout_us == 0u64 || buffer.config.drop_policy != RTP_JITTER_DROP_OLDEST {
+        return 12i32;
+    }
+
+    var cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    if cache.max_entries != RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+        return 13i32;
+    }
+    cache.drop_policy = RTP_RETRANSMISSION_CACHE_DROP_OLDEST;
+
+    return 0i32;
+}
+
+fn check_reorder_loss_duplicate_delay_and_nack() i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = 8usize;
+    buffer.config.max_missing = 8usize;
+    buffer.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    buffer.config.nack_initial_backoff_us = 2000u64;
+    buffer.config.nack_max_backoff_us = 8000u64;
+    buffer.config.frame_timeout_us = 20000u64;
+
+    var payload_100: [byte: 2] = [0xA0 as byte, 0x01 as byte];
+    var payload_101: [byte: 2] = [0xA0 as byte, 0x02 as byte];
+    var payload_102: [byte: 2] = [0xA0 as byte, 0x03 as byte];
+    var packet_100: [byte: 32] = [];
+    var packet_101: [byte: 32] = [];
+    var packet_102: [byte: 32] = [];
+
+    const packet_100_len: !usize = make_rtp_packet_bytes(100u16, 9000u32, 0x11223344u32, false, payload_100[0:2], packet_100[0:32]);
+    if packet_100_len.error_id != 0 {
+        return 20i32;
+    }
+    const packet_101_len: !usize = make_rtp_packet_bytes(101u16, 9000u32, 0x11223344u32, false, payload_101[0:2], packet_101[0:32]);
+    if packet_101_len.error_id != 0 {
+        return 21i32;
+    }
+    const packet_102_len: !usize = make_rtp_packet_bytes(102u16, 9000u32, 0x11223344u32, true, payload_102[0:2], packet_102[0:32]);
+    if packet_102_len.error_id != 0 {
+        return 22i32;
+    }
+
+    const push_100: !bool = rtp_jitter_buffer_push_packet(&buffer, packet_100[0:packet_100_len.value], 1000u64);
+    if push_100.error_id != 0 || !push_100.value {
+        return 23i32;
+    }
+    if !rtp_jitter_buffer_has_ready_packet(&buffer) {
+        return 24i32;
+    }
+
+    const pop_100: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(&buffer);
+    if pop_100.error_id != 0 || pop_100.value.header.sequence_number != 100u16 {
+        return 25i32;
+    }
+
+    const push_102: !bool = rtp_jitter_buffer_push_packet(&buffer, packet_102[0:packet_102_len.value], 2000u64);
+    if push_102.error_id != 0 || !push_102.value {
+        return 26i32;
+    }
+
+    const duplicate_102: !bool = rtp_jitter_buffer_push_packet(&buffer, packet_102[0:packet_102_len.value], 2500u64);
+    if duplicate_102.error_id != 0 || duplicate_102.value {
+        return 27i32;
+    }
+    if buffer.duplicate_count != 1u64 {
+        return 28i32;
+    }
+
+    if rtp_jitter_buffer_has_ready_packet(&buffer) {
+        return 29i32;
+    }
+    if rtp_jitter_buffer_should_send_nack(&buffer, 3999u64) {
+        return 30i32;
+    }
+    if !rtp_jitter_buffer_should_send_nack(&buffer, 4000u64) {
+        return 31i32;
+    }
+
+    var nack_packet: [byte: 32] = [];
+    const fire_nack: !bool = rtp_jitter_buffer_fire_nack(&buffer, 0x01020304u32, 0x11223344u32, 4000u64, nack_packet[0:32]);
+    if fire_nack.error_id != 0 || !fire_nack.value {
+        return 32i32;
+    }
+    const parsed_nack: !RtcpNackPacket = rtcp_nack_parse(nack_packet[0:16]);
+    if parsed_nack.error_id != 0 {
+        return 33i32;
+    }
+    if parsed_nack.value.entry_count != 1usize || parsed_nack.value.entries[0].pid != 101u16 {
+        return 34i32;
+    }
+    if buffer.nack_count != 1u64 || buffer.nack_backoff_us != 4000u64 {
+        return 35i32;
+    }
+    if rtp_jitter_buffer_should_send_nack(&buffer, 5000u64) {
+        return 36i32;
+    }
+
+    const push_101: !bool = rtp_jitter_buffer_push_packet(&buffer, packet_101[0:packet_101_len.value], 6000u64);
+    if push_101.error_id != 0 || !push_101.value {
+        return 37i32;
+    }
+    if !rtp_jitter_buffer_has_ready_packet(&buffer) {
+        return 38i32;
+    }
+
+    const pop_101: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(&buffer);
+    if pop_101.error_id != 0 || pop_101.value.header.sequence_number != 101u16 {
+        return 39i32;
+    }
+    const pop_102: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(&buffer);
+    if pop_102.error_id != 0 || pop_102.value.header.sequence_number != 102u16 || !pop_102.value.header.marker {
+        return 40i32;
+    }
+    if !buffer.frame_complete || buffer.frame_active {
+        return 41i32;
+    }
+
+    const empty_nack: !RtcpNackPacket = rtp_jitter_buffer_build_nack(&buffer, 0x01020304u32, 0x11223344u32);
+    if empty_nack.error_id != @error_id(error.RtpJitterBufferMissingSequence) {
+        return 42i32;
+    }
+
+    return 0i32;
+}
+
+fn check_cap_and_drop_policies() i32 {
+    var newest: RtpJitterBuffer = rtp_jitter_buffer_make();
+    newest.config.max_packets = 1usize;
+    newest.config.max_missing = 4usize;
+    newest.config.drop_policy = RTP_JITTER_DROP_NEWEST;
+
+    var payload_a: [byte: 1] = [0x11 as byte];
+    var payload_b: [byte: 1] = [0x22 as byte];
+    var packet_a: [byte: 32] = [];
+    var packet_b: [byte: 32] = [];
+    const packet_a_len: !usize = make_rtp_packet_bytes(200u16, 7000u32, 0x33445566u32, false, payload_a[0:1], packet_a[0:32]);
+    if packet_a_len.error_id != 0 {
+        return 50i32;
+    }
+    const packet_b_len: !usize = make_rtp_packet_bytes(201u16, 7000u32, 0x33445566u32, false, payload_b[0:1], packet_b[0:32]);
+    if packet_b_len.error_id != 0 {
+        return 51i32;
+    }
+
+    const push_a: !bool = rtp_jitter_buffer_push_packet(&newest, packet_a[0:packet_a_len.value], 1000u64);
+    if push_a.error_id != 0 || !push_a.value {
+        return 52i32;
+    }
+    const push_b: !bool = rtp_jitter_buffer_push_packet(&newest, packet_b[0:packet_b_len.value], 2000u64);
+    if push_b.error_id != 0 || push_b.value {
+        return 53i32;
+    }
+    if newest.drop_count != 1u64 || !rtp_jitter_buffer_has_ready_packet(&newest) {
+        return 54i32;
+    }
+    const newest_pop: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(&newest);
+    if newest_pop.error_id != 0 || newest_pop.value.header.sequence_number != 200u16 {
+        return 55i32;
+    }
+
+    var oldest: RtpJitterBuffer = rtp_jitter_buffer_make();
+    oldest.config.max_packets = 1usize;
+    oldest.config.max_missing = 4usize;
+    oldest.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    oldest.config.nack_initial_backoff_us = 2000u64;
+    oldest.config.nack_max_backoff_us = 8000u64;
+
+    const push_old_a: !bool = rtp_jitter_buffer_push_packet(&oldest, packet_a[0:packet_a_len.value], 1000u64);
+    if push_old_a.error_id != 0 || !push_old_a.value {
+        return 56i32;
+    }
+    const push_old_b: !bool = rtp_jitter_buffer_push_packet(&oldest, packet_b[0:packet_b_len.value], 2000u64);
+    if push_old_b.error_id != 0 || !push_old_b.value {
+        return 57i32;
+    }
+    if oldest.overflow_drop_count != 1u64 {
+        return 58i32;
+    }
+    if oldest.packet_high_watermark != 1usize || oldest.drop_count != 1u64 {
+        return 59i32;
+    }
+    if rtp_jitter_buffer_has_ready_packet(&oldest) {
+        return 60i32;
+    }
+    if !rtp_jitter_buffer_should_send_nack(&oldest, 4000u64) {
+        return 61i32;
+    }
+
+    var nack_out: [byte: 32] = [];
+    const fire_old_nack: !bool = rtp_jitter_buffer_fire_nack(&oldest, 0x02030405u32, 0x33445566u32, 4000u64, nack_out[0:32]);
+    if fire_old_nack.error_id != 0 || !fire_old_nack.value {
+        return 62i32;
+    }
+
+    const parsed_old_nack: !RtcpNackPacket = rtcp_nack_parse(nack_out[0:16]);
+    if parsed_old_nack.error_id != 0 || parsed_old_nack.value.entries[0].pid != 200u16 {
+        return 63i32;
+    }
+
+    return 0i32;
+}
+
+fn check_clone_budget_and_cache() i32 {
+    var src_arena: PacketArena = packet_arena_make();
+    var owner_arena: PacketArena = packet_arena_make();
+    if packet_arena_init(&src_arena, 17u32, 4usize, 64usize).error_id != 0 {
+        return 70i32;
+    }
+    if packet_arena_init(&owner_arena, 18u32, 4usize, 64usize).error_id != 0 {
+        return 71i32;
+    }
+
+    var budget: PacketCloneBudget = packet_clone_budget_make();
+    packet_clone_budget_init(&budget, 64u64, 1u64);
+
+    var cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    cache.max_entries = 4usize;
+    cache.drop_policy = RTP_RETRANSMISSION_CACHE_DROP_OLDEST;
+
+    var payload: [byte: 4] = [0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte];
+    var packet_bytes_a: [byte: 32] = [];
+    var packet_bytes_b: [byte: 32] = [];
+    const packet_len_a: !usize = make_rtp_packet_bytes(700u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_a[0:32]);
+    if packet_len_a.error_id != 0 {
+        return 72i32;
+    }
+    const packet_len_b: !usize = make_rtp_packet_bytes(701u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_b[0:32]);
+    if packet_len_b.error_id != 0 {
+        return 73i32;
+    }
+
+    const src_packet_a: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_a[0:packet_len_a.value], 1000u64, 0x100u32, 96u16);
+    if src_packet_a.error_id != 0 {
+        return 74i32;
+    }
+    const stored_a: !PacketRef = rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &src_packet_a.value, &budget, 2000u64);
+    if stored_a.error_id != 0 {
+        return 75i32;
+    }
+    if budget.clone_count != 1u64 || budget.in_use_packets != 1u64 || budget.clone_bytes != packet_len_a.value as u64 {
+        return 76i32;
+    }
+
+    const lookup_a: !PacketRef = rtp_retransmission_cache_lookup(&cache, 0x55667788u32, 700u16);
+    if lookup_a.error_id != 0 {
+        return 77i32;
+    }
+    const lookup_a_bytes: !&[byte] = packet_arena_bytes(&owner_arena, &lookup_a.value);
+    if lookup_a_bytes.error_id != 0 || !bytes_equal(lookup_a_bytes.value, packet_bytes_a[0:packet_len_a.value]) {
+        return 78i32;
+    }
+
+    const src_packet_b: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_b[0:packet_len_b.value], 3000u64, 0x101u32, 96u16);
+    if src_packet_b.error_id != 0 {
+        return 79i32;
+    }
+    const stored_b: !PacketRef = rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &src_packet_b.value, &budget, 4000u64);
+    if stored_b.error_id != @error_id(error.PacketArenaCloneBudgetExceeded) {
+        return 80i32;
+    }
+    if cache.entry_count != 1usize || cache.drop_count != 0u64 {
+        return 81i32;
+    }
+
+    rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+    if cache.entry_count != 0usize || budget.in_use_packets != 0u64 || budget.clone_bytes != 0u64 {
+        return 82i32;
+    }
+
+    var oldest_cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    oldest_cache.max_entries = 1usize;
+    oldest_cache.drop_policy = RTP_RETRANSMISSION_CACHE_DROP_OLDEST;
+    packet_clone_budget_init(&budget, 128u64, 4u64);
+
+    const old_first: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_a[0:packet_len_a.value], 5000u64, 0x110u32, 96u16);
+    if old_first.error_id != 0 {
+        return 83i32;
+    }
+    const old_second: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_b[0:packet_len_b.value], 6000u64, 0x111u32, 96u16);
+    if old_second.error_id != 0 {
+        return 84i32;
+    }
+
+    if rtp_retransmission_cache_store(&oldest_cache, &owner_arena, &src_arena, &old_first.value, &budget, 7000u64).error_id != 0 {
+        return 85i32;
+    }
+    if rtp_retransmission_cache_store(&oldest_cache, &owner_arena, &src_arena, &old_second.value, &budget, 8000u64).error_id != 0 {
+        return 86i32;
+    }
+    const missing_first: !PacketRef = rtp_retransmission_cache_lookup(&oldest_cache, 0x55667788u32, 700u16);
+    if missing_first.error_id != @error_id(error.RtpRetransmissionCacheNotFound) {
+        return 87i32;
+    }
+    const present_second: !PacketRef = rtp_retransmission_cache_lookup(&oldest_cache, 0x55667788u32, 701u16);
+    if present_second.error_id != 0 {
+        return 88i32;
+    }
+
+    var newest_cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    newest_cache.max_entries = 1usize;
+    newest_cache.drop_policy = RTP_RETRANSMISSION_CACHE_DROP_NEWEST;
+    packet_clone_budget_init(&budget, 128u64, 4u64);
+
+    if rtp_retransmission_cache_store(&newest_cache, &owner_arena, &src_arena, &old_first.value, &budget, 9000u64).error_id != 0 {
+        return 89i32;
+    }
+    const newest_drop: !PacketRef = rtp_retransmission_cache_store(&newest_cache, &owner_arena, &src_arena, &old_second.value, &budget, 10000u64);
+    if newest_drop.error_id != @error_id(error.RtpRetransmissionCacheFull) {
+        return 90i32;
+    }
+    if newest_cache.drop_count != 1u64 {
+        return 91i32;
+    }
+    const still_present: !PacketRef = rtp_retransmission_cache_lookup(&newest_cache, 0x55667788u32, 700u16);
+    if still_present.error_id != 0 {
+        return 92i32;
+    }
+
+    return 0i32;
+}
+
+fn check_rtx_roundtrip() i32 {
+    var payload: [byte: 4] = [0xAA as byte, 0xBB as byte, 0xCC as byte, 0xDD as byte];
+    var wrapped: [byte: 8] = [];
+    const written: !usize = rtp_rtx_payload_wrap(0x1234u16, payload[0:4], wrapped[0:8]);
+    if written.error_id != 0 || written.value != 6usize {
+        return 100i32;
+    }
+    if wrapped[0] != 0x12u8 || wrapped[1] != 0x34u8 {
+        return 101i32;
+    }
+
+    var original_seq: u16 = 0u16;
+    var recovered: [byte: 8] = [];
+    const unwrapped: !usize = rtp_rtx_payload_unwrap(wrapped[0:written.value], &original_seq, recovered[0:8]);
+    if unwrapped.error_id != 0 || unwrapped.value != 4usize {
+        return 102i32;
+    }
+    if original_seq != 0x1234u16 {
+        return 103i32;
+    }
+    if !bytes_equal(recovered[0:4], payload[0:4]) {
+        return 104i32;
+    }
+
+    var short_seq: u16 = 0u16;
+    const unwrap_short: !usize = rtp_rtx_payload_unwrap(wrapped[0:1], &short_seq, recovered[0:8]);
+    if unwrap_short.error_id != @error_id(error.RtpJitterBufferRtxInvalid) {
+        return 105i32;
+    }
+
+    return 0i32;
+}
+
+fn check_pli_timeout_and_backoff() i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.frame_timeout_us = 2000u64;
+    buffer.config.pli_initial_backoff_us = 1000u64;
+    buffer.config.pli_max_backoff_us = 4000u64;
+    buffer.config.max_packets = 4usize;
+    buffer.config.max_missing = 4usize;
+
+    var payload: [byte: 1] = [0x42 as byte];
+    var packet: [byte: 32] = [];
+    const packet_len: !usize = make_rtp_packet_bytes(900u16, 777u32, 0x55667788u32, false, payload[0:1], packet[0:32]);
+    if packet_len.error_id != 0 {
+        return 110i32;
+    }
+
+    const push_packet: !bool = rtp_jitter_buffer_push_packet(&buffer, packet[0:packet_len.value], 1000u64);
+    if push_packet.error_id != 0 || !push_packet.value {
+        return 111i32;
+    }
+
+    if rtp_jitter_buffer_should_send_pli(&buffer, 2500u64) {
+        return 112i32;
+    }
+    if !rtp_jitter_buffer_should_send_pli(&buffer, 3000u64) {
+        return 113i32;
+    }
+
+    var pli_packet: [byte: 16] = [];
+    const first_fire: !bool = rtp_jitter_buffer_fire_pli(&buffer, 0x11111111u32, 0x22222222u32, 3000u64, pli_packet[0:16]);
+    if first_fire.error_id != 0 || !first_fire.value {
+        return 114i32;
+    }
+    const parsed_pli: !RtcpPliPacket = rtcp_pli_parse(pli_packet[0:12]);
+    if parsed_pli.error_id != 0 {
+        return 115i32;
+    }
+    if parsed_pli.value.sender_ssrc != 0x11111111u32 || parsed_pli.value.media_ssrc != 0x22222222u32 {
+        return 116i32;
+    }
+    if buffer.pli_count != 1u64 || buffer.pli_backoff_us != 1000u64 {
+        return 117i32;
+    }
+    if rtp_jitter_buffer_should_send_pli(&buffer, 3500u64) {
+        return 118i32;
+    }
+    if !rtp_jitter_buffer_should_send_pli(&buffer, 4000u64) {
+        return 119i32;
+    }
+
+    const second_fire: !bool = rtp_jitter_buffer_fire_pli(&buffer, 0x11111111u32, 0x22222222u32, 4000u64, pli_packet[0:16]);
+    if second_fire.error_id != 0 || !second_fire.value {
+        return 120i32;
+    }
+    if buffer.pli_count != 2u64 || buffer.pli_backoff_us != 2000u64 {
+        return 121i32;
+    }
+    if rtp_jitter_buffer_should_send_pli(&buffer, 5000u64) {
+        return 122i32;
+    }
+    if !rtp_jitter_buffer_should_send_pli(&buffer, 6000u64) {
+        return 123i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_default_configs();
+    if result != 0i32 {
+        printf("phase 12 default config tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_reorder_loss_duplicate_delay_and_nack();
+    if result != 0i32 {
+        printf("phase 12 reorder/loss/nack tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_cap_and_drop_policies();
+    if result != 0i32 {
+        printf("phase 12 cap/drop tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_clone_budget_and_cache();
+    if result != 0i32 {
+        printf("phase 12 cache tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_rtx_roundtrip();
+    if result != 0i32 {
+        printf("phase 12 rtx tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_pli_timeout_and_backoff();
+    if result != 0i32 {
+        printf("phase 12 pli tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("phase 12 jitter tests passed\n");
+    return 0i32;
+}

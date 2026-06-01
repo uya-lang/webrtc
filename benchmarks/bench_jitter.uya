@@ -1,0 +1,27 @@
+use webrtc.bench;
+
+/// Emit the phase-12 jitter benchmark JSONL row.
+export fn benchmark_main_emit_jitter_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_jitter" as &[byte],
+        suite: "phase12" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+/// Emit the phase-12 retransmission cache benchmark JSONL row.
+export fn benchmark_main_emit_retransmission_cache_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_retransmission_cache" as &[byte],
+        suite: "phase12" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

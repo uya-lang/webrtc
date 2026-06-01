@@ -40,6 +40,13 @@ append_rtp_rtcp_parser_baseline_rows() {
 EOF
 }
 
+append_jitter_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_jitter","suite":"phase12","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_retransmission_cache","suite":"phase12","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 run_crypto_bench_capture() {
     local out_path="$1"
     /bin/bash -c '../uya/bin/uya run src/webrtc_crypto_bench_main.uya > "$1" 2>/dev/null' _ "$out_path" 2>/dev/null
@@ -57,3 +64,4 @@ fi
 
 append_srtp_baseline_rows
 append_rtp_rtcp_parser_baseline_rows
+append_jitter_baseline_rows

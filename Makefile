@@ -56,6 +56,7 @@ test: build
 	test -f src/webrtc_turn_test_main.uya
 	test -x tests/check_phase7_crypto.sh
 	test -x tests/check_phase8_dtls.sh
+	test -x tests/check_phase12_rtp.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya
@@ -94,6 +95,7 @@ test: build
 	bash tests/check_phase6_turn.sh
 	bash tests/check_phase7_crypto.sh
 	bash tests/check_phase8_dtls.sh
+	bash tests/check_phase12_rtp.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null
@@ -106,8 +108,11 @@ bench: build
 	test -f benchmarks/bench_sdp_parse.uya
 	test -f benchmarks/bench_stun_parse.uya
 	test -f benchmarks/bench_crypto_phase7.uya
+	test -f benchmarks/bench_jitter.uya
+	test -f benchmarks/baselines/bench_jitter.jsonl
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
+	python3 tests/jitter_bench_baseline.py
 	test -s $(BENCH_FILE)
 	rg -q '"name":"placeholder"' $(BENCH_FILE)
 	rg -q '"name":"bench_arena_ring"' $(BENCH_FILE)
@@ -117,6 +122,8 @@ bench: build
 	rg -q '"name":"bench_hmac_sha256"' $(BENCH_FILE)
 	rg -q '"name":"bench_aes_ctr"' $(BENCH_FILE)
 	rg -q '"name":"bench_ghash"' $(BENCH_FILE)
+	rg -q '"name":"bench_jitter"' $(BENCH_FILE)
+	rg -q '"name":"bench_retransmission_cache"' $(BENCH_FILE)
 
 clean:
 	rm -rf $(BUILD_DIR)

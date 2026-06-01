@@ -1,0 +1,986 @@
+// webrtc.rtp.jitter - RTP reorder / NACK / RTX / retransmission cache helpers
+// Module: src/webrtc/rtp/jitter.uya -> use webrtc.rtp.jitter;
+
+use webrtc.arena;
+use webrtc.binary;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.rtp_packet;
+
+export const RTP_JITTER_MAX_PACKETS: usize = 128usize;
+export const RTP_JITTER_MAX_MISSING: usize = 128usize;
+export const RTP_JITTER_DROP_OLDEST: u8 = 0u8;
+export const RTP_JITTER_DROP_NEWEST: u8 = 1u8;
+export const RTP_RETRANSMISSION_CACHE_MAX_ENTRIES: usize = 64usize;
+export const RTP_RETRANSMISSION_CACHE_DROP_OLDEST: u8 = 0u8;
+export const RTP_RETRANSMISSION_CACHE_DROP_NEWEST: u8 = 1u8;
+
+export error RtpJitterBufferInvalidState;
+export error RtpJitterBufferInvalidPacket;
+export error RtpJitterBufferBufferTooSmall;
+export error RtpJitterBufferNotReady;
+export error RtpJitterBufferMissingSequence;
+export error RtpJitterBufferFrameTimeout;
+export error RtpJitterBufferRtxInvalid;
+export error RtpRetransmissionCacheFull;
+export error RtpRetransmissionCacheNotFound;
+
+export struct RtpJitterBufferConfig {
+    max_packets: usize = 32usize,
+    max_missing: usize = 32usize,
+    drop_policy: u8 = RTP_JITTER_DROP_OLDEST,
+    nack_initial_backoff_us: u64 = 2000u64,
+    nack_max_backoff_us: u64 = 32000u64,
+    pli_initial_backoff_us: u64 = 500000u64,
+    pli_max_backoff_us: u64 = 8000000u64,
+    frame_timeout_us: u64 = 50000u64,
+}
+
+export struct RtpJitterBufferedPacket {
+    present: bool = false,
+    packet: RtpPacket = RtpPacket{},
+    arrival_time_us: u64 = 0u64,
+}
+
+export struct RtpJitterMissingSequence {
+    present: bool = false,
+    sequence_number: u16 = 0u16,
+    first_seen_us: u64 = 0u64,
+    last_reported_us: u64 = 0u64,
+    report_count: u32 = 0u32,
+}
+
+export struct RtpJitterBuffer {
+    config: RtpJitterBufferConfig = RtpJitterBufferConfig{},
+    has_ssrc: bool = false,
+    ssrc: u32 = 0u32,
+    has_expected_sequence: bool = false,
+    expected_sequence: u16 = 0u16,
+    has_highest_sequence: bool = false,
+    highest_sequence: u16 = 0u16,
+    packets: [RtpJitterBufferedPacket: RTP_JITTER_MAX_PACKETS] = [],
+    packet_count: usize = 0usize,
+    packet_high_watermark: usize = 0usize,
+    missing: [RtpJitterMissingSequence: RTP_JITTER_MAX_MISSING] = [],
+    missing_count: usize = 0usize,
+    frame_active: bool = false,
+    frame_timestamp: u32 = 0u32,
+    frame_start_us: u64 = 0u64,
+    frame_complete: bool = false,
+    last_packet_us: u64 = 0u64,
+    nack_backoff_us: u64 = 0u64,
+    nack_next_fire_us: u64 = 0u64,
+    pli_backoff_us: u64 = 0u64,
+    pli_next_fire_us: u64 = 0u64,
+    duplicate_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    overflow_drop_count: u64 = 0u64,
+    nack_count: u64 = 0u64,
+    pli_count: u64 = 0u64,
+}
+
+export struct RtpRetransmissionCacheEntry {
+    present: bool = false,
+    ssrc: u32 = 0u32,
+    sequence_number: u16 = 0u16,
+    packet: PacketRef = PacketRef{},
+    stored_time_us: u64 = 0u64,
+}
+
+export struct RtpRetransmissionCache {
+    max_entries: usize = RTP_RETRANSMISSION_CACHE_MAX_ENTRIES,
+    drop_policy: u8 = RTP_RETRANSMISSION_CACHE_DROP_OLDEST,
+    entries: [RtpRetransmissionCacheEntry: RTP_RETRANSMISSION_CACHE_MAX_ENTRIES] = [],
+    entry_count: usize = 0usize,
+    high_watermark: usize = 0usize,
+    hit_count: u64 = 0u64,
+    miss_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+}
+
+fn rtp_jitter_sequence_next(sequence: u16) u16 {
+    if sequence == 0xFFFFu16 {
+        return 0u16;
+    }
+    return sequence + 1u16;
+}
+
+fn rtp_jitter_sequence_distance_forward(sequence: u16, base: u16) u32 {
+    if sequence >= base {
+        return (sequence as u32) - (base as u32);
+    }
+    return 65536u32 - ((base as u32) - (sequence as u32));
+}
+
+fn rtp_jitter_sequence_is_newer(sequence: u16, base: u16) bool {
+    const distance: u32 = rtp_jitter_sequence_distance_forward(sequence, base);
+    return distance != 0u32 && distance < 32768u32;
+}
+
+fn rtp_jitter_packet_find_index(buffer: &RtpJitterBuffer, sequence: u16) !usize {
+    var index: usize = 0usize;
+    while index < buffer.packet_count {
+        if buffer.packets[index].present && buffer.packets[index].packet.header.sequence_number == sequence {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return error.RtpJitterBufferNotReady;
+}
+
+fn rtp_jitter_missing_find_index(buffer: &RtpJitterBuffer, sequence: u16) !usize {
+    var index: usize = 0usize;
+    while index < buffer.missing_count {
+        if buffer.missing[index].present && buffer.missing[index].sequence_number == sequence {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return error.RtpJitterBufferNotReady;
+}
+
+fn rtp_jitter_missing_remove(buffer: &RtpJitterBuffer, sequence: u16) void {
+    var index_result: !usize = rtp_jitter_missing_find_index(buffer, sequence);
+    if index_result.error_id != 0 {
+        return;
+    }
+
+    const index: usize = index_result.value;
+    var i: usize = index;
+    while true {
+        const next_index: usize = i + 1usize;
+        if next_index >= buffer.missing_count {
+            break;
+        }
+        if i < RTP_JITTER_MAX_MISSING {
+            if next_index < RTP_JITTER_MAX_MISSING {
+                buffer.missing[i] = buffer.missing[next_index];
+                i = next_index;
+                continue;
+            }
+        }
+        break;
+    }
+
+    if buffer.missing_count > 0usize {
+        buffer.missing_count = buffer.missing_count - 1usize;
+    }
+
+    if buffer.missing_count == 0usize {
+        buffer.nack_backoff_us = 0u64;
+        buffer.nack_next_fire_us = 0u64;
+    }
+}
+
+fn rtp_jitter_missing_add(buffer: &RtpJitterBuffer, sequence: u16, now_us: u64) void {
+    var existing: !usize = rtp_jitter_missing_find_index(buffer, sequence);
+    if existing.error_id == 0 {
+        return;
+    }
+    if buffer.missing_count >= buffer.config.max_missing || buffer.missing_count >= RTP_JITTER_MAX_MISSING {
+        buffer.overflow_drop_count = buffer.overflow_drop_count + 1u64;
+        return;
+    }
+
+    const slot: usize = buffer.missing_count;
+    if slot >= RTP_JITTER_MAX_MISSING {
+        buffer.overflow_drop_count = buffer.overflow_drop_count + 1u64;
+        return;
+    }
+    buffer.missing[slot].present = true;
+    buffer.missing[slot].sequence_number = sequence;
+    buffer.missing[slot].first_seen_us = now_us;
+    buffer.missing[slot].last_reported_us = 0u64;
+    buffer.missing[slot].report_count = 0u32;
+    buffer.missing_count = buffer.missing_count + 1usize;
+
+    if buffer.nack_backoff_us == 0u64 {
+        buffer.nack_backoff_us = buffer.config.nack_initial_backoff_us;
+        buffer.nack_next_fire_us = now_us + buffer.nack_backoff_us;
+    }
+}
+
+fn rtp_jitter_buffer_clear_packet_slot(buffer: &RtpJitterBuffer, index: usize) void {
+    if index >= buffer.packet_count {
+        return;
+    }
+
+    var i: usize = index;
+    while true {
+        const next_index: usize = i + 1usize;
+        if next_index >= buffer.packet_count {
+            break;
+        }
+        if i < RTP_JITTER_MAX_PACKETS {
+            if next_index < RTP_JITTER_MAX_PACKETS {
+                buffer.packets[i] = buffer.packets[next_index];
+                i = next_index;
+                continue;
+            }
+        }
+        break;
+    }
+    if buffer.packet_count > 0usize {
+        buffer.packet_count = buffer.packet_count - 1usize;
+    }
+}
+
+fn rtp_jitter_buffer_drop_oldest_index(buffer: &RtpJitterBuffer) usize {
+    if buffer.packet_count == 0usize {
+        return 0usize;
+    }
+
+    var oldest_index: usize = 0usize;
+    var oldest_time: u64 = buffer.packets[0usize].arrival_time_us;
+    var index: usize = 1usize;
+    while index < buffer.packet_count {
+        if buffer.packets[index].arrival_time_us < oldest_time {
+            oldest_time = buffer.packets[index].arrival_time_us;
+            oldest_index = index;
+        }
+        index = index + 1usize;
+    }
+    return oldest_index;
+}
+
+fn rtp_jitter_buffer_schedule_frame(buffer: &RtpJitterBuffer, packet: &RtpPacket, now_us: u64) void {
+    if !buffer.frame_active || packet.header.timestamp != buffer.frame_timestamp {
+        buffer.frame_active = true;
+        buffer.frame_complete = false;
+        buffer.frame_timestamp = packet.header.timestamp;
+        buffer.frame_start_us = now_us;
+    }
+
+    if packet.header.marker && buffer.missing_count == 0usize {
+        buffer.frame_complete = true;
+    }
+}
+
+fn rtp_jitter_buffer_update_missing_from_gap(buffer: &RtpJitterBuffer, newest: u16, now_us: u64) void {
+    if !buffer.has_highest_sequence {
+        buffer.highest_sequence = newest;
+        buffer.has_highest_sequence = true;
+        return;
+    }
+
+    if rtp_jitter_sequence_is_newer(newest, buffer.highest_sequence) {
+        var current: u16 = rtp_jitter_sequence_next(buffer.highest_sequence);
+        while current != newest {
+            rtp_jitter_missing_add(buffer, current, now_us);
+            current = rtp_jitter_sequence_next(current);
+        }
+        buffer.highest_sequence = newest;
+        return;
+    }
+
+    if rtp_jitter_sequence_is_newer(buffer.highest_sequence, newest) {
+        return;
+    }
+
+    buffer.highest_sequence = newest;
+}
+
+fn rtp_jitter_buffer_store_packet(buffer: &RtpJitterBuffer, packet: &RtpPacket, now_us: u64) !bool {
+    if buffer.packet_count >= buffer.config.max_packets || buffer.packet_count >= RTP_JITTER_MAX_PACKETS {
+        buffer.drop_count = buffer.drop_count + 1u64;
+        if buffer.config.drop_policy == RTP_JITTER_DROP_NEWEST {
+            if buffer.has_expected_sequence && packet.header.sequence_number == buffer.expected_sequence {
+                rtp_jitter_missing_add(buffer, packet.header.sequence_number, now_us);
+            }
+            rtp_jitter_buffer_update_missing_from_gap(buffer, packet.header.sequence_number, now_us);
+            return false;
+        }
+
+        const drop_index: usize = rtp_jitter_buffer_drop_oldest_index(buffer);
+        if drop_index >= RTP_JITTER_MAX_PACKETS {
+            return error.RtpJitterBufferInvalidState;
+        }
+        const dropped_sequence: u16 = buffer.packets[drop_index].packet.header.sequence_number;
+        buffer.overflow_drop_count = buffer.overflow_drop_count + 1u64;
+        if buffer.has_expected_sequence && dropped_sequence == buffer.expected_sequence {
+            rtp_jitter_missing_add(buffer, dropped_sequence, now_us);
+        }
+        rtp_jitter_buffer_clear_packet_slot(buffer, drop_index);
+        if buffer.packet_count == 0usize {
+            buffer.frame_active = false;
+            buffer.frame_complete = false;
+        }
+    }
+
+    const insert_index: usize = buffer.packet_count;
+    if insert_index >= RTP_JITTER_MAX_PACKETS {
+        return error.RtpJitterBufferInvalidState;
+    }
+    buffer.packets[insert_index].present = true;
+    buffer.packets[insert_index].packet = *packet;
+    buffer.packets[insert_index].arrival_time_us = now_us;
+    buffer.packet_count = buffer.packet_count + 1usize;
+    if buffer.packet_count > buffer.packet_high_watermark {
+        buffer.packet_high_watermark = buffer.packet_count;
+    }
+
+    if !buffer.has_expected_sequence {
+        buffer.expected_sequence = packet.header.sequence_number;
+        buffer.has_expected_sequence = true;
+    }
+
+    rtp_jitter_buffer_update_missing_from_gap(buffer, packet.header.sequence_number, now_us);
+
+    if buffer.packet_count > 0usize && buffer.has_expected_sequence {
+        const missing_index: !usize = rtp_jitter_missing_find_index(buffer, packet.header.sequence_number);
+        if missing_index.error_id != 0 {
+            if !rtp_jitter_sequence_is_newer(packet.header.sequence_number, buffer.expected_sequence) &&
+                packet.header.sequence_number != buffer.expected_sequence {
+                buffer.duplicate_count = buffer.duplicate_count + 1u64;
+                rtp_jitter_buffer_clear_packet_slot(buffer, insert_index);
+                return false;
+            }
+        }
+    }
+
+    rtp_jitter_buffer_schedule_frame(buffer, packet, now_us);
+    buffer.last_packet_us = now_us;
+    return true;
+}
+
+/// Construct a default jitter buffer configuration.
+/// Returns: zeroed config with conservative in-memory caps and backoff defaults.
+export fn rtp_jitter_buffer_config_make() RtpJitterBufferConfig {
+    return RtpJitterBufferConfig{
+        max_packets: 32usize,
+        max_missing: 32usize,
+        drop_policy: RTP_JITTER_DROP_OLDEST,
+        nack_initial_backoff_us: 2000u64,
+        nack_max_backoff_us: 32000u64,
+        pli_initial_backoff_us: 500000u64,
+        pli_max_backoff_us: 8000000u64,
+        frame_timeout_us: 50000u64,
+    };
+}
+
+/// Construct an empty RTP jitter buffer.
+/// Returns: a buffer with default configuration and no buffered packets.
+export fn rtp_jitter_buffer_make() RtpJitterBuffer {
+    return RtpJitterBuffer{
+        config: rtp_jitter_buffer_config_make(),
+    };
+}
+
+/// Reset buffered packets, missing sequence tracking and backoff state.
+/// Parameters:
+/// - buffer: jitter buffer state to clear.
+/// Returns: nothing.
+export fn rtp_jitter_buffer_reset(buffer: &RtpJitterBuffer) void {
+    if buffer == null {
+        return;
+    }
+
+    var i: usize = 0usize;
+    while i < RTP_JITTER_MAX_PACKETS {
+        buffer.packets[i] = RtpJitterBufferedPacket{};
+        i = i + 1usize;
+    }
+
+    i = 0usize;
+    while i < RTP_JITTER_MAX_MISSING {
+        buffer.missing[i] = RtpJitterMissingSequence{};
+        i = i + 1usize;
+    }
+
+    buffer.has_ssrc = false;
+    buffer.ssrc = 0u32;
+    buffer.has_expected_sequence = false;
+    buffer.expected_sequence = 0u16;
+    buffer.has_highest_sequence = false;
+    buffer.highest_sequence = 0u16;
+    buffer.packet_count = 0usize;
+    buffer.packet_high_watermark = 0usize;
+    buffer.missing_count = 0usize;
+    buffer.frame_active = false;
+    buffer.frame_timestamp = 0u32;
+    buffer.frame_start_us = 0u64;
+    buffer.frame_complete = false;
+    buffer.last_packet_us = 0u64;
+    buffer.nack_backoff_us = 0u64;
+    buffer.nack_next_fire_us = 0u64;
+    buffer.pli_backoff_us = 0u64;
+    buffer.pli_next_fire_us = 0u64;
+    buffer.duplicate_count = 0u64;
+    buffer.drop_count = 0u64;
+    buffer.overflow_drop_count = 0u64;
+    buffer.nack_count = 0u64;
+    buffer.pli_count = 0u64;
+}
+
+/// Push a parsed RTP packet into the reorder buffer.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - packet: raw RTP packet bytes.
+/// - now_us: arrival time in microseconds.
+/// Returns: `true` if the packet was accepted into the buffer, `false` for duplicate or policy drop.
+export fn rtp_jitter_buffer_push_packet(buffer: &RtpJitterBuffer, packet: &[byte], now_us: u64) !bool {
+    if buffer == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+
+    const parsed_result: !RtpPacket = rtp_packet_parse(packet);
+    if parsed_result.error_id != 0 {
+        return error.RtpJitterBufferInvalidPacket;
+    }
+    const parsed: RtpPacket = parsed_result.value;
+    if !buffer.has_ssrc {
+        buffer.has_ssrc = true;
+        buffer.ssrc = parsed.header.ssrc;
+    } else if buffer.ssrc != parsed.header.ssrc {
+        return error.RtpJitterBufferInvalidPacket;
+    }
+
+    if !buffer.has_expected_sequence {
+        buffer.expected_sequence = parsed.header.sequence_number;
+        buffer.has_expected_sequence = true;
+    }
+
+    var existing: !usize = rtp_jitter_packet_find_index(buffer, parsed.header.sequence_number);
+    if existing.error_id == 0 {
+        buffer.duplicate_count = buffer.duplicate_count + 1u64;
+        return false;
+    }
+
+    if rtp_jitter_sequence_is_newer(parsed.header.sequence_number, buffer.highest_sequence) || !buffer.has_highest_sequence {
+        rtp_jitter_buffer_update_missing_from_gap(buffer, parsed.header.sequence_number, now_us);
+    }
+
+    if buffer.packet_count >= buffer.config.max_packets || buffer.packet_count >= RTP_JITTER_MAX_PACKETS {
+        buffer.drop_count = buffer.drop_count + 1u64;
+        if buffer.config.drop_policy == RTP_JITTER_DROP_NEWEST {
+            if parsed.header.sequence_number == buffer.expected_sequence {
+                rtp_jitter_missing_add(buffer, parsed.header.sequence_number, now_us);
+            }
+            buffer.last_packet_us = now_us;
+            return false;
+        }
+
+        const drop_index: usize = rtp_jitter_buffer_drop_oldest_index(buffer);
+        if drop_index >= RTP_JITTER_MAX_PACKETS {
+            return error.RtpJitterBufferInvalidState;
+        }
+        const dropped_seq: u16 = buffer.packets[drop_index].packet.header.sequence_number;
+        rtp_jitter_buffer_clear_packet_slot(buffer, drop_index);
+        buffer.overflow_drop_count = buffer.overflow_drop_count + 1u64;
+        if dropped_seq == buffer.expected_sequence {
+            rtp_jitter_missing_add(buffer, dropped_seq, now_us);
+        }
+    }
+
+    const accepted: bool = try rtp_jitter_buffer_store_packet(buffer, &parsed, now_us);
+    if accepted && buffer.frame_active && !buffer.frame_complete && now_us - buffer.frame_start_us >= buffer.config.frame_timeout_us {
+        if buffer.pli_backoff_us == 0u64 {
+            buffer.pli_backoff_us = buffer.config.pli_initial_backoff_us;
+            buffer.pli_next_fire_us = now_us + buffer.pli_backoff_us;
+        }
+    }
+    return accepted;
+}
+
+/// Return whether the next expected RTP packet is already buffered.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// Returns: true when `rtp_jitter_buffer_pop_ready_packet` can succeed.
+export fn rtp_jitter_buffer_has_ready_packet(buffer: &RtpJitterBuffer) bool {
+    if buffer == null || !buffer.has_expected_sequence {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < buffer.packet_count {
+        if buffer.packets[index].present && buffer.packets[index].packet.header.sequence_number == buffer.expected_sequence {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+/// Pop the next contiguous RTP packet from the jitter buffer.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// Returns: the next ordered RTP packet, or `RtpJitterBufferNotReady` when the next sequence is missing.
+export fn rtp_jitter_buffer_pop_ready_packet(buffer: &RtpJitterBuffer) !RtpPacket {
+    if buffer == null || !buffer.has_expected_sequence {
+        return error.RtpJitterBufferNotReady;
+    }
+
+    var index_result: !usize = rtp_jitter_packet_find_index(buffer, buffer.expected_sequence);
+    if index_result.error_id != 0 {
+        return error.RtpJitterBufferNotReady;
+    }
+
+    const index: usize = index_result.value;
+    if index >= RTP_JITTER_MAX_PACKETS {
+        return error.RtpJitterBufferNotReady;
+    }
+    const packet: RtpPacket = buffer.packets[index].packet;
+    const marker: bool = packet.header.marker;
+    rtp_jitter_buffer_clear_packet_slot(buffer, index);
+    buffer.expected_sequence = rtp_jitter_sequence_next(buffer.expected_sequence);
+
+    rtp_jitter_missing_remove(buffer, packet.header.sequence_number);
+    if marker && buffer.missing_count == 0usize {
+        buffer.frame_complete = true;
+        buffer.frame_active = false;
+        buffer.pli_backoff_us = 0u64;
+        buffer.pli_next_fire_us = 0u64;
+    }
+
+    return packet;
+}
+
+/// Build an RTCP NACK packet from the current missing sequence set.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - sender_ssrc: sender SSRC to place into the feedback packet.
+/// - media_ssrc: media SSRC to report.
+/// Returns: a packed RTCP NACK structure ready to serialize.
+export fn rtp_jitter_buffer_build_nack(buffer: &RtpJitterBuffer, sender_ssrc: u32, media_ssrc: u32) !RtcpNackPacket {
+    if buffer == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+    if buffer.missing_count == 0usize {
+        return error.RtpJitterBufferMissingSequence;
+    }
+
+    var nack: RtcpNackPacket = rtcp_nack_packet_make();
+    nack.sender_ssrc = sender_ssrc;
+    nack.media_ssrc = media_ssrc;
+
+    var entry_index: usize = 0usize;
+    var missing_index: usize = 0usize;
+    while missing_index < buffer.missing_count {
+        const sequence: u16 = buffer.missing[missing_index].sequence_number;
+        if entry_index == 0usize {
+            nack.entries[entry_index].pid = sequence;
+            nack.entries[entry_index].blp = 0u16;
+            entry_index = 1usize;
+            missing_index = missing_index + 1usize;
+            continue;
+        }
+
+        const current_entry_index: usize = entry_index - 1usize;
+        if current_entry_index < RTCP_MAX_NACK_ENTRIES {
+            const pid: u16 = nack.entries[current_entry_index].pid;
+            const distance: u32 = rtp_jitter_sequence_distance_forward(sequence, pid);
+            if distance == 0u32 {
+                missing_index = missing_index + 1usize;
+                continue;
+            }
+            if distance <= 16u32 {
+                nack.entries[current_entry_index].blp = nack.entries[current_entry_index].blp | (1u16 << ((distance - 1u32) as i32));
+                missing_index = missing_index + 1usize;
+                continue;
+            }
+        } else {
+            break;
+        }
+
+        if entry_index >= RTCP_MAX_NACK_ENTRIES {
+            break;
+        }
+        nack.entries[entry_index].pid = sequence;
+        nack.entries[entry_index].blp = 0u16;
+        entry_index = entry_index + 1usize;
+        missing_index = missing_index + 1usize;
+    }
+
+    nack.entry_count = entry_index;
+    return nack;
+}
+
+/// Tell whether a NACK should be emitted at `now_us`.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - now_us: current timestamp in microseconds.
+/// Returns: true when the exponential backoff timer permits another NACK.
+export fn rtp_jitter_buffer_should_send_nack(buffer: &RtpJitterBuffer, now_us: u64) bool {
+    if buffer == null || buffer.missing_count == 0usize {
+        return false;
+    }
+    if buffer.nack_next_fire_us == 0u64 {
+        return true;
+    }
+    return now_us >= buffer.nack_next_fire_us;
+}
+
+/// Build and schedule the next NACK retry.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - sender_ssrc: sender SSRC to place into the feedback packet.
+/// - media_ssrc: media SSRC to report.
+/// - now_us: current timestamp in microseconds.
+/// - nack_out: destination packet.
+/// Returns: true when a NACK was emitted.
+export fn rtp_jitter_buffer_fire_nack(
+    buffer: &RtpJitterBuffer,
+    sender_ssrc: u32,
+    media_ssrc: u32,
+    now_us: u64,
+    nack_out: &[byte],
+) !bool {
+    if buffer == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+    if !rtp_jitter_buffer_should_send_nack(buffer, now_us) {
+        return false;
+    }
+
+    const nack: RtcpNackPacket = try rtp_jitter_buffer_build_nack(buffer, sender_ssrc, media_ssrc);
+    buffer.nack_count = buffer.nack_count + 1u64;
+    if buffer.nack_backoff_us == 0u64 {
+        buffer.nack_backoff_us = buffer.config.nack_initial_backoff_us;
+    } else {
+        buffer.nack_backoff_us = buffer.nack_backoff_us * 2u64;
+        if buffer.nack_backoff_us > buffer.config.nack_max_backoff_us {
+            buffer.nack_backoff_us = buffer.config.nack_max_backoff_us;
+        }
+    }
+    buffer.nack_next_fire_us = now_us + buffer.nack_backoff_us;
+    const nack_written: !usize = rtcp_nack_write(&nack, nack_out);
+    if nack_written.error_id != 0 {
+        return error.RtpJitterBufferBufferTooSmall;
+    }
+    return true;
+}
+
+/// Tell whether the incomplete frame timeout has elapsed.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - now_us: current timestamp in microseconds.
+/// Returns: true when a keyframe request should be considered.
+export fn rtp_jitter_buffer_should_send_pli(buffer: &RtpJitterBuffer, now_us: u64) bool {
+    if buffer == null || !buffer.frame_active || buffer.frame_complete {
+        return false;
+    }
+    if buffer.config.frame_timeout_us == 0u64 {
+        return false;
+    }
+    if now_us < buffer.frame_start_us + buffer.config.frame_timeout_us {
+        return false;
+    }
+    if buffer.pli_next_fire_us == 0u64 {
+        return true;
+    }
+    return now_us >= buffer.pli_next_fire_us;
+}
+
+/// Build and schedule the next PLI retry.
+/// Parameters:
+/// - buffer: jitter buffer state.
+/// - sender_ssrc: sender SSRC to place into the feedback packet.
+/// - media_ssrc: media SSRC to report.
+/// - now_us: current timestamp in microseconds.
+/// - pli_out: destination packet.
+/// Returns: true when a PLI was emitted.
+export fn rtp_jitter_buffer_fire_pli(
+    buffer: &RtpJitterBuffer,
+    sender_ssrc: u32,
+    media_ssrc: u32,
+    now_us: u64,
+    pli_out: &[byte],
+) !bool {
+    if buffer == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+    if !rtp_jitter_buffer_should_send_pli(buffer, now_us) {
+        return false;
+    }
+
+    var pli: RtcpPliPacket = rtcp_pli_packet_make();
+    pli.sender_ssrc = sender_ssrc;
+    pli.media_ssrc = media_ssrc;
+    buffer.pli_count = buffer.pli_count + 1u64;
+    if buffer.pli_backoff_us == 0u64 {
+        buffer.pli_backoff_us = buffer.config.pli_initial_backoff_us;
+    } else {
+        buffer.pli_backoff_us = buffer.pli_backoff_us * 2u64;
+        if buffer.pli_backoff_us > buffer.config.pli_max_backoff_us {
+            buffer.pli_backoff_us = buffer.config.pli_max_backoff_us;
+        }
+    }
+    buffer.pli_next_fire_us = now_us + buffer.pli_backoff_us;
+    const pli_written: !usize = rtcp_pli_write(&pli, pli_out);
+    if pli_written.error_id != 0 {
+        return error.RtpJitterBufferBufferTooSmall;
+    }
+    return true;
+}
+
+/// Wrap a payload for RFC 4588 RTX by prefixing the original sequence number.
+/// Parameters:
+/// - original_sequence_number: sequence number of the retransmitted packet.
+/// - payload: original RTP payload bytes.
+/// - out_payload: destination buffer for the RTX payload.
+/// Returns: number of bytes written.
+export fn rtp_rtx_payload_wrap(
+    original_sequence_number: u16,
+    payload: &[byte],
+    out_payload: &[byte],
+) !usize {
+    const total_len: usize = 2usize + payload.len;
+    if out_payload.len < total_len {
+        return error.RtpJitterBufferBufferTooSmall;
+    }
+
+    const write_result: !void = write_be_u16(out_payload[0:2], original_sequence_number);
+    if write_result.error_id != 0 {
+        return error.RtpJitterBufferBufferTooSmall;
+    }
+    var index: usize = 0usize;
+    while index < payload.len {
+        out_payload[2usize + index] = payload[index];
+        index = index + 1usize;
+    }
+    return total_len;
+}
+
+/// Unwrap an RFC 4588 RTX payload and recover the original sequence number.
+/// Parameters:
+/// - payload: RTX payload bytes.
+/// - original_sequence_number_out: destination for the embedded original sequence number.
+/// - out_payload: destination buffer for the recovered payload.
+/// Returns: number of bytes written into `out_payload`.
+export fn rtp_rtx_payload_unwrap(
+    payload: &[byte],
+    original_sequence_number_out: &u16,
+    out_payload: &[byte],
+) !usize {
+    if payload.len < 2usize {
+        return error.RtpJitterBufferRtxInvalid;
+    }
+    if original_sequence_number_out == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+
+    const sequence_result: !u16 = read_be_u16(payload[0:2]);
+    if sequence_result.error_id != 0 {
+        return error.RtpJitterBufferRtxInvalid;
+    }
+    *original_sequence_number_out = sequence_result.value;
+    const recovered_len: usize = payload.len - 2usize;
+    if out_payload.len < recovered_len {
+        return error.RtpJitterBufferBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < recovered_len {
+        out_payload[index] = payload[2usize + index];
+        index = index + 1usize;
+    }
+    return recovered_len;
+}
+
+/// Construct an empty retransmission cache.
+/// Returns: a cache with default size and drop policy.
+fn rtp_retransmission_cache_zero() RtpRetransmissionCache {
+    return RtpRetransmissionCache{};
+}
+
+export fn rtp_retransmission_cache_make() RtpRetransmissionCache {
+    var cache: RtpRetransmissionCache = rtp_retransmission_cache_zero();
+    cache.max_entries = RTP_RETRANSMISSION_CACHE_MAX_ENTRIES;
+    cache.drop_policy = RTP_RETRANSMISSION_CACHE_DROP_OLDEST;
+    return cache;
+}
+
+/// Reset the retransmission cache and free all owned clones.
+/// Parameters:
+/// - cache: retransmission cache state.
+/// - owner_arena: arena that owns the cached packet clones.
+/// - budget: clone budget to release for each removed packet.
+/// Returns: nothing.
+export fn rtp_retransmission_cache_reset(cache: &RtpRetransmissionCache, owner_arena: &PacketArena, budget: &PacketCloneBudget) void {
+    if cache == null {
+        return;
+    }
+
+    var i: usize = 0usize;
+    while i < cache.entry_count {
+        if i >= RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+            break;
+        }
+        if cache.entries[i].present {
+            if budget != null {
+                packet_clone_budget_release(budget, cache.entries[i].packet.len as u64);
+            }
+            if owner_arena != null {
+                _ = packet_arena_free(owner_arena, &cache.entries[i].packet);
+            }
+        }
+        cache.entries[i] = RtpRetransmissionCacheEntry{};
+        i = i + 1usize;
+    }
+
+    i = 0usize;
+    while i < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+        cache.entries[i] = RtpRetransmissionCacheEntry{};
+        i = i + 1usize;
+    }
+
+    cache.entry_count = 0usize;
+    cache.high_watermark = 0usize;
+    cache.hit_count = 0u64;
+    cache.miss_count = 0u64;
+    cache.drop_count = 0u64;
+}
+
+fn rtp_retransmission_cache_remove_index(
+    cache: &RtpRetransmissionCache,
+    owner_arena: &PacketArena,
+    budget: &PacketCloneBudget,
+    index: usize,
+) !void {
+    if index >= cache.entry_count {
+        return error.RtpRetransmissionCacheNotFound;
+    }
+    if index >= RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+        return error.RtpRetransmissionCacheNotFound;
+    }
+
+    if cache.entries[index].present && budget != null {
+        packet_clone_budget_release(budget, cache.entries[index].packet.len as u64);
+    }
+    if cache.entries[index].present && owner_arena != null {
+        _ = packet_arena_free(owner_arena, &cache.entries[index].packet);
+    }
+
+    var i: usize = index;
+    while true {
+        const next_index: usize = i + 1usize;
+        if next_index >= cache.entry_count {
+            break;
+        }
+        if i < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+            if next_index < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+                cache.entries[i] = cache.entries[next_index];
+                i = next_index;
+                continue;
+            }
+        }
+        break;
+    }
+    if cache.entry_count > 0usize {
+        cache.entry_count = cache.entry_count - 1usize;
+        if cache.entry_count < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+            cache.entries[cache.entry_count] = RtpRetransmissionCacheEntry{};
+        }
+    }
+    return;
+}
+
+/// Store a packet clone in the retransmission cache.
+/// Parameters:
+/// - cache: retransmission cache state.
+/// - owner_arena: arena that owns cached packet clones.
+/// - src_arena: source arena containing the original packet.
+/// - packet: original packet reference to clone.
+/// - budget: clone budget tracking bytes and packet count.
+/// - now_us: storage time in microseconds.
+/// Returns: the cloned packet reference kept in the cache.
+export fn rtp_retransmission_cache_store(
+    cache: &RtpRetransmissionCache,
+    owner_arena: &PacketArena,
+    src_arena: &PacketArena,
+    packet: &PacketRef,
+    budget: &PacketCloneBudget,
+    now_us: u64,
+) !PacketRef {
+    if cache == null || owner_arena == null || src_arena == null || packet == null || budget == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+
+    const raw_result: !&[byte] = packet_arena_bytes(src_arena, packet);
+    if raw_result.error_id != 0 {
+        return error.RtpJitterBufferInvalidPacket;
+    }
+    const parsed_result: !RtpPacket = rtp_packet_parse(raw_result.value);
+    if parsed_result.error_id != 0 {
+        return error.RtpJitterBufferInvalidPacket;
+    }
+    const parsed: RtpPacket = parsed_result.value;
+
+    var index: usize = 0usize;
+    while index < cache.entry_count {
+        if cache.entries[index].present
+            && cache.entries[index].ssrc == parsed.header.ssrc
+            && cache.entries[index].sequence_number == parsed.header.sequence_number {
+            _ = rtp_retransmission_cache_remove_index(cache, owner_arena, budget, index);
+            break;
+        }
+        index = index + 1usize;
+    }
+
+    if cache.entry_count >= cache.max_entries || cache.entry_count >= RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+        if cache.drop_policy == RTP_RETRANSMISSION_CACHE_DROP_NEWEST {
+            cache.drop_count = cache.drop_count + 1u64;
+            return error.RtpRetransmissionCacheFull;
+        }
+        _ = rtp_retransmission_cache_remove_index(cache, owner_arena, budget, 0usize);
+        cache.drop_count = cache.drop_count + 1u64;
+    }
+
+    const cloned_result: !PacketRef = packet_arena_clone_to_owner(owner_arena, src_arena, packet, budget);
+    if cloned_result.error_id != 0 {
+        if cloned_result.error_id == @error_id(error.PacketArenaCloneBudgetExceeded) {
+            return error.PacketArenaCloneBudgetExceeded;
+        }
+        if cloned_result.error_id == @error_id(error.PacketArenaPayloadTooLarge) {
+            return error.PacketArenaPayloadTooLarge;
+        }
+        if cloned_result.error_id == @error_id(error.PacketArenaExhausted) {
+            return error.PacketArenaExhausted;
+        }
+        return error.RtpJitterBufferInvalidState;
+    }
+    const cloned: PacketRef = cloned_result.value;
+    const slot: usize = cache.entry_count;
+    if slot >= RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+        return error.RtpRetransmissionCacheFull;
+    }
+    cache.entries[slot].present = true;
+    cache.entries[slot].ssrc = parsed.header.ssrc;
+    cache.entries[slot].sequence_number = parsed.header.sequence_number;
+    cache.entries[slot].packet = cloned;
+    cache.entries[slot].stored_time_us = now_us;
+    cache.entry_count = cache.entry_count + 1usize;
+    if cache.entry_count > cache.high_watermark {
+        cache.high_watermark = cache.entry_count;
+    }
+    return cache.entries[slot].packet;
+}
+
+/// Look up a cached packet clone by SSRC and sequence number.
+/// Parameters:
+/// - cache: retransmission cache state.
+/// - ssrc: media SSRC used when storing the packet.
+/// - sequence_number: RTP sequence number used when storing the packet.
+/// Returns: the cached packet reference if present.
+export fn rtp_retransmission_cache_lookup(
+    cache: &RtpRetransmissionCache,
+    ssrc: u32,
+    sequence_number: u16,
+) !PacketRef {
+    if cache == null {
+        return error.RtpJitterBufferInvalidState;
+    }
+
+    var index: usize = 0usize;
+    while index < cache.entry_count {
+        if cache.entries[index].present
+            && cache.entries[index].ssrc == ssrc
+            && cache.entries[index].sequence_number == sequence_number {
+            cache.hit_count = cache.hit_count + 1u64;
+            return cache.entries[index].packet;
+        }
+        index = index + 1usize;
+    }
+
+    cache.miss_count = cache.miss_count + 1u64;
+    return error.RtpRetransmissionCacheNotFound;
+}
