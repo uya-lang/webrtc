@@ -90,6 +90,60 @@ fn check_codec_capability_and_negotiation_structs() i32 {
     return 0i32;
 }
 
+fn check_codec_id_media_kind_mappings() i32 {
+    if media_kind_from_sdp_token("audio" as &[byte]) != MEDIA_KIND_AUDIO {
+        return 40i32;
+    }
+    if media_kind_from_sdp_token("VIDEO" as &[byte]) != MEDIA_KIND_VIDEO {
+        return 41i32;
+    }
+    if media_kind_to_sdp_token(MEDIA_KIND_APPLICATION).len != 11usize {
+        return 42i32;
+    }
+
+    if codec_id_from_encoding_name("OPUS" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_OPUS {
+        return 43i32;
+    }
+    if codec_id_from_encoding_name("vp8" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_VP8 {
+        return 44i32;
+    }
+    if codec_id_from_encoding_name("av1x" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_AV1 {
+        return 45i32;
+    }
+    if codec_id_from_encoding_name("rtx" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_UNKNOWN {
+        return 46i32;
+    }
+
+    if codec_default_clock_rate_hz(CODEC_ID_OPUS, MEDIA_KIND_AUDIO) != 48000u32 {
+        return 47i32;
+    }
+    if codec_default_clock_rate_hz(CODEC_ID_VP8, MEDIA_KIND_VIDEO) != 90000u32 {
+        return 48i32;
+    }
+    if codec_default_clock_rate_hz(CODEC_ID_UNKNOWN, MEDIA_KIND_VIDEO) != 0u32 {
+        return 49i32;
+    }
+
+    if codec_default_payload_type(CODEC_ID_OPUS, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_OPUS {
+        return 50i32;
+    }
+    if codec_default_payload_type(CODEC_ID_H264, MEDIA_KIND_VIDEO) != CODEC_DEFAULT_PT_H264 {
+        return 51i32;
+    }
+    if codec_default_payload_type(CODEC_ID_H264, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_INVALID {
+        return 52i32;
+    }
+
+    if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_VP8, MEDIA_KIND_VIDEO) != CODEC_ID_VP8 {
+        return 53i32;
+    }
+    if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_OPUS, MEDIA_KIND_VIDEO) != CODEC_ID_UNKNOWN {
+        return 54i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_default_frame();
     if result != 0i32 {
@@ -109,6 +163,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("EncodedFrame and codec capability tests passed\n");
+    result = check_codec_id_media_kind_mappings();
+    if result != 0i32 {
+        printf("Codec/media mapping tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("EncodedFrame, capability, and mapping tests passed\n");
     return 0i32;
 }

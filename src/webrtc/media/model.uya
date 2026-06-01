@@ -7,10 +7,53 @@ export const MEDIA_MAX_CODEC_CAPABILITIES: usize = 16usize;
 export const MEDIA_MAX_CODEC_FMTP_PARAMS: usize = 12usize;
 export const MEDIA_MAX_CODEC_FEEDBACKS: usize = 8usize;
 export const MEDIA_MAX_NEGOTIATED_CODECS: usize = 16usize;
+export const MEDIA_KIND_UNKNOWN: u8 = 0u8;
+export const MEDIA_KIND_AUDIO: u8 = 1u8;
+export const MEDIA_KIND_VIDEO: u8 = 2u8;
+export const MEDIA_KIND_APPLICATION: u8 = 3u8;
+export const CODEC_ID_UNKNOWN: u16 = 0u16;
+export const CODEC_ID_OPUS: u16 = 1u16;
+export const CODEC_ID_VP8: u16 = 2u16;
+export const CODEC_ID_H264: u16 = 3u16;
+export const CODEC_ID_AV1: u16 = 4u16;
+export const CODEC_ID_RTX: u16 = 5u16;
+export const CODEC_ID_RED: u16 = 6u16;
+export const CODEC_ID_ULPFEC: u16 = 7u16;
+export const CODEC_DEFAULT_PT_OPUS: u8 = 111u8;
+export const CODEC_DEFAULT_PT_VP8: u8 = 96u8;
+export const CODEC_DEFAULT_PT_RTX: u8 = 97u8;
+export const CODEC_DEFAULT_PT_AV1: u8 = 98u8;
+export const CODEC_DEFAULT_PT_H264: u8 = 102u8;
+export const CODEC_DEFAULT_PT_RED: u8 = 116u8;
+export const CODEC_DEFAULT_PT_ULPFEC: u8 = 117u8;
+export const CODEC_DEFAULT_PT_INVALID: u8 = 255u8;
+
+fn media_ascii_lower(ch: byte) byte {
+    if ch >= ('A' as byte) && ch <= ('Z' as byte) {
+        return ch + 32u8;
+    }
+    return ch;
+}
+
+fn media_bytes_equal_fold(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if media_ascii_lower(lhs[index]) != media_ascii_lower(rhs[index]) {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
 
 export struct EncodedFrame {
-    codec_id: u16 = 0u16,
-    media_kind: u8 = 0u8,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
     timestamp: u64 = 0u64,
     duration_us: u32 = 0u32,
     payload: &[byte] = [],
@@ -74,4 +117,142 @@ export fn codec_capability_set_make() CodecCapabilitySet {
 
 export fn codec_negotiation_result_make() CodecNegotiationResult {
     return CodecNegotiationResult{};
+}
+
+export fn media_kind_from_sdp_token(token: &[byte]) u8 {
+    if media_bytes_equal_fold(token, "audio" as &[byte]) {
+        return MEDIA_KIND_AUDIO;
+    }
+    if media_bytes_equal_fold(token, "video" as &[byte]) {
+        return MEDIA_KIND_VIDEO;
+    }
+    if media_bytes_equal_fold(token, "application" as &[byte]) {
+        return MEDIA_KIND_APPLICATION;
+    }
+    return MEDIA_KIND_UNKNOWN;
+}
+
+export fn media_kind_to_sdp_token(kind: u8) &[byte] {
+    if kind == MEDIA_KIND_AUDIO {
+        return "audio" as &[byte];
+    }
+    if kind == MEDIA_KIND_VIDEO {
+        return "video" as &[byte];
+    }
+    if kind == MEDIA_KIND_APPLICATION {
+        return "application" as &[byte];
+    }
+    return "unknown" as &[byte];
+}
+
+export fn codec_id_from_encoding_name(name: &[byte], media_kind: u8) u16 {
+    if media_kind == MEDIA_KIND_AUDIO {
+        if media_bytes_equal_fold(name, "opus" as &[byte]) {
+            return CODEC_ID_OPUS;
+        }
+        if media_bytes_equal_fold(name, "red" as &[byte]) {
+            return CODEC_ID_RED;
+        }
+    }
+
+    if media_kind == MEDIA_KIND_VIDEO {
+        if media_bytes_equal_fold(name, "vp8" as &[byte]) {
+            return CODEC_ID_VP8;
+        }
+        if media_bytes_equal_fold(name, "h264" as &[byte]) {
+            return CODEC_ID_H264;
+        }
+        if media_bytes_equal_fold(name, "av1" as &[byte]) || media_bytes_equal_fold(name, "av1x" as &[byte]) {
+            return CODEC_ID_AV1;
+        }
+        if media_bytes_equal_fold(name, "rtx" as &[byte]) {
+            return CODEC_ID_RTX;
+        }
+        if media_bytes_equal_fold(name, "red" as &[byte]) {
+            return CODEC_ID_RED;
+        }
+        if media_bytes_equal_fold(name, "ulpfec" as &[byte]) {
+            return CODEC_ID_ULPFEC;
+        }
+    }
+
+    return CODEC_ID_UNKNOWN;
+}
+
+export fn codec_default_clock_rate_hz(codec_id: u16, media_kind: u8) u32 {
+    if codec_id == CODEC_ID_OPUS {
+        return 48000u32;
+    }
+    if codec_id == CODEC_ID_VP8 || codec_id == CODEC_ID_H264 || codec_id == CODEC_ID_AV1 || codec_id == CODEC_ID_RTX {
+        return 90000u32;
+    }
+    if codec_id == CODEC_ID_RED {
+        if media_kind == MEDIA_KIND_AUDIO {
+            return 48000u32;
+        }
+        return 90000u32;
+    }
+    if codec_id == CODEC_ID_ULPFEC {
+        return 90000u32;
+    }
+    return 0u32;
+}
+
+export fn codec_default_payload_type(codec_id: u16, media_kind: u8) u8 {
+    if codec_id == CODEC_ID_OPUS && media_kind == MEDIA_KIND_AUDIO {
+        return CODEC_DEFAULT_PT_OPUS;
+    }
+    if codec_id == CODEC_ID_VP8 && media_kind == MEDIA_KIND_VIDEO {
+        return CODEC_DEFAULT_PT_VP8;
+    }
+    if codec_id == CODEC_ID_RTX && media_kind == MEDIA_KIND_VIDEO {
+        return CODEC_DEFAULT_PT_RTX;
+    }
+    if codec_id == CODEC_ID_AV1 && media_kind == MEDIA_KIND_VIDEO {
+        return CODEC_DEFAULT_PT_AV1;
+    }
+    if codec_id == CODEC_ID_H264 && media_kind == MEDIA_KIND_VIDEO {
+        return CODEC_DEFAULT_PT_H264;
+    }
+    if codec_id == CODEC_ID_RED {
+        return CODEC_DEFAULT_PT_RED;
+    }
+    if codec_id == CODEC_ID_ULPFEC && media_kind == MEDIA_KIND_VIDEO {
+        return CODEC_DEFAULT_PT_ULPFEC;
+    }
+    return CODEC_DEFAULT_PT_INVALID;
+}
+
+export fn codec_id_from_default_payload_type(payload_type: u8, media_kind: u8) u16 {
+    if media_kind == MEDIA_KIND_AUDIO {
+        if payload_type == CODEC_DEFAULT_PT_OPUS {
+            return CODEC_ID_OPUS;
+        }
+        if payload_type == CODEC_DEFAULT_PT_RED {
+            return CODEC_ID_RED;
+        }
+    }
+
+    if media_kind == MEDIA_KIND_VIDEO {
+        if payload_type == CODEC_DEFAULT_PT_VP8 {
+            return CODEC_ID_VP8;
+        }
+        if payload_type == CODEC_DEFAULT_PT_RTX {
+            return CODEC_ID_RTX;
+        }
+        if payload_type == CODEC_DEFAULT_PT_AV1 {
+            return CODEC_ID_AV1;
+        }
+        if payload_type == CODEC_DEFAULT_PT_H264 {
+            return CODEC_ID_H264;
+        }
+        if payload_type == CODEC_DEFAULT_PT_RED {
+            return CODEC_ID_RED;
+        }
+        if payload_type == CODEC_DEFAULT_PT_ULPFEC {
+            return CODEC_ID_ULPFEC;
+        }
+    }
+
+    return CODEC_ID_UNKNOWN;
 }

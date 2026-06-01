@@ -16,6 +16,11 @@ rg -q "export struct CodecNegotiationResult" src/webrtc/media/model.uya
 rg -q "export fn codec_capability_make" src/webrtc/media/model.uya
 rg -q "export fn codec_capability_set_make" src/webrtc/media/model.uya
 rg -q "export fn codec_negotiation_result_make" src/webrtc/media/model.uya
+rg -q "export const MEDIA_KIND_AUDIO" src/webrtc/media/model.uya
+rg -q "export const CODEC_ID_OPUS" src/webrtc/media/model.uya
+rg -q "export fn codec_default_clock_rate_hz" src/webrtc/media/model.uya
+rg -q "export fn codec_default_payload_type" src/webrtc/media/model.uya
+rg -q "export fn codec_id_from_default_payload_type" src/webrtc/media/model.uya
 
 ../uya/bin/uya run src/webrtc_media_model_test_main.uya
 
