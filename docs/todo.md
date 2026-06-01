@@ -294,7 +294,7 @@
 - [x] 定义 `EncodedFrame`。
 - [x] 定义 codec capability 和 negotiation 数据结构。
 - [x] 定义 `CodecId` / `MediaKind` / clock-rate / payload-type 映射。
-- [ ] 定义 optional `media/codec_bridge.uya` 边界，默认 transport build 不依赖 decoder/encoder。
+- [x] 定义 optional `media/codec_bridge.uya` 边界，默认 transport build 不依赖 decoder/encoder。
 - [ ] 实现 Opus RTP packetize/depacketize。
 - [ ] 对齐 `../opus` 的 RTP Opus 语义：48 kHz clock、ptime/maxptime、stereo/sprop-stereo、useinbandfec、usedtx。
 - [ ] 增加 Opus single-packet、多 frame、DTX/空 payload、maxptime 超限 golden tests。

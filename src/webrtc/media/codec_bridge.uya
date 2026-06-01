@@ -1,0 +1,111 @@
+// webrtc.media.codec_bridge - optional codec adapter boundary
+// Module: src/webrtc/media/codec_bridge.uya -> use webrtc.media.codec_bridge;
+// This module intentionally keeps transport-side types independent from
+// any external decoder/encoder package dependency.
+
+export error CodecBridgeDisabled;
+
+export struct CodecBridgeAdapterSlot {
+    enabled: bool = false,
+    encode_entry: usize = 0usize,
+    decode_entry: usize = 0usize,
+    opaque_handle: usize = 0usize,
+}
+
+export struct CodecBridgeBoundary {
+    enabled: bool = false,
+    opus_adapter_enabled: bool = false,
+    vp8_adapter_enabled: bool = false,
+    opus_slot: CodecBridgeAdapterSlot = CodecBridgeAdapterSlot{},
+    vp8_slot: CodecBridgeAdapterSlot = CodecBridgeAdapterSlot{},
+}
+
+fn codec_bridge_slot_make() CodecBridgeAdapterSlot {
+    return CodecBridgeAdapterSlot{};
+}
+
+export fn codec_bridge_boundary_make() CodecBridgeBoundary {
+    return CodecBridgeBoundary{};
+}
+
+fn codec_bridge_slot_register(
+    slot: &CodecBridgeAdapterSlot,
+    encode_entry: usize,
+    decode_entry: usize,
+    opaque_handle: usize,
+) bool {
+    if slot == null {
+        return false;
+    }
+
+    if encode_entry == 0usize || decode_entry == 0usize {
+        slot.enabled = false;
+        slot.encode_entry = 0usize;
+        slot.decode_entry = 0usize;
+        slot.opaque_handle = 0usize;
+        return false;
+    }
+
+    slot.enabled = true;
+    slot.encode_entry = encode_entry;
+    slot.decode_entry = decode_entry;
+    slot.opaque_handle = opaque_handle;
+    return true;
+}
+
+export fn codec_bridge_register_opus_adapter(
+    boundary: &CodecBridgeBoundary,
+    encode_entry: usize,
+    decode_entry: usize,
+    opaque_handle: usize,
+) bool {
+    if boundary == null {
+        return false;
+    }
+
+    const enabled: bool = codec_bridge_slot_register(&boundary.opus_slot, encode_entry, decode_entry, opaque_handle);
+    boundary.opus_adapter_enabled = enabled;
+    boundary.enabled = boundary.opus_adapter_enabled || boundary.vp8_adapter_enabled;
+    return enabled;
+}
+
+export fn codec_bridge_register_vp8_adapter(
+    boundary: &CodecBridgeBoundary,
+    encode_entry: usize,
+    decode_entry: usize,
+    opaque_handle: usize,
+) bool {
+    if boundary == null {
+        return false;
+    }
+
+    const enabled: bool = codec_bridge_slot_register(&boundary.vp8_slot, encode_entry, decode_entry, opaque_handle);
+    boundary.vp8_adapter_enabled = enabled;
+    boundary.enabled = boundary.opus_adapter_enabled || boundary.vp8_adapter_enabled;
+    return enabled;
+}
+
+export fn codec_bridge_clear(boundary: &CodecBridgeBoundary) void {
+    if boundary == null {
+        return;
+    }
+
+    boundary.opus_slot = codec_bridge_slot_make();
+    boundary.vp8_slot = codec_bridge_slot_make();
+    boundary.opus_adapter_enabled = false;
+    boundary.vp8_adapter_enabled = false;
+    boundary.enabled = false;
+}
+
+export fn codec_bridge_enabled(boundary: &CodecBridgeBoundary) bool {
+    if boundary == null {
+        return false;
+    }
+    return boundary.enabled;
+}
+
+export fn codec_bridge_require_enabled(boundary: &CodecBridgeBoundary) !void {
+    if !codec_bridge_enabled(boundary) {
+        return error.CodecBridgeDisabled;
+    }
+}

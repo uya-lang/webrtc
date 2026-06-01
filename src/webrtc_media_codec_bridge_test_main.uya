@@ -1,0 +1,73 @@
+use libc.printf;
+use webrtc.media.codec_bridge;
+
+fn check_default_boundary_is_disabled() i32 {
+    const boundary: CodecBridgeBoundary = codec_bridge_boundary_make();
+    if boundary.enabled {
+        return 10i32;
+    }
+    if boundary.opus_adapter_enabled || boundary.vp8_adapter_enabled {
+        return 11i32;
+    }
+    if codec_bridge_enabled(&boundary) {
+        return 12i32;
+    }
+    return 0i32;
+}
+
+fn check_enable_and_require_paths() i32 {
+    var boundary: CodecBridgeBoundary = codec_bridge_boundary_make();
+    const bad_register: bool = codec_bridge_register_opus_adapter(&boundary, 0usize, 7usize, 9usize);
+    if bad_register {
+        return 20i32;
+    }
+    if codec_bridge_enabled(&boundary) {
+        return 21i32;
+    }
+
+    const good_register: bool = codec_bridge_register_opus_adapter(&boundary, 1usize, 2usize, 9usize);
+    if !good_register {
+        return 22i32;
+    }
+    if !boundary.opus_adapter_enabled || !boundary.opus_slot.enabled {
+        return 23i32;
+    }
+
+    if !codec_bridge_enabled(&boundary) {
+        return 24i32;
+    }
+
+    const ok: !void = codec_bridge_require_enabled(&boundary);
+    if ok.error_id != 0 {
+        return 25i32;
+    }
+
+    codec_bridge_clear(&boundary);
+    if boundary.enabled || boundary.opus_adapter_enabled || boundary.vp8_adapter_enabled {
+        return 26i32;
+    }
+
+    const err: !void = codec_bridge_require_enabled(&boundary);
+    if err.error_id != @error_id(error.CodecBridgeDisabled) {
+        return 27i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_default_boundary_is_disabled();
+    if result != 0i32 {
+        printf("codec bridge default tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_enable_and_require_paths();
+    if result != 0i32 {
+        printf("codec bridge enable tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("codec bridge tests passed\n");
+    return 0i32;
+}
