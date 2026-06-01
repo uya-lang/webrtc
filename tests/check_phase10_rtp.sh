@@ -5,8 +5,23 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 test -d tests/fixtures/rtp
+test -d tests/fixtures/rtp/fuzz
 test -f tests/fixtures/rtp/README.md
+test -f tests/fixtures/rtp/fuzz/README.md
 test -f tests/fixtures/rtp/parser_cases.json
+test -f tests/fixtures/rtp/fuzz/rtp_minimal_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtp_csrc_extension_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtp_extension_truncated.hex
+test -f tests/fixtures/rtp/fuzz/rtp_padding_overflow.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_sr_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_rr_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_truncated_header.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_length_overflow.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_nack_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_pli_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_fir_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_transport_cc_valid.hex
+test -f tests/fixtures/rtp/fuzz/rtcp_transport_cc_bad_status_count.hex
 test -x tests/test_rtp_parser.py
 test -f src/webrtc/rtp/rtp_packet.uya
 test -f src/webrtc/rtp/rtp_extension.uya
@@ -28,6 +43,11 @@ rg -q '"rtp_invalid_packets"' tests/fixtures/rtp/parser_cases.json
 rg -q '"extension_boundary_cases"' tests/fixtures/rtp/parser_cases.json
 rg -q '"rtcp_valid_packets"' tests/fixtures/rtp/parser_cases.json
 rg -q '"rtcp_invalid_packets"' tests/fixtures/rtp/parser_cases.json
+
+for seed in tests/fixtures/rtp/fuzz/*.hex; do
+    xxd -r -p "$seed" >/dev/null
+done
+
 rg -q "export fn rtp_packet_parse" src/webrtc/rtp/rtp_packet.uya
 rg -q "export fn rtp_packet_write" src/webrtc/rtp/rtp_packet.uya
 rg -q "export fn rtp_header_size" src/webrtc/rtp/rtp_packet.uya
