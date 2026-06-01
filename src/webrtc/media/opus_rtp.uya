@@ -1,0 +1,79 @@
+// webrtc.media.opus_rtp - Opus RTP payload packetize/depacketize
+// Module: src/webrtc/media/opus_rtp.uya -> use webrtc.media.opus_rtp;
+
+export error OpusRtpInvalidConfig;
+export error OpusRtpPayloadRequired;
+export error OpusRtpPayloadTooLarge;
+export error OpusRtpBufferTooSmall;
+
+export const OPUS_RTP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1200usize;
+
+export struct OpusRtpPacketizeConfig {
+    max_payload_bytes: usize = OPUS_RTP_DEFAULT_MAX_PAYLOAD_BYTES,
+    allow_empty_payload: bool = false,
+}
+
+export struct OpusRtpDepacketizeConfig {
+    allow_empty_payload: bool = false,
+}
+
+fn opus_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
+    if len > dst.len || len > src.len {
+        return error.OpusRtpBufferTooSmall;
+    }
+
+    var index: usize = 0usize;
+    while index < len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+export fn opus_rtp_packetize_config_make() OpusRtpPacketizeConfig {
+    return OpusRtpPacketizeConfig{};
+}
+
+export fn opus_rtp_depacketize_config_make() OpusRtpDepacketizeConfig {
+    return OpusRtpDepacketizeConfig{};
+}
+
+export fn opus_rtp_packetize(
+    opus_payload: &[byte],
+    config: &OpusRtpPacketizeConfig,
+    out_payload: &[byte],
+) !usize {
+    if config == null || config.max_payload_bytes == 0usize {
+        return error.OpusRtpInvalidConfig;
+    }
+    if opus_payload.len == 0usize && !config.allow_empty_payload {
+        return error.OpusRtpPayloadRequired;
+    }
+    if opus_payload.len > config.max_payload_bytes {
+        return error.OpusRtpPayloadTooLarge;
+    }
+    if out_payload.len < opus_payload.len {
+        return error.OpusRtpBufferTooSmall;
+    }
+
+    try opus_rtp_copy_bytes(out_payload[0:opus_payload.len], opus_payload, opus_payload.len);
+    return opus_payload.len;
+}
+
+export fn opus_rtp_depacketize(
+    rtp_payload: &[byte],
+    config: &OpusRtpDepacketizeConfig,
+    out_opus_payload: &[byte],
+) !usize {
+    if config == null {
+        return error.OpusRtpInvalidConfig;
+    }
+    if rtp_payload.len == 0usize && !config.allow_empty_payload {
+        return error.OpusRtpPayloadRequired;
+    }
+    if out_opus_payload.len < rtp_payload.len {
+        return error.OpusRtpBufferTooSmall;
+    }
+
+    try opus_rtp_copy_bytes(out_opus_payload[0:rtp_payload.len], rtp_payload, rtp_payload.len);
+    return rtp_payload.len;
+}

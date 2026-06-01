@@ -7,8 +7,10 @@ cd "$repo_root"
 test -d src/webrtc/media
 test -f src/webrtc/media/model.uya
 test -f src/webrtc/media/codec_bridge.uya
+test -f src/webrtc/media/opus_rtp.uya
 test -f src/webrtc_media_model_test_main.uya
 test -f src/webrtc_media_codec_bridge_test_main.uya
+test -f src/webrtc_media_opus_rtp_test_main.uya
 
 rg -q "export struct EncodedFrame" src/webrtc/media/model.uya
 rg -q "export fn encoded_frame_make" src/webrtc/media/model.uya
@@ -18,6 +20,9 @@ rg -q "export fn codec_bridge_register_opus_adapter" src/webrtc/media/codec_brid
 rg -q "export fn codec_bridge_register_vp8_adapter" src/webrtc/media/codec_bridge.uya
 rg -q "export fn codec_bridge_clear" src/webrtc/media/codec_bridge.uya
 rg -q "export fn codec_bridge_require_enabled" src/webrtc/media/codec_bridge.uya
+rg -q "export struct OpusRtpPacketizeConfig" src/webrtc/media/opus_rtp.uya
+rg -q "export fn opus_rtp_packetize" src/webrtc/media/opus_rtp.uya
+rg -q "export fn opus_rtp_depacketize" src/webrtc/media/opus_rtp.uya
 rg -q "export struct CodecCapability" src/webrtc/media/model.uya
 rg -q "export struct CodecCapabilitySet" src/webrtc/media/model.uya
 rg -q "export struct CodecNegotiationResult" src/webrtc/media/model.uya
@@ -32,5 +37,6 @@ rg -q "export fn codec_id_from_default_payload_type" src/webrtc/media/model.uya
 
 ../uya/bin/uya run src/webrtc_media_model_test_main.uya
 ../uya/bin/uya run src/webrtc_media_codec_bridge_test_main.uya
+../uya/bin/uya run src/webrtc_media_opus_rtp_test_main.uya
 
 echo "Phase 11 media model checks passed"

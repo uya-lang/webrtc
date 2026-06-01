@@ -1,0 +1,83 @@
+use libc.printf;
+use webrtc.media.opus_rtp;
+
+fn bytes_equal(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+
+    var i: usize = 0usize;
+    while i < a.len {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1usize;
+    }
+
+    return true;
+}
+
+fn check_packetize_roundtrip() i32 {
+    var input: [byte: 6] = [
+        0xF8 as byte, 0xAA as byte, 0xBB as byte,
+        0xCC as byte, 0xDD as byte, 0xEE as byte,
+    ];
+
+    var packetize_cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    packetize_cfg.max_payload_bytes = 16usize;
+
+    var out_rtp: [byte: 16] = [];
+    const written: !usize = opus_rtp_packetize(input[0:6], &packetize_cfg, out_rtp[0:16]);
+    if written.error_id != 0 || written.value != 6usize {
+        return 10i32;
+    }
+
+    var depacketize_cfg: OpusRtpDepacketizeConfig = opus_rtp_depacketize_config_make();
+    var decoded: [byte: 16] = [];
+    const decoded_len: !usize = opus_rtp_depacketize(out_rtp[0:written.value], &depacketize_cfg, decoded[0:16]);
+    if decoded_len.error_id != 0 || decoded_len.value != 6usize {
+        return 11i32;
+    }
+    if !bytes_equal(decoded[0:decoded_len.value], input[0:6]) {
+        return 12i32;
+    }
+
+    return 0i32;
+}
+
+fn check_packetize_limits() i32 {
+    var input: [byte: 4] = [0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte];
+    var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    cfg.max_payload_bytes = 3usize;
+
+    var out: [byte: 8] = [];
+    const oversized: !usize = opus_rtp_packetize(input[0:4], &cfg, out[0:8]);
+    if oversized.error_id != @error_id(error.OpusRtpPayloadTooLarge) {
+        return 20i32;
+    }
+
+    cfg.max_payload_bytes = 8usize;
+    const too_small: !usize = opus_rtp_packetize(input[0:4], &cfg, out[0:3]);
+    if too_small.error_id != @error_id(error.OpusRtpBufferTooSmall) {
+        return 21i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_packetize_roundtrip();
+    if result != 0i32 {
+        printf("opus rtp roundtrip tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_packetize_limits();
+    if result != 0i32 {
+        printf("opus rtp limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("opus rtp tests passed\n");
+    return 0i32;
+}
