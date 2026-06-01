@@ -376,8 +376,8 @@
 - [x] 实现 `set_local_description`。
 - [x] 实现 `set_remote_description`。
 - [x] 实现 `create_offer`。
-- [ ] 实现 `create_answer`。
-- [ ] 实现 `add_ice_candidate`。
+- [~] 实现 `create_answer`。
+- [x] 实现 `add_ice_candidate`。
 - [ ] 实现 transceiver。
 - [ ] 实现 sender/receiver。
 - [ ] 实现 track。
