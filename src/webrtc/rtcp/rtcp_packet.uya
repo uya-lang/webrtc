@@ -18,22 +18,29 @@ export error RtcpSdesCnameRequired;
 export error RtcpSdesCnameTooLong;
 export error RtcpByeTooManySources;
 export error RtcpByeReasonTooLong;
+export error RtcpNackInvalidFormat;
+export error RtcpNackTooManyEntries;
 
 export const RTCP_PACKET_TYPE_SR: u8 = 200u8;
 export const RTCP_PACKET_TYPE_RR: u8 = 201u8;
 export const RTCP_PACKET_TYPE_SDES: u8 = 202u8;
 export const RTCP_PACKET_TYPE_BYE: u8 = 203u8;
+export const RTCP_PACKET_TYPE_RTPFB: u8 = 205u8;
 export const RTCP_MAX_REPORT_BLOCKS: usize = 31usize;
 export const RTCP_MAX_SDES_CHUNKS: usize = 31usize;
 export const RTCP_MAX_SDES_CNAME_BYTES: usize = 255usize;
 export const RTCP_MAX_BYE_SOURCES: usize = 31usize;
 export const RTCP_MAX_BYE_REASON_BYTES: usize = 255usize;
+export const RTCP_RTPFB_FMT_NACK: u8 = 1u8;
+export const RTCP_MAX_NACK_ENTRIES: usize = 128usize;
 
 const RTCP_VERSION: u8 = 2u8;
 const RTCP_HEADER_BYTES: usize = 4usize;
 const RTCP_SR_SENDER_INFO_BYTES: usize = 24usize;
 const RTCP_RR_SENDER_SSRC_BYTES: usize = 4usize;
 const RTCP_REPORT_BLOCK_BYTES: usize = 24usize;
+const RTCP_RTPFB_BASE_BYTES: usize = 12usize;
+const RTCP_NACK_ENTRY_BYTES: usize = 4usize;
 const RTCP_COMPACT_NTP_SCALE: u32 = 65536u32;
 const RTCP_SDES_ITEM_END: u8 = 0u8;
 const RTCP_SDES_ITEM_CNAME: u8 = 1u8;
@@ -89,6 +96,18 @@ export struct RtcpByePacket {
     has_reason: bool = false,
     reason: [byte: RTCP_MAX_BYE_REASON_BYTES] = [],
     reason_len: usize = 0usize,
+}
+
+export struct RtcpNackEntry {
+    pid: u16 = 0u16,
+    blp: u16 = 0u16,
+}
+
+export struct RtcpNackPacket {
+    sender_ssrc: u32 = 0u32,
+    media_ssrc: u32 = 0u32,
+    entry_count: usize = 0usize,
+    entries: [RtcpNackEntry: RTCP_MAX_NACK_ENTRIES] = [],
 }
 
 fn rtcp_read_u24(src: &[byte]) !u32 {
@@ -242,6 +261,10 @@ export fn rtcp_sdes_packet_make() RtcpSdesPacket {
 
 export fn rtcp_bye_packet_make() RtcpByePacket {
     return RtcpByePacket{};
+}
+
+export fn rtcp_nack_packet_make() RtcpNackPacket {
+    return RtcpNackPacket{};
 }
 
 export fn rtcp_sender_report_parse(packet: &[byte]) !RtcpSenderReport {
@@ -616,6 +639,76 @@ export fn rtcp_bye_write(bye: &RtcpByePacket, buffer: &[byte]) !usize {
             pad_index = pad_index + 1usize;
         }
         offset = offset + padding;
+    }
+
+    return offset;
+}
+
+export fn rtcp_nack_parse(packet: &[byte]) !RtcpNackPacket {
+    const header: RtcpParseHeader = try rtcp_parse_header(packet, RTCP_PACKET_TYPE_RTPFB);
+    if header.count != RTCP_RTPFB_FMT_NACK {
+        return error.RtcpNackInvalidFormat;
+    }
+    if header.effective_len < RTCP_RTPFB_BASE_BYTES {
+        return error.RtcpInvalidLength;
+    }
+
+    const entries_len: usize = header.effective_len - RTCP_RTPFB_BASE_BYTES;
+    if (entries_len % RTCP_NACK_ENTRY_BYTES) != 0usize {
+        return error.RtcpInvalidLength;
+    }
+    const entry_count: usize = entries_len / RTCP_NACK_ENTRY_BYTES;
+    if entry_count > RTCP_MAX_NACK_ENTRIES {
+        return error.RtcpNackTooManyEntries;
+    }
+
+    var nack: RtcpNackPacket = rtcp_nack_packet_make();
+    nack.sender_ssrc = try read_be_u32(packet[4:4]);
+    nack.media_ssrc = try read_be_u32(packet[8:4]);
+    nack.entry_count = entry_count;
+
+    var offset: usize = RTCP_RTPFB_BASE_BYTES;
+    var index: usize = 0usize;
+    while index < entry_count {
+        nack.entries[index].pid = try read_be_u16(packet[offset:2]);
+        nack.entries[index].blp = try read_be_u16(packet[offset + 2usize:2]);
+        offset = offset + RTCP_NACK_ENTRY_BYTES;
+        index = index + 1usize;
+    }
+
+    if offset != header.effective_len {
+        return error.RtcpInvalidLength;
+    }
+    return nack;
+}
+
+export fn rtcp_nack_write(nack: &RtcpNackPacket, buffer: &[byte]) !usize {
+    if nack == null {
+        return error.RtcpInvalidLength;
+    }
+    if nack.entry_count > RTCP_MAX_NACK_ENTRIES {
+        return error.RtcpNackTooManyEntries;
+    }
+
+    const total_len: usize = RTCP_RTPFB_BASE_BYTES + (nack.entry_count * RTCP_NACK_ENTRY_BYTES);
+    if buffer.len < total_len {
+        return error.RtcpBufferTooSmall;
+    }
+
+    buffer[0] = ((RTCP_VERSION & 0x03u8) << 6i32) | (RTCP_RTPFB_FMT_NACK & 0x1Fu8);
+    buffer[1] = RTCP_PACKET_TYPE_RTPFB;
+    const length_words_minus_one: u16 = ((total_len / 4usize) - 1usize) as u16;
+    try write_be_u16(buffer[2:2], length_words_minus_one);
+    try write_be_u32(buffer[4:4], nack.sender_ssrc);
+    try write_be_u32(buffer[8:4], nack.media_ssrc);
+
+    var offset: usize = RTCP_RTPFB_BASE_BYTES;
+    var index: usize = 0usize;
+    while index < nack.entry_count {
+        try write_be_u16(buffer[offset:2], nack.entries[index].pid);
+        try write_be_u16(buffer[offset + 2usize:2], nack.entries[index].blp);
+        offset = offset + RTCP_NACK_ENTRY_BYTES;
+        index = index + 1usize;
     }
 
     return offset;

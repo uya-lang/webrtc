@@ -276,7 +276,7 @@
 - [x] 实现 RTCP SR/RR。
 - [x] 实现 RTCP SDES CNAME。
 - [x] 实现 RTCP BYE。
-- [ ] 实现 RTCP NACK。
+- [x] 实现 RTCP NACK。
 - [ ] 实现 RTCP PLI。
 - [ ] 实现 RTCP FIR。
 - [ ] 实现 RTCP Transport-CC feedback。

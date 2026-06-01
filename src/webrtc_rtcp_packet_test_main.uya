@@ -180,6 +180,40 @@ fn check_bye_parse_and_roundtrip() i32 {
     return 0i32;
 }
 
+fn check_nack_parse_and_roundtrip() i32 {
+    var nack_packet: [byte: 16] = [
+        0x81 as byte, 0xCD as byte, 0x00 as byte, 0x03 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x64 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    const parsed: !RtcpNackPacket = rtcp_nack_parse(nack_packet[0:16]);
+    if parsed.error_id != 0 {
+        return 60i32;
+    }
+    if parsed.value.sender_ssrc != 0x11223344u32 || parsed.value.media_ssrc != 0x55667788u32 {
+        return 61i32;
+    }
+    if parsed.value.entry_count != 1usize {
+        return 62i32;
+    }
+    if parsed.value.entries[0].pid != 100u16 || parsed.value.entries[0].blp != 5u16 {
+        return 63i32;
+    }
+
+    var out: [byte: 32] = [];
+    const written: !usize = rtcp_nack_write(&parsed.value, out[0:32]);
+    if written.error_id != 0 || written.value != 16usize {
+        return 64i32;
+    }
+    const reparsed: !RtcpNackPacket = rtcp_nack_parse(out[0:written.value]);
+    if reparsed.error_id != 0 || reparsed.value.entries[0].pid != 100u16 {
+        return 65i32;
+    }
+
+    return 0i32;
+}
+
 fn check_error_and_rtt_paths() i32 {
     var bad_version_sr: [byte: 28] = [
         0x40 as byte, 0xC8 as byte, 0x00 as byte, 0x06 as byte,
@@ -260,6 +294,17 @@ fn check_error_and_rtt_paths() i32 {
         return 48i32;
     }
 
+    var bad_nack_format: [byte: 16] = [
+        0x82 as byte, 0xCD as byte, 0x00 as byte, 0x03 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x64 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    const bad_nack: !RtcpNackPacket = rtcp_nack_parse(bad_nack_format[0:16]);
+    if bad_nack.error_id != @error_id(error.RtcpNackInvalidFormat) {
+        return 49i32;
+    }
+
     return 0i32;
 }
 
@@ -288,12 +333,18 @@ fn main() i32 {
         return 1i32;
     }
 
-    result = check_error_and_rtt_paths();
+    result = check_nack_parse_and_roundtrip();
     if result != 0i32 {
-        printf("RTCP SR/RR/SDES/BYE tests failed: %d\n", result);
+        printf("RTCP NACK tests failed: %d\n", result);
         return 1i32;
     }
 
-    printf("RTCP SR/RR/SDES/BYE tests passed\n");
+    result = check_error_and_rtt_paths();
+    if result != 0i32 {
+        printf("RTCP SR/RR/SDES/BYE/NACK tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTCP SR/RR/SDES/BYE/NACK tests passed\n");
     return 0i32;
 }
