@@ -11,6 +11,8 @@ export error VideoOrientationExtensionInvalid;
 export error PlayoutDelayExtensionInvalid;
 
 const RTP_EXTENSION_MID_MAX_BYTES: usize = 255usize;
+const RTP_EXTENSION_ABS_SEND_TIME_BYTES: usize = 3usize;
+const RTP_EXTENSION_ABS_SEND_TIME_MAX: u32 = 0x00FFFFFFu32;
 
 fn rtp_extension_mid_byte_valid(ch: byte) bool {
     const value: u8 = ch as u8;
@@ -55,7 +57,7 @@ export struct AbsSendTimeExtension {
 }
 
 export fn rtp_extension_abs_send_time_parse(data: &[byte]) !AbsSendTimeExtension {
-    if data.len < 3usize {
+    if data.len != RTP_EXTENSION_ABS_SEND_TIME_BYTES {
         return error.AbsSendTimeExtensionInvalid;
     }
 
@@ -66,14 +68,17 @@ export fn rtp_extension_abs_send_time_parse(data: &[byte]) !AbsSendTimeExtension
 }
 
 export fn rtp_extension_abs_send_time_write(ext: &AbsSendTimeExtension, buffer: &[byte]) !usize {
-    if buffer.len < 3usize {
+    if ext.timestamp > RTP_EXTENSION_ABS_SEND_TIME_MAX {
+        return error.AbsSendTimeExtensionInvalid;
+    }
+    if buffer.len < RTP_EXTENSION_ABS_SEND_TIME_BYTES {
         return error.AbsSendTimeExtensionInvalid;
     }
 
     buffer[0] = ((ext.timestamp >> 16) & 0xFFu32) as u8;
     buffer[1] = ((ext.timestamp >> 8) & 0xFFu32) as u8;
     buffer[2] = (ext.timestamp & 0xFFu32) as u8;
-    return 3usize;
+    return RTP_EXTENSION_ABS_SEND_TIME_BYTES;
 }
 
 // transport-wide-cc-extensions-02 (draft-holmer-rmcat-transport-wide-cc)

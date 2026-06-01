@@ -89,6 +89,54 @@ fn check_mid_write() i32 {
     return 0i32;
 }
 
+fn check_abs_send_time_parse_and_write() i32 {
+    var raw: [byte: 3] = [0x12 as byte, 0x34 as byte, 0x56 as byte];
+    const parsed: !AbsSendTimeExtension = rtp_extension_abs_send_time_parse(raw[0:3]);
+    if parsed.error_id != 0 {
+        return 30i32;
+    }
+    if parsed.value.timestamp != 0x123456u32 {
+        return 31i32;
+    }
+
+    var truncated: [byte: 2] = [0x12 as byte, 0x34 as byte];
+    const truncated_result: !AbsSendTimeExtension = rtp_extension_abs_send_time_parse(truncated[0:2]);
+    if truncated_result.error_id != @error_id(error.AbsSendTimeExtensionInvalid) {
+        return 32i32;
+    }
+
+    var extra: [byte: 4] = [0x12 as byte, 0x34 as byte, 0x56 as byte, 0x78 as byte];
+    const extra_result: !AbsSendTimeExtension = rtp_extension_abs_send_time_parse(extra[0:4]);
+    if extra_result.error_id != @error_id(error.AbsSendTimeExtensionInvalid) {
+        return 33i32;
+    }
+
+    var out: [byte: 3] = [];
+    var ext: AbsSendTimeExtension = AbsSendTimeExtension{ timestamp: 0x00ABCDE0u32 };
+    const written: !usize = rtp_extension_abs_send_time_write(&ext, out[0:3]);
+    if written.error_id != 0 || written.value != 3usize {
+        return 34i32;
+    }
+    var expected: [byte: 3] = [0xab as byte, 0xcd as byte, 0xe0 as byte];
+    if !bytes_equal(out[0:3], expected[0:3]) {
+        return 35i32;
+    }
+
+    var small_out: [byte: 2] = [];
+    const small_out_result: !usize = rtp_extension_abs_send_time_write(&ext, small_out[0:2]);
+    if small_out_result.error_id != @error_id(error.AbsSendTimeExtensionInvalid) {
+        return 36i32;
+    }
+
+    var overflow_ext: AbsSendTimeExtension = AbsSendTimeExtension{ timestamp: 0x01000000u32 };
+    const overflow_result: !usize = rtp_extension_abs_send_time_write(&overflow_ext, out[0:3]);
+    if overflow_result.error_id != @error_id(error.AbsSendTimeExtensionInvalid) {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_mid_parse();
     if result != 0i32 {
@@ -102,6 +150,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("RTP common extension MID tests passed\n");
+    result = check_abs_send_time_parse_and_write();
+    if result != 0i32 {
+        printf("RTP common extension ABS send-time tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("RTP common extension MID/ABS tests passed\n");
     return 0i32;
 }
