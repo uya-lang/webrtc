@@ -1,5 +1,5 @@
 .agent/logs/*
 __pycache__/
 
-.agent/state*.json
+.agent/state.json
 build/benchmarks/
