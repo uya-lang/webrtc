@@ -345,10 +345,10 @@
 
 - [x] 先增加 SCTP packet/chunk parser fixtures、截断、坏 length failing tests。
 - [x] 先增加 DCEP OPEN / ACK golden tests。
-- [~] 先增加大消息 fragment/reassembly cap 和 unordered/reliable 行为测试。
+- [x] 先增加大消息 fragment/reassembly cap 和 unordered/reliable 行为测试。
 - [x] 先建立 `bench_datachannel` 的 Sans-I/O 基线。
 - [x] 实现 SCTP packet/chunk parser。
-- [ ] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
+- [~] 实现 INIT / INIT_ACK / COOKIE_ECHO / COOKIE_ACK。
 - [ ] 实现 DATA chunk。
 - [ ] 实现 SACK。
 - [ ] 实现 HEARTBEAT。
@@ -356,9 +356,9 @@
 - [ ] 实现 TSN tracking。
 - [ ] 实现 retransmission timer。
 - [ ] 实现 ordered / unordered delivery。
-- [ ] 实现 reliable / max_retransmits / max_packet_lifetime。
+- [x] 实现 reliable / max_retransmits / max_packet_lifetime。
 - [ ] 实现 stream reset。
-- [ ] 实现 DCEP OPEN / ACK。
+- [x] 实现 DCEP OPEN / ACK。
 - [ ] 实现 DataChannel public API。
 - [ ] 增加 Uya loopback DataChannel echo 示例。
 

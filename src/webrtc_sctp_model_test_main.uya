@@ -1,0 +1,164 @@
+use libc.printf;
+use webrtc.sctp.model;
+
+fn check_init_defaults_and_mode() i32 {
+    var init: SctpDataChannelInit = sctp_data_channel_init_make();
+    if !init.ordered || init.negotiated {
+        return 10i32;
+    }
+    if init.has_max_retransmits || init.has_max_packet_lifetime_ms {
+        return 11i32;
+    }
+    if init.reassembly_cap_bytes != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 12i32;
+    }
+
+    const mode: !u8 = sctp_data_channel_init_reliability_mode(&init);
+    if mode.error_id != 0 {
+        return 13i32;
+    }
+    if mode.value != SCTP_DATA_CHANNEL_RELIABILITY_RELIABLE {
+        return 14i32;
+    }
+
+    return 0i32;
+}
+
+fn check_reliability_mode_validation() i32 {
+    var init: SctpDataChannelInit = sctp_data_channel_init_make();
+    init.ordered = false;
+    init.has_max_retransmits = true;
+    init.max_retransmits = 3u16;
+
+    const rexmit_mode: !u8 = sctp_data_channel_init_reliability_mode(&init);
+    if rexmit_mode.error_id != 0 {
+        return 20i32;
+    }
+    if rexmit_mode.value != SCTP_DATA_CHANNEL_RELIABILITY_MAX_RETRANSMITS {
+        return 21i32;
+    }
+
+    init.has_max_retransmits = false;
+    init.has_max_packet_lifetime_ms = true;
+    init.max_packet_lifetime_ms = 150u16;
+
+    const timed_mode: !u8 = sctp_data_channel_init_reliability_mode(&init);
+    if timed_mode.error_id != 0 {
+        return 22i32;
+    }
+    if timed_mode.value != SCTP_DATA_CHANNEL_RELIABILITY_MAX_PACKET_LIFETIME {
+        return 23i32;
+    }
+
+    init.has_max_retransmits = true;
+    init.has_max_packet_lifetime_ms = true;
+    const invalid: !u8 = sctp_data_channel_init_reliability_mode(&init);
+    if invalid.error_id != @error_id(error.SctpDataChannelInvalidReliabilityConfiguration) {
+        return 24i32;
+    }
+
+    const validate: !void = sctp_data_channel_init_validate(&init);
+    if validate.error_id != @error_id(error.SctpDataChannelInvalidReliabilityConfiguration) {
+        return 25i32;
+    }
+
+    init.has_max_retransmits = false;
+    init.has_max_packet_lifetime_ms = false;
+    init.reassembly_cap_bytes = 0usize;
+    const bad_cap: !void = sctp_data_channel_init_validate(&init);
+    if bad_cap.error_id != @error_id(error.SctpDataChannelInvalidState) {
+        return 26i32;
+    }
+
+    return 0i32;
+}
+
+fn check_reassembly_budget_cap_and_stats() i32 {
+    var budget: SctpDataChannelReassemblyBudget = sctp_data_channel_reassembly_budget_make();
+    if budget.cap_bytes != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 30i32;
+    }
+    if budget.used_bytes != 0usize || budget.high_watermark_bytes != 0usize || budget.drop_count != 0u64 {
+        return 31i32;
+    }
+    if sctp_data_channel_reassembly_budget_available_bytes(&budget) != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 32i32;
+    }
+
+    const almost_cap: usize = SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES - 1024usize;
+    const reserve_first: !void = sctp_data_channel_reassembly_budget_reserve(&budget, almost_cap);
+    if reserve_first.error_id != 0 {
+        return 33i32;
+    }
+    if budget.used_bytes != almost_cap || budget.high_watermark_bytes != almost_cap {
+        return 34i32;
+    }
+
+    const reserve_second: !void = sctp_data_channel_reassembly_budget_reserve(&budget, 1024usize);
+    if reserve_second.error_id != 0 {
+        return 35i32;
+    }
+    if budget.used_bytes != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 36i32;
+    }
+    if budget.high_watermark_bytes != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 37i32;
+    }
+
+    const overflow: !void = sctp_data_channel_reassembly_budget_reserve(&budget, 1usize);
+    if overflow.error_id != @error_id(error.SctpDataChannelReassemblyBudgetExceeded) {
+        return 38i32;
+    }
+    if budget.drop_count != 1u64 {
+        return 39i32;
+    }
+
+    const release: !void = sctp_data_channel_reassembly_budget_release(&budget, 1024usize);
+    if release.error_id != 0 {
+        return 40i32;
+    }
+    if budget.used_bytes != almost_cap {
+        return 41i32;
+    }
+    if sctp_data_channel_reassembly_budget_available_bytes(&budget) != 1024usize {
+        return 42i32;
+    }
+
+    const underflow: !void = sctp_data_channel_reassembly_budget_release(&budget, SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES);
+    if underflow.error_id != @error_id(error.SctpDataChannelReassemblyBudgetUnderflow) {
+        return 43i32;
+    }
+
+    sctp_data_channel_reassembly_budget_reset(&budget);
+    if budget.used_bytes != 0usize || budget.high_watermark_bytes != 0usize || budget.drop_count != 0u64 {
+        return 44i32;
+    }
+    if sctp_data_channel_reassembly_budget_available_bytes(&budget) != SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES {
+        return 45i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_init_defaults_and_mode();
+    if result != 0i32 {
+        printf("SCTP datachannel init tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_reliability_mode_validation();
+    if result != 0i32 {
+        printf("SCTP datachannel reliability tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_reassembly_budget_cap_and_stats();
+    if result != 0i32 {
+        printf("SCTP datachannel reassembly budget tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("SCTP datachannel model tests passed\n");
+    return 0i32;
+}

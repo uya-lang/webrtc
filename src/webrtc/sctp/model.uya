@@ -1,0 +1,145 @@
+// webrtc.sctp.model - SCTP DataChannel model helpers
+// Module: src/webrtc/sctp/model.uya -> use webrtc.sctp.model;
+
+/// Default total reassembly cap for a DataChannel, matching the design notes.
+export const SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES: usize = 4194304usize;
+
+/// Reliability mode that delivers every message.
+export const SCTP_DATA_CHANNEL_RELIABILITY_RELIABLE: u8 = 0u8;
+
+/// Reliability mode that drops after a maximum retransmission budget.
+export const SCTP_DATA_CHANNEL_RELIABILITY_MAX_RETRANSMITS: u8 = 1u8;
+
+/// Reliability mode that drops after a maximum packet lifetime budget.
+export const SCTP_DATA_CHANNEL_RELIABILITY_MAX_PACKET_LIFETIME: u8 = 2u8;
+
+export error SctpDataChannelInvalidState;
+export error SctpDataChannelInvalidReliabilityConfiguration;
+export error SctpDataChannelReassemblyBudgetExceeded;
+export error SctpDataChannelReassemblyBudgetUnderflow;
+
+/// DataChannel init parameters needed by the first SCTP delivery tests.
+export struct SctpDataChannelInit {
+    ordered: bool = true,
+    negotiated: bool = false,
+    has_max_retransmits: bool = false,
+    max_retransmits: u16 = 0u16,
+    has_max_packet_lifetime_ms: bool = false,
+    max_packet_lifetime_ms: u16 = 0u16,
+    reassembly_cap_bytes: usize = SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES,
+}
+
+/// Reassembly budget bookkeeping for fragment accumulation.
+export struct SctpDataChannelReassemblyBudget {
+    cap_bytes: usize = SCTP_DATA_CHANNEL_DEFAULT_REASSEMBLY_CAP_BYTES,
+    used_bytes: usize = 0usize,
+    high_watermark_bytes: usize = 0usize,
+    drop_count: u64 = 0u64,
+}
+
+fn sctp_data_channel_init_make_default() SctpDataChannelInit {
+    return SctpDataChannelInit{};
+}
+
+fn sctp_data_channel_reassembly_budget_make_default() SctpDataChannelReassemblyBudget {
+    return SctpDataChannelReassemblyBudget{};
+}
+
+/// Create the default DataChannel init struct.
+export fn sctp_data_channel_init_make() SctpDataChannelInit {
+    return sctp_data_channel_init_make_default();
+}
+
+/// Validate that the DataChannel init does not ask for mutually exclusive reliability modes.
+export fn sctp_data_channel_init_validate(init: &SctpDataChannelInit) !void {
+    if init == null {
+        return error.SctpDataChannelInvalidState;
+    }
+    if init.reassembly_cap_bytes == 0usize {
+        return error.SctpDataChannelInvalidState;
+    }
+    if init.has_max_retransmits && init.has_max_packet_lifetime_ms {
+        return error.SctpDataChannelInvalidReliabilityConfiguration;
+    }
+    return;
+}
+
+/// Classify the init struct into the supported reliability mode.
+export fn sctp_data_channel_init_reliability_mode(init: &SctpDataChannelInit) !u8 {
+    try sctp_data_channel_init_validate(init);
+    if init.has_max_retransmits {
+        return SCTP_DATA_CHANNEL_RELIABILITY_MAX_RETRANSMITS;
+    }
+    if init.has_max_packet_lifetime_ms {
+        return SCTP_DATA_CHANNEL_RELIABILITY_MAX_PACKET_LIFETIME;
+    }
+    return SCTP_DATA_CHANNEL_RELIABILITY_RELIABLE;
+}
+
+/// Create a default reassembly budget with the documented 4 MB cap.
+export fn sctp_data_channel_reassembly_budget_make() SctpDataChannelReassemblyBudget {
+    return sctp_data_channel_reassembly_budget_make_default();
+}
+
+/// Reset reassembly accounting back to an empty state.
+export fn sctp_data_channel_reassembly_budget_reset(state: &SctpDataChannelReassemblyBudget) void {
+    if state == null {
+        return;
+    }
+
+    state.used_bytes = 0usize;
+    state.high_watermark_bytes = 0usize;
+    state.drop_count = 0u64;
+}
+
+/// Return the remaining bytes available under the reassembly cap.
+export fn sctp_data_channel_reassembly_budget_available_bytes(state: &SctpDataChannelReassemblyBudget) usize {
+    if state == null {
+        return 0usize;
+    }
+    if state.used_bytes >= state.cap_bytes {
+        return 0usize;
+    }
+    return state.cap_bytes - state.used_bytes;
+}
+
+/// Reserve bytes for a fragment or completed message under the cap.
+export fn sctp_data_channel_reassembly_budget_reserve(state: &SctpDataChannelReassemblyBudget, bytes: usize) !void {
+    if state == null {
+        return error.SctpDataChannelInvalidState;
+    }
+    if bytes == 0usize {
+        return;
+    }
+
+    if bytes > state.cap_bytes {
+        state.drop_count = state.drop_count + 1u64;
+        return error.SctpDataChannelReassemblyBudgetExceeded;
+    }
+    if state.used_bytes > (state.cap_bytes - bytes) {
+        state.drop_count = state.drop_count + 1u64;
+        return error.SctpDataChannelReassemblyBudgetExceeded;
+    }
+
+    state.used_bytes = state.used_bytes + bytes;
+    if state.used_bytes > state.high_watermark_bytes {
+        state.high_watermark_bytes = state.used_bytes;
+    }
+    return;
+}
+
+/// Release previously reserved bytes from the budget.
+export fn sctp_data_channel_reassembly_budget_release(state: &SctpDataChannelReassemblyBudget, bytes: usize) !void {
+    if state == null {
+        return error.SctpDataChannelInvalidState;
+    }
+    if bytes == 0usize {
+        return;
+    }
+    if bytes > state.used_bytes {
+        return error.SctpDataChannelReassemblyBudgetUnderflow;
+    }
+
+    state.used_bytes = state.used_bytes - bytes;
+    return;
+}

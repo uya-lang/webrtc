@@ -109,6 +109,48 @@ fn check_malformed_cases() i32 {
         return 32i32;
     }
 
+    var unsupported: [byte: 12] = [
+        0x03 as byte,
+        0x7Fu8 as byte,
+        0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte,
+    ];
+    const unsupported_result: !SctpDcepOpenMessage = sctp_dcep_open_parse(unsupported[0:12]);
+    if unsupported_result.error_id != @error_id(error.SctpDcepUnsupportedChannelType) {
+        return 33i32;
+    }
+
+    return 0i32;
+}
+
+fn check_channel_type_roundtrip(channel_type: u8) i32 {
+    var message: SctpDcepOpenMessage = sctp_dcep_open_message_make();
+    message.channel_type = channel_type;
+    message.priority = 123u16;
+    message.reliability_parameter = 456u32;
+
+    var out: [byte: 32] = [];
+    const written: !usize = sctp_dcep_open_write(&message, out[0:32]);
+    if written.error_id != 0 || written.value != 12usize {
+        return 40i32;
+    }
+
+    const parsed: !SctpDcepOpenMessage = sctp_dcep_open_parse(out[0:written.value]);
+    if parsed.error_id != 0 {
+        return 41i32;
+    }
+    if parsed.value.channel_type != channel_type {
+        return 42i32;
+    }
+    if parsed.value.priority != 123u16 || parsed.value.reliability_parameter != 456u32 {
+        return 43i32;
+    }
+    if parsed.value.label.len != 0usize || parsed.value.protocol.len != 0usize {
+        return 44i32;
+    }
+
     return 0i32;
 }
 
@@ -128,6 +170,42 @@ fn main() i32 {
     result = check_malformed_cases();
     if result != 0i32 {
         printf("DCEP malformed tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_RELIABLE);
+    if result != 0i32 {
+        printf("DCEP reliable channel tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_RELIABLE_UNORDERED);
+    if result != 0i32 {
+        printf("DCEP reliable unordered channel tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT);
+    if result != 0i32 {
+        printf("DCEP partial reliable rexmit ordered tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_REXMIT_UNORDERED);
+    if result != 0i32 {
+        printf("DCEP partial reliable rexmit unordered tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED);
+    if result != 0i32 {
+        printf("DCEP partial reliable timed ordered tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_channel_type_roundtrip(SCTP_DCEP_CHANNEL_TYPE_PARTIAL_RELIABLE_TIMED_UNORDERED);
+    if result != 0i32 {
+        printf("DCEP partial reliable timed unordered tests failed: %d\n", result);
         return 1i32;
     }
 
