@@ -1,0 +1,163 @@
+{
+  "rtp_valid_packets": [
+    {
+      "name": "minimal_rtp_header",
+      "hex": "800000010000000112345678",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "extension": false,
+        "csrc_count": 0,
+        "marker": false,
+        "payload_type": 0,
+        "sequence_number": 1,
+        "timestamp": 1,
+        "ssrc": 305419896
+      }
+    },
+    {
+      "name": "rtp_with_csrc",
+      "hex": "8200000100000001123456780000000110000002",
+      "expected": {
+        "csrc_count": 2,
+        "csrc": [1, 268435458]
+      }
+    },
+    {
+      "name": "rtp_with_one_byte_extension",
+      "hex": "900000010000000112345678bede000110300000",
+      "expected": {
+        "extension": true,
+        "extension_profile": 48862,
+        "extension_length_words": 1,
+        "extension_element_count": 1
+      }
+    },
+    {
+      "name": "rtp_with_two_byte_extension",
+      "hex": "9000000100000001123456781000000103020005",
+      "expected": {
+        "extension": true,
+        "extension_profile": 4096,
+        "extension_length_words": 1,
+        "extension_element_count": 1
+      }
+    },
+    {
+      "name": "rtp_with_padding",
+      "hex": "a0000001000000011234567800000004",
+      "expected": {
+        "padding": true,
+        "padding_size": 4
+      }
+    }
+  ],
+  "rtp_invalid_packets": [
+    {
+      "name": "rtp_truncated_header",
+      "hex": "80",
+      "error": "RTP_PACKET_TOO_SMALL"
+    },
+    {
+      "name": "rtp_invalid_version",
+      "hex": "000000010000000112345678",
+      "error": "RTP_INVALID_VERSION"
+    },
+    {
+      "name": "rtp_truncated_csrc",
+      "hex": "8100000100000001123456780000",
+      "error": "RTP_INVALID_CSRC_LENGTH"
+    },
+    {
+      "name": "rtp_truncated_extension_header",
+      "hex": "900000010000000112345678bede",
+      "error": "RTP_INVALID_EXTENSION_HEADER"
+    },
+    {
+      "name": "rtp_extension_length_overrun",
+      "hex": "900000010000000112345678bede000200000000",
+      "error": "RTP_INVALID_EXTENSION_LENGTH"
+    },
+    {
+      "name": "rtp_invalid_padding_zero",
+      "hex": "a0000001000000011234567800000000",
+      "error": "RTP_INVALID_PADDING"
+    },
+    {
+      "name": "rtp_invalid_padding_overrun",
+      "hex": "a0000001000000011234567800000010",
+      "error": "RTP_INVALID_PADDING"
+    }
+  ],
+  "extension_boundary_cases": [
+    {
+      "name": "one_byte_extension_element_truncated",
+      "profile": "one-byte",
+      "hex": "23aabbcc",
+      "error": "RTP_EXTENSION_ELEMENT_TRUNCATED"
+    },
+    {
+      "name": "one_byte_extension_reserved_id_terminates",
+      "profile": "one-byte",
+      "hex": "1030f0ff",
+      "expected_elements": 1
+    },
+    {
+      "name": "two_byte_extension_element_truncated",
+      "profile": "two-byte",
+      "hex": "0403aabb",
+      "error": "RTP_EXTENSION_ELEMENT_TRUNCATED"
+    },
+    {
+      "name": "two_byte_extension_padding_then_element",
+      "profile": "two-byte",
+      "hex": "00000501ff",
+      "expected_elements": 1
+    }
+  ],
+  "rtcp_valid_packets": [
+    {
+      "name": "rtcp_sr_minimal",
+      "hex": "80c80006112233440000000100000002000000030000000400000005",
+      "expected": {
+        "version": 2,
+        "padding": false,
+        "count": 0,
+        "packet_type": 200,
+        "length_words_minus_one": 6,
+        "packet_len_bytes": 28
+      }
+    },
+    {
+      "name": "rtcp_rr_minimal",
+      "hex": "80c9000111223344",
+      "expected": {
+        "packet_type": 201,
+        "length_words_minus_one": 1,
+        "packet_len_bytes": 8
+      }
+    }
+  ],
+  "rtcp_invalid_packets": [
+    {
+      "name": "rtcp_truncated_header",
+      "hex": "80c8",
+      "error": "RTCP_PACKET_TOO_SMALL"
+    },
+    {
+      "name": "rtcp_invalid_version",
+      "hex": "40c80006112233440000000100000002000000030000000400000005",
+      "error": "RTCP_INVALID_VERSION"
+    },
+    {
+      "name": "rtcp_invalid_packet_type",
+      "hex": "807f000111223344",
+      "error": "RTCP_INVALID_PACKET_TYPE"
+    },
+    {
+      "name": "rtcp_length_overrun",
+      "hex": "80c8000611223344",
+      "error": "RTCP_INVALID_LENGTH"
+    }
+  ]
+}
