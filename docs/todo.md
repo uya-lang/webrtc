@@ -353,7 +353,7 @@
 - [x] 实现 SACK。
 - [x] 实现 HEARTBEAT。
 - [x] 实现 ABORT / SHUTDOWN。
-- [ ] 实现 TSN tracking。
+- [x] 实现 TSN tracking。
 - [ ] 实现 retransmission timer。
 - [ ] 实现 ordered / unordered delivery。
 - [x] 实现 reliable / max_retransmits / max_packet_lifetime。

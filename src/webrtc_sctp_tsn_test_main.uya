@@ -1,0 +1,201 @@
+use libc.printf;
+use webrtc.sctp.packet;
+use webrtc.sctp.tsn;
+
+fn check_receive_gap_and_fill() i32 {
+    var tracker: SctpTsnTracker = sctp_tsn_tracker_make();
+    if (sctp_tsn_tracker_set_initial_tsn(&tracker, 1000u32)).error_id != 0 {
+        return 10i32;
+    }
+
+    const first: !bool = sctp_tsn_tracker_record_received(&tracker, 1000u32);
+    if first.error_id != 0 || !first.value {
+        return 11i32;
+    }
+
+    const second: !bool = sctp_tsn_tracker_record_received(&tracker, 1002u32);
+    if second.error_id != 0 || !second.value {
+        return 12i32;
+    }
+
+    const sack_gap: !SctpSackChunk = sctp_tsn_tracker_build_sack(&tracker, 4096u32);
+    if sack_gap.error_id != 0 {
+        return 13i32;
+    }
+    if sack_gap.value.cumulative_tsn_ack != 1000u32 {
+        return 14i32;
+    }
+    if sack_gap.value.gap_ack_block_count != 1usize {
+        return 15i32;
+    }
+    if sack_gap.value.gap_ack_blocks[0usize].start != 2u16 || sack_gap.value.gap_ack_blocks[0usize].end != 2u16 {
+        return 16i32;
+    }
+
+    const third: !bool = sctp_tsn_tracker_record_received(&tracker, 1001u32);
+    if third.error_id != 0 || !third.value {
+        return 17i32;
+    }
+    if tracker.cumulative_tsn_ack != 1002u32 {
+        return 18i32;
+    }
+
+    const sack_filled: !SctpSackChunk = sctp_tsn_tracker_build_sack(&tracker, 2048u32);
+    if sack_filled.error_id != 0 {
+        return 19i32;
+    }
+    if sack_filled.value.cumulative_tsn_ack != 1002u32 {
+        return 20i32;
+    }
+    if sack_filled.value.gap_ack_block_count != 0usize {
+        return 21i32;
+    }
+    if sack_filled.value.duplicate_tsn_count != 0usize {
+        return 22i32;
+    }
+
+    return 0i32;
+}
+
+fn check_wraparound_and_duplicate_sack() i32 {
+    var tracker: SctpTsnTracker = sctp_tsn_tracker_make();
+    if (sctp_tsn_tracker_set_initial_tsn(&tracker, 0xFFFFFFFEu32)).error_id != 0 {
+        return 30i32;
+    }
+
+    if (sctp_tsn_tracker_record_received(&tracker, 0xFFFFFFFEu32)).error_id != 0 {
+        return 31i32;
+    }
+    if (sctp_tsn_tracker_record_received(&tracker, 0xFFFFFFFFu32)).error_id != 0 {
+        return 32i32;
+    }
+    if (sctp_tsn_tracker_record_received(&tracker, 0u32)).error_id != 0 {
+        return 33i32;
+    }
+    const duplicate: !bool = sctp_tsn_tracker_record_received(&tracker, 0u32);
+    if duplicate.error_id != 0 || duplicate.value {
+        return 34i32;
+    }
+    if tracker.cumulative_tsn_ack != 0u32 {
+        return 35i32;
+    }
+
+    const sack: !SctpSackChunk = sctp_tsn_tracker_build_sack(&tracker, 1024u32);
+    if sack.error_id != 0 {
+        return 36i32;
+    }
+    if sack.value.cumulative_tsn_ack != 0u32 {
+        return 37i32;
+    }
+    if sack.value.duplicate_tsn_count != 1usize || sack.value.duplicate_tsns[0usize] != 0u32 {
+        return 38i32;
+    }
+    if sack.value.gap_ack_block_count != 0usize {
+        return 39i32;
+    }
+
+    return 0i32;
+}
+
+fn check_outstanding_and_acknowledge_sack() i32 {
+    var tracker: SctpTsnTracker = sctp_tsn_tracker_make();
+    if (sctp_tsn_tracker_set_initial_tsn(&tracker, 2000u32)).error_id != 0 {
+        return 40i32;
+    }
+
+    const tsn0: !u32 = sctp_tsn_tracker_next_send_tsn(&tracker);
+    const tsn1: !u32 = sctp_tsn_tracker_next_send_tsn(&tracker);
+    const tsn2: !u32 = sctp_tsn_tracker_next_send_tsn(&tracker);
+    if tsn0.error_id != 0 || tsn0.value != 2000u32 {
+        return 41i32;
+    }
+    if tsn1.error_id != 0 || tsn1.value != 2001u32 {
+        return 42i32;
+    }
+    if tsn2.error_id != 0 || tsn2.value != 2002u32 {
+        return 43i32;
+    }
+
+    if (sctp_tsn_tracker_track_outstanding(&tracker, tsn0.value, 10u64)).error_id != 0 {
+        return 44i32;
+    }
+    if (sctp_tsn_tracker_track_outstanding(&tracker, tsn1.value, 20u64)).error_id != 0 {
+        return 45i32;
+    }
+    if (sctp_tsn_tracker_track_outstanding(&tracker, tsn2.value, 30u64)).error_id != 0 {
+        return 46i32;
+    }
+    if (sctp_tsn_tracker_track_outstanding(&tracker, tsn1.value, 25u64)).error_id != 0 {
+        return 47i32;
+    }
+    if tracker.outstanding[1usize].sent_us != 25u64 || tracker.outstanding[1usize].retransmit_count != 1u32 {
+        return 48i32;
+    }
+
+    var sack: SctpSackChunk = sctp_sack_chunk_make();
+    sack.cumulative_tsn_ack = 2000u32;
+    sack.gap_ack_block_count = 1usize;
+    sack.gap_ack_blocks[0usize].start = 2u16;
+    sack.gap_ack_blocks[0usize].end = 2u16;
+
+    const acked: !usize = sctp_tsn_tracker_acknowledge_sack(&tracker, &sack);
+    if acked.error_id != 0 || acked.value != 2usize {
+        return 49i32;
+    }
+    if tracker.outstanding_count != 1usize {
+        return 50i32;
+    }
+    if tracker.outstanding[0usize].tsn != 2001u32 {
+        return 51i32;
+    }
+    if tracker.outstanding[0usize].retransmit_count != 1u32 || tracker.outstanding[0usize].sent_us != 25u64 {
+        return 52i32;
+    }
+
+    const ack_single: !bool = sctp_tsn_tracker_ack_outstanding_tsn(&tracker, 2001u32);
+    if ack_single.error_id != 0 || !ack_single.value {
+        return 53i32;
+    }
+    if tracker.outstanding_count != 0usize {
+        return 54i32;
+    }
+
+    sctp_tsn_tracker_reset(&tracker);
+    if tracker.has_initial_tsn || tracker.cumulative_tsn_ack != 0u32 {
+        return 55i32;
+    }
+    if tracker.highest_received_tsn != 0u32 || tracker.has_highest_received_tsn {
+        return 56i32;
+    }
+    if tracker.highest_sent_tsn != 0u32 || tracker.has_highest_sent_tsn {
+        return 57i32;
+    }
+    if tracker.next_send_tsn != 0u32 || tracker.received_count != 0usize || tracker.duplicate_count != 0usize {
+        return 58i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_receive_gap_and_fill();
+    if result != 0i32 {
+        printf("TSN receive gap test failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_wraparound_and_duplicate_sack();
+    if result != 0i32 {
+        printf("TSN wrap-around test failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_outstanding_and_acknowledge_sack();
+    if result != 0i32 {
+        printf("TSN outstanding test failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("TSN tracking tests passed\n");
+    return 0i32;
+}

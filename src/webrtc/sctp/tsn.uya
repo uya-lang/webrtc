@@ -1,0 +1,483 @@
+// webrtc.sctp.tsn - SCTP TSN tracking helpers
+// Module: src/webrtc/sctp/tsn.uya -> use webrtc.sctp.tsn;
+
+use webrtc.sctp.packet;
+
+export const SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS: usize = 512usize;
+export const SCTP_TSN_TRACKER_MAX_DUPLICATE_TSNS: usize = 32usize;
+export const SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS: usize = 512usize;
+
+export error SctpTsnTrackerInvalidState;
+export error SctpTsnTrackerOverflow;
+export error SctpTsnTrackerNotFound;
+
+export struct SctpTsnOutstandingEntry {
+    present: bool = false,
+    tsn: u32 = 0u32,
+    sent_us: u64 = 0u64,
+    retransmit_count: u32 = 0u32,
+}
+
+export struct SctpTsnTracker {
+    has_initial_tsn: bool = false,
+    initial_tsn: u32 = 0u32,
+    cumulative_tsn_ack: u32 = 0u32,
+    highest_received_tsn: u32 = 0u32,
+    has_highest_received_tsn: bool = false,
+    highest_sent_tsn: u32 = 0u32,
+    has_highest_sent_tsn: bool = false,
+    next_send_tsn: u32 = 0u32,
+    received_count: usize = 0usize,
+    received_tsns: [u32: SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS] = [],
+    duplicate_count: usize = 0usize,
+    duplicate_tsns: [u32: SCTP_TSN_TRACKER_MAX_DUPLICATE_TSNS] = [],
+    outstanding_count: usize = 0usize,
+    outstanding: [SctpTsnOutstandingEntry: SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS] = [],
+}
+
+fn sctp_tsn_tracker_make_default() SctpTsnTracker {
+    return SctpTsnTracker{};
+}
+
+fn sctp_tsn_tracker_sequence_next(tsn: u32) u32 {
+    if tsn == 0xFFFFFFFFu32 {
+        return 0u32;
+    }
+    return tsn + 1u32;
+}
+
+fn sctp_tsn_tracker_sequence_prev(tsn: u32) u32 {
+    if tsn == 0u32 {
+        return 0xFFFFFFFFu32;
+    }
+    return tsn - 1u32;
+}
+
+fn sctp_tsn_tracker_distance_forward(tsn: u32, base: u32) u64 {
+    if tsn >= base {
+        return (tsn as u64) - (base as u64);
+    }
+    return 4294967296u64 - ((base as u64) - (tsn as u64));
+}
+
+fn sctp_tsn_tracker_is_newer(tsn: u32, base: u32) bool {
+    const distance: u64 = sctp_tsn_tracker_distance_forward(tsn, base);
+    return distance != 0u64 && distance < 2147483648u64;
+}
+
+fn sctp_tsn_tracker_received_find_index(tracker: &SctpTsnTracker, tsn: u32) !usize {
+    if tracker == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    var index: usize = 0usize;
+    while index < tracker.received_count {
+        if tracker.received_tsns[index] == tsn {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return error.SctpTsnTrackerNotFound;
+}
+
+fn sctp_tsn_tracker_outstanding_find_index(tracker: &SctpTsnTracker, tsn: u32) !usize {
+    if tracker == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    var index: usize = 0usize;
+    while index < tracker.outstanding_count {
+        if tracker.outstanding[index].present && tracker.outstanding[index].tsn == tsn {
+            return index;
+        }
+        index = index + 1usize;
+    }
+    return error.SctpTsnTrackerNotFound;
+}
+
+fn sctp_tsn_tracker_sort_received_by_distance(tracker: &SctpTsnTracker, values: &[u32: SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS], count: usize, sorted: &[u32: SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS]) !void {
+    if tracker == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+    if count > values.len || count > sorted.len {
+        return error.SctpTsnTrackerOverflow;
+    }
+
+    var index: usize = 0usize;
+    while index < count {
+        if index >= values.len || index >= sorted.len {
+            return error.SctpTsnTrackerOverflow;
+        }
+        sorted[index] = values[index];
+        index = index + 1usize;
+    }
+
+    var outer: usize = 1usize;
+    while outer < count {
+        const key: u32 = sorted[outer];
+        const key_distance: u64 = sctp_tsn_tracker_distance_forward(key, tracker.cumulative_tsn_ack);
+        var inner: usize = outer;
+        while inner > 0usize {
+            const previous: u32 = sorted[inner - 1usize];
+            const previous_distance: u64 = sctp_tsn_tracker_distance_forward(previous, tracker.cumulative_tsn_ack);
+            if previous_distance <= key_distance {
+                break;
+            }
+            if inner >= sorted.len {
+                return error.SctpTsnTrackerOverflow;
+            }
+            sorted[inner] = previous;
+            inner = inner - 1usize;
+        }
+        if inner >= sorted.len {
+            return error.SctpTsnTrackerOverflow;
+        }
+        sorted[inner] = key;
+        outer = outer + 1usize;
+    }
+    return;
+}
+
+fn sctp_tsn_tracker_remove_acked_received(tracker: &SctpTsnTracker) void {
+    if tracker == null {
+        return;
+    }
+
+    var write_index: usize = 0usize;
+    var read_index: usize = 0usize;
+    while read_index < tracker.received_count {
+        const tsn: u32 = tracker.received_tsns[read_index];
+        if sctp_tsn_tracker_is_newer(tsn, tracker.cumulative_tsn_ack) {
+            tracker.received_tsns[write_index] = tsn;
+            write_index = write_index + 1usize;
+        }
+        read_index = read_index + 1usize;
+    }
+    tracker.received_count = write_index;
+}
+
+fn sctp_tsn_tracker_recalculate_cumulative_ack(tracker: &SctpTsnTracker) void {
+    if tracker == null || !tracker.has_initial_tsn {
+        return;
+    }
+
+    var candidate: u32 = tracker.cumulative_tsn_ack;
+    while true {
+        const next_tsn: u32 = sctp_tsn_tracker_sequence_next(candidate);
+        if sctp_tsn_tracker_received_contains(tracker, next_tsn) {
+            candidate = next_tsn;
+            continue;
+        }
+        break;
+    }
+
+    tracker.cumulative_tsn_ack = candidate;
+    sctp_tsn_tracker_remove_acked_received(tracker);
+}
+
+fn sctp_tsn_tracker_received_contains(tracker: &SctpTsnTracker, tsn: u32) bool {
+    if tracker == null {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < tracker.received_count {
+        if tracker.received_tsns[index] == tsn {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+fn sctp_tsn_tracker_gap_block_for_run_start(tracker: &SctpTsnTracker, tsn: u32) !u16 {
+    const distance: u64 = sctp_tsn_tracker_distance_forward(tsn, tracker.cumulative_tsn_ack);
+    if distance > 65535u64 {
+        return error.SctpTsnTrackerOverflow;
+    }
+    return distance as u16;
+}
+
+/// Create a default TSN tracker.
+export fn sctp_tsn_tracker_make() SctpTsnTracker {
+    return sctp_tsn_tracker_make_default();
+}
+
+/// Reset TSN tracking back to an empty state.
+export fn sctp_tsn_tracker_reset(tracker: &SctpTsnTracker) void {
+    if tracker == null {
+        return;
+    }
+
+    tracker.has_initial_tsn = false;
+    tracker.initial_tsn = 0u32;
+    tracker.cumulative_tsn_ack = 0u32;
+    tracker.highest_received_tsn = 0u32;
+    tracker.has_highest_received_tsn = false;
+    tracker.highest_sent_tsn = 0u32;
+    tracker.has_highest_sent_tsn = false;
+    tracker.next_send_tsn = 0u32;
+    tracker.received_count = 0usize;
+    tracker.duplicate_count = 0usize;
+    tracker.outstanding_count = 0usize;
+}
+
+/// Initialize the tracker with the association's initial TSN.
+export fn sctp_tsn_tracker_set_initial_tsn(tracker: &SctpTsnTracker, initial_tsn: u32) !void {
+    if tracker == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    tracker.has_initial_tsn = true;
+    tracker.initial_tsn = initial_tsn;
+    tracker.cumulative_tsn_ack = sctp_tsn_tracker_sequence_prev(initial_tsn);
+    tracker.highest_received_tsn = sctp_tsn_tracker_sequence_prev(initial_tsn);
+    tracker.has_highest_received_tsn = false;
+    tracker.highest_sent_tsn = sctp_tsn_tracker_sequence_prev(initial_tsn);
+    tracker.has_highest_sent_tsn = false;
+    tracker.next_send_tsn = initial_tsn;
+    tracker.received_count = 0usize;
+    tracker.duplicate_count = 0usize;
+    tracker.outstanding_count = 0usize;
+    return;
+}
+
+/// Allocate the next outgoing TSN from the tracker.
+export fn sctp_tsn_tracker_next_send_tsn(tracker: &SctpTsnTracker) !u32 {
+    if tracker == null || !tracker.has_initial_tsn {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    const tsn: u32 = tracker.next_send_tsn;
+    tracker.next_send_tsn = sctp_tsn_tracker_sequence_next(tracker.next_send_tsn);
+    if !tracker.has_highest_sent_tsn || sctp_tsn_tracker_is_newer(tsn, tracker.highest_sent_tsn) {
+        tracker.highest_sent_tsn = tsn;
+        tracker.has_highest_sent_tsn = true;
+    }
+    return tsn;
+}
+
+/// Record a packet that has been sent but not yet acknowledged.
+export fn sctp_tsn_tracker_track_outstanding(tracker: &SctpTsnTracker, tsn: u32, sent_us: u64) !void {
+    if tracker == null || !tracker.has_initial_tsn {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    var scan_index: usize = 0usize;
+    while scan_index < tracker.outstanding_count {
+        if scan_index >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        if tracker.outstanding[scan_index].present && tracker.outstanding[scan_index].tsn == tsn {
+            tracker.outstanding[scan_index].sent_us = sent_us;
+            tracker.outstanding[scan_index].retransmit_count = tracker.outstanding[scan_index].retransmit_count + 1u32;
+            return;
+        }
+        scan_index = scan_index + 1usize;
+    }
+
+    if tracker.outstanding_count >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+        return error.SctpTsnTrackerOverflow;
+    }
+
+    const slot: usize = tracker.outstanding_count;
+    tracker.outstanding[slot].present = true;
+    tracker.outstanding[slot].tsn = tsn;
+    tracker.outstanding[slot].sent_us = sent_us;
+    tracker.outstanding[slot].retransmit_count = 0u32;
+    tracker.outstanding_count = slot + 1usize;
+
+    if !tracker.has_highest_sent_tsn || sctp_tsn_tracker_is_newer(tsn, tracker.highest_sent_tsn) {
+        tracker.highest_sent_tsn = tsn;
+        tracker.has_highest_sent_tsn = true;
+    }
+    return;
+}
+
+/// Mark one outstanding TSN as acknowledged.
+export fn sctp_tsn_tracker_ack_outstanding_tsn(tracker: &SctpTsnTracker, tsn: u32) !bool {
+    if tracker == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    const index_result: !usize = sctp_tsn_tracker_outstanding_find_index(tracker, tsn);
+    if index_result.error_id != 0 {
+        if index_result.error_id == @error_id(error.SctpTsnTrackerNotFound) {
+            return false;
+        }
+        return index_result.error_id;
+    }
+
+    var index: usize = index_result.value;
+    if index >= tracker.outstanding_count || index >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+        return error.SctpTsnTrackerInvalidState;
+    }
+    while index + 1usize < tracker.outstanding_count {
+        if index + 1usize >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        tracker.outstanding[index].present = tracker.outstanding[index + 1usize].present;
+        tracker.outstanding[index].tsn = tracker.outstanding[index + 1usize].tsn;
+        tracker.outstanding[index].sent_us = tracker.outstanding[index + 1usize].sent_us;
+        tracker.outstanding[index].retransmit_count = tracker.outstanding[index + 1usize].retransmit_count;
+        index = index + 1usize;
+    }
+    tracker.outstanding_count = tracker.outstanding_count - 1usize;
+    return true;
+}
+
+/// Apply a received TSN to the tracker and advance cumulative acknowledgment when possible.
+export fn sctp_tsn_tracker_record_received(tracker: &SctpTsnTracker, tsn: u32) !bool {
+    if tracker == null || !tracker.has_initial_tsn {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    if !sctp_tsn_tracker_is_newer(tsn, tracker.cumulative_tsn_ack) {
+        if tracker.duplicate_count >= SCTP_TSN_TRACKER_MAX_DUPLICATE_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        tracker.duplicate_tsns[tracker.duplicate_count] = tsn;
+        tracker.duplicate_count = tracker.duplicate_count + 1usize;
+        return false;
+    }
+
+    if sctp_tsn_tracker_received_contains(tracker, tsn) {
+        if tracker.duplicate_count >= SCTP_TSN_TRACKER_MAX_DUPLICATE_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        tracker.duplicate_tsns[tracker.duplicate_count] = tsn;
+        tracker.duplicate_count = tracker.duplicate_count + 1usize;
+        return false;
+    }
+
+    if tracker.received_count >= SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS {
+        return error.SctpTsnTrackerOverflow;
+    }
+
+    tracker.received_tsns[tracker.received_count] = tsn;
+    tracker.received_count = tracker.received_count + 1usize;
+    if !tracker.has_highest_received_tsn || sctp_tsn_tracker_is_newer(tsn, tracker.highest_received_tsn) {
+        tracker.highest_received_tsn = tsn;
+        tracker.has_highest_received_tsn = true;
+    }
+
+    sctp_tsn_tracker_recalculate_cumulative_ack(tracker);
+    return true;
+}
+
+/// Build an SCTP SACK chunk from the tracked received TSNs.
+export fn sctp_tsn_tracker_build_sack(tracker: &SctpTsnTracker, advertised_receiver_window_credit: u32) !SctpSackChunk {
+    if tracker == null || !tracker.has_initial_tsn {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    var sack: SctpSackChunk = sctp_sack_chunk_make();
+    sack.flags = 0u8;
+    sack.cumulative_tsn_ack = tracker.cumulative_tsn_ack;
+    sack.advertised_receiver_window_credit = advertised_receiver_window_credit;
+
+    var duplicate_index: usize = 0usize;
+    while duplicate_index < tracker.duplicate_count {
+        if duplicate_index >= SCTP_SACK_MAX_DUPLICATE_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        sack.duplicate_tsns[duplicate_index] = tracker.duplicate_tsns[duplicate_index];
+        duplicate_index = duplicate_index + 1usize;
+    }
+    sack.duplicate_tsn_count = tracker.duplicate_count;
+
+    if tracker.received_count == 0usize {
+        return sack;
+    }
+
+    var sorted: [u32: SCTP_TSN_TRACKER_MAX_RECEIVED_TSNS] = [];
+    try sctp_tsn_tracker_sort_received_by_distance(
+        tracker,
+        tracker.received_tsns[0usize:tracker.received_count],
+        tracker.received_count,
+        sorted[0usize:tracker.received_count],
+    );
+
+    var block_index: usize = 0usize;
+    var index: usize = 0usize;
+    while index < tracker.received_count {
+        const current: u32 = sorted[index];
+        if !sctp_tsn_tracker_is_newer(current, tracker.cumulative_tsn_ack) {
+            index = index + 1usize;
+            continue;
+        }
+
+        var run_start: u32 = current;
+        var run_end: u32 = current;
+        index = index + 1usize;
+        while index < tracker.received_count {
+            const next: u32 = sorted[index];
+            if sctp_tsn_tracker_is_newer(next, tracker.cumulative_tsn_ack) && sctp_tsn_tracker_sequence_next(run_end) == next {
+                run_end = next;
+                index = index + 1usize;
+                continue;
+            }
+            break;
+        }
+
+        if block_index >= SCTP_SACK_MAX_GAP_ACK_BLOCKS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        sack.gap_ack_blocks[block_index].start = try sctp_tsn_tracker_gap_block_for_run_start(tracker, run_start);
+        sack.gap_ack_blocks[block_index].end = try sctp_tsn_tracker_gap_block_for_run_start(tracker, run_end);
+        block_index = block_index + 1usize;
+    }
+
+    sack.gap_ack_block_count = block_index;
+    return sack;
+}
+
+/// Apply a SACK to the outstanding send map and drop acknowledged TSNs.
+export fn sctp_tsn_tracker_acknowledge_sack(tracker: &SctpTsnTracker, sack: &SctpSackChunk) !usize {
+    if tracker == null || sack == null {
+        return error.SctpTsnTrackerInvalidState;
+    }
+
+    var acked_count: usize = 0usize;
+    var read_index: usize = 0usize;
+    var write_index: usize = 0usize;
+    while read_index < tracker.outstanding_count {
+        if read_index >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+            return error.SctpTsnTrackerOverflow;
+        }
+        var is_acked: bool = false;
+        const entry_tsn: u32 = tracker.outstanding[read_index].tsn;
+        if !sctp_tsn_tracker_is_newer(entry_tsn, sack.cumulative_tsn_ack) {
+            is_acked = true;
+        } else {
+            var block_index: usize = 0usize;
+            while block_index < sack.gap_ack_block_count {
+                const start_distance: u64 = sack.gap_ack_blocks[block_index].start as u64;
+                const end_distance: u64 = sack.gap_ack_blocks[block_index].end as u64;
+                const distance: u64 = sctp_tsn_tracker_distance_forward(entry_tsn, sack.cumulative_tsn_ack);
+                if distance >= start_distance && distance <= end_distance {
+                    is_acked = true;
+                    break;
+                }
+                block_index = block_index + 1usize;
+            }
+        }
+
+        if is_acked {
+            acked_count = acked_count + 1usize;
+        } else {
+            if write_index >= SCTP_TSN_TRACKER_MAX_OUTSTANDING_TSNS {
+                return error.SctpTsnTrackerOverflow;
+            }
+            tracker.outstanding[write_index].present = tracker.outstanding[read_index].present;
+            tracker.outstanding[write_index].tsn = tracker.outstanding[read_index].tsn;
+            tracker.outstanding[write_index].sent_us = tracker.outstanding[read_index].sent_us;
+            tracker.outstanding[write_index].retransmit_count = tracker.outstanding[read_index].retransmit_count;
+            write_index = write_index + 1usize;
+        }
+        read_index = read_index + 1usize;
+    }
+
+    tracker.outstanding_count = write_index;
+    return acked_count;
+}
