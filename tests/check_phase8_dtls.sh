@@ -26,7 +26,9 @@ test -x tests/dtls_exporter_reference.py
 
 # OpenSSL handshake fixtures
 test -f tests/fixtures/dtls/openssl_handshake.json
+test -f tests/fixtures/dtls/browser_handshake.json
 test -x tests/dtls_openssl_interop.py
+test -x tests/dtls_browser_fixtures.py
 
 rg -Fq "dtls_test_check_record_parser_truncation_cases" src/webrtc_dtls_test_main.uya
 rg -Fq "dtls_test_check_record_epoch_and_sequence_cases" src/webrtc_dtls_test_main.uya
@@ -118,4 +120,5 @@ xxd -r -p tests/fixtures/dtls/certs/openssl_self_signed_p256.der.hex \
 python3 tests/dtls_vectors.py
 python3 tests/dtls_exporter_reference.py
 python3 tests/dtls_openssl_interop.py validate
+python3 tests/dtls_browser_fixtures.py
 ../uya/bin/uya run src/webrtc_dtls_test_main.uya

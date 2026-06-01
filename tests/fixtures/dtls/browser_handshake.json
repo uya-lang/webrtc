@@ -1,0 +1,42 @@
+{
+  "description": "Browser DTLS handshake capability fixtures derived from SDP offers",
+  "version": 1,
+  "cases": [
+    {
+      "name": "chrome_offer_dtls12",
+      "browser": "chrome",
+      "source_sdp": "tests/fixtures/sdp/chrome_offer.sdp",
+      "fingerprint_algorithm": "sha-256",
+      "fingerprint_hex": "4aadb9b13d500f125544a45e6db1b74f88137a5a0e6a9c3d113245ab6790cc10",
+      "setup_role": "actpass",
+      "transport_profiles": [
+        "UDP/TLS/RTP/SAVPF",
+        "UDP/DTLS/SCTP"
+      ],
+      "expected_use_srtp_profile_ids": [
+        "0x0001",
+        "0x0002"
+      ],
+      "expected_named_group": "secp256r1",
+      "expected_signature_scheme": "ecdsa_secp256r1_sha256"
+    },
+    {
+      "name": "firefox_offer_dtls12",
+      "browser": "firefox",
+      "source_sdp": "tests/fixtures/sdp/firefox_offer.sdp",
+      "fingerprint_algorithm": "sha-256",
+      "fingerprint_hex": "608879ae523b2c3491429e7757143de8b361f0471e767d6b415acc113d2792fe",
+      "setup_role": "actpass",
+      "transport_profiles": [
+        "UDP/TLS/RTP/SAVPF",
+        "DTLS/SCTP"
+      ],
+      "expected_use_srtp_profile_ids": [
+        "0x0001",
+        "0x0002"
+      ],
+      "expected_named_group": "secp256r1",
+      "expected_signature_scheme": "ecdsa_secp256r1_sha256"
+    }
+  ]
+}
