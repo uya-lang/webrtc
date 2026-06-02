@@ -1,0 +1,93 @@
+use libc.printf;
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+
+fn init_candidate(candidate: &IceCandidate, port: u16, priority: u32) !void {
+    ice_candidate_init(candidate);
+    try ice_candidate_set_foundation(candidate, "cap" as &[byte]);
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate.priority = priority;
+    try ice_transport_address_set(&candidate.address, ICE_ADDRESS_FAMILY_IPV4, "192.0.2.1" as &[byte], port);
+}
+
+fn seed_local_candidates(agent_ref: &IceAgent, count: usize) !void {
+    var index: usize = 0usize;
+    while index < count {
+        try init_candidate(&agent_ref.local_candidates[index], 40000u16 + (index as u16), 2122260223u32 - (index as u32));
+        index = index + 1usize;
+    }
+    agent_ref.local_candidate_count = count;
+}
+
+fn fill_remote_candidates(agent_ref: &IceAgent) i32 {
+    var index: usize = 0usize;
+    while index < ICE_MAX_REMOTE_CANDIDATES {
+        var candidate: IceCandidate = ice_candidate_make();
+        if init_candidate(&candidate, 50000u16 + (index as u16), 2110000000u32 - (index as u32)).error_id != 0 {
+            printf("ICE candidate cap remote seed failed\n");
+            return 10i32;
+        }
+        const add_result: !u16 = ice_agent_add_remote_candidate(agent_ref, &candidate);
+        if add_result.error_id != 0 || add_result.value != index as u16 {
+            printf("ICE candidate cap remote add failed\n");
+            return 11i32;
+        }
+        index = index + 1usize;
+    }
+    if agent_ref.remote_candidate_count != ICE_MAX_REMOTE_CANDIDATES {
+        printf("ICE candidate cap remote count mismatch\n");
+        return 12i32;
+    }
+
+    var overflow_candidate: IceCandidate = ice_candidate_make();
+    if init_candidate(&overflow_candidate, 50100u16, 2100000000u32).error_id != 0 {
+        return 13i32;
+    }
+    const overflow_result: !u16 = ice_agent_add_remote_candidate(agent_ref, &overflow_candidate);
+    if overflow_result.error_id == 0 {
+        printf("ICE candidate cap remote overflow accepted\n");
+        return 14i32;
+    }
+    if agent_ref.remote_candidate_count != ICE_MAX_REMOTE_CANDIDATES {
+        printf("ICE candidate cap remote overflow changed count\n");
+        return 15i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var agent_ref: IceAgent = ice_agent_make();
+    agent_ref.role = ICE_AGENT_ROLE_CONTROLLING;
+
+    var result: i32 = fill_remote_candidates(&agent_ref);
+    if result != 0i32 {
+        return result;
+    }
+
+    if seed_local_candidates(&agent_ref, 4usize).error_id != 0 {
+        return 20i32;
+    }
+    const full_pair_result: !usize = ice_agent_rebuild_checklist(&agent_ref);
+    if full_pair_result.error_id != 0 || full_pair_result.value != ICE_MAX_CANDIDATE_PAIRS {
+        printf("ICE candidate cap full pair rebuild failed\n");
+        return 21i32;
+    }
+
+    if seed_local_candidates(&agent_ref, 5usize).error_id != 0 {
+        return 22i32;
+    }
+    const overflow_pair_result: !usize = ice_agent_rebuild_checklist(&agent_ref);
+    if overflow_pair_result.error_id == 0 {
+        printf("ICE candidate cap pair overflow accepted\n");
+        return 23i32;
+    }
+    if agent_ref.checklist_count != 0usize {
+        printf("ICE candidate cap pair overflow left partial checklist\n");
+        return 24i32;
+    }
+
+    printf("ICE candidate upper limit tests passed\n");
+    return 0i32;
+}

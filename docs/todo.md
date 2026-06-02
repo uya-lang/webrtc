@@ -488,7 +488,7 @@
 - [x] RTP/RTCP fuzz。
 - [x] SCTP fuzz。
 - [x] SRTP replay/rollover property tests。
-- [ ] ICE candidate 上限测试。
+- [x] ICE candidate 上限测试。
 - [ ] SSRC/track/datachannel 上限测试。
 - [ ] JitterBuffer/reassembly 内存上限测试。
 - [ ] Secret logging audit。
