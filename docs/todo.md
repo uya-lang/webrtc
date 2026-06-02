@@ -503,7 +503,7 @@
 ## Phase 20：多平台
 
 - [x] 抽象 net backend。
-- [ ] Linux epoll backend 完成。
+- [x] Linux epoll backend 完成。
 - [ ] macOS kqueue backend。
 - [ ] Windows IOCP backend。
 - [ ] Android socket/thread/time 适配。

@@ -2,6 +2,8 @@
 // 模块路径：src/webrtc/net/worker.uya → use webrtc.net.worker;
 
 use libc.syscall;
+use webrtc.net.backend;
+use webrtc.net.linux_epoll;
 use webrtc.net.udp;
 use webrtc.ring;
 
@@ -60,6 +62,7 @@ export struct WorkerRunStats {
 
 export struct TransportWorkerConfig {
     worker_id: u32 = 0u32,
+    backend_kind: u8 = NET_BACKEND_KIND_AUTO,
     max_events: usize = WORKER_EPOLL_EVENT_MAX,
     command_queue_capacity: usize = 128,
     event_queue_capacity: usize = 128,
@@ -67,6 +70,9 @@ export struct TransportWorkerConfig {
 
 export struct TransportWorker {
     worker_id: u32 = 0u32,
+    backend_kind: u8 = NET_BACKEND_KIND_AUTO,
+    backend_capabilities: u32 = 0u32,
+    linux_epoll: LinuxEpollBackend = LinuxEpollBackend{},
     epoll_fd: i32 = -1,
     max_events: usize = WORKER_EPOLL_EVENT_MAX,
     timer_heap: WorkerTimerHeap = WorkerTimerHeap{},
@@ -92,9 +98,13 @@ fn worker_timer_less(a: WorkerTimer, b: WorkerTimer) bool {
 }
 
 fn worker_timer_heap_swap(heap: &WorkerTimerHeap, a: usize, b: usize) void {
-    const tmp: WorkerTimer = heap.items[a];
-    heap.items[a] = heap.items[b];
-    heap.items[b] = tmp;
+    if a < WORKER_TIMER_HEAP_MAX {
+        if b < WORKER_TIMER_HEAP_MAX {
+            const tmp: WorkerTimer = heap.items[a];
+            heap.items[a] = heap.items[b];
+            heap.items[b] = tmp;
+        }
+    }
 }
 
 fn worker_timer_heap_sift_up(heap: &WorkerTimerHeap, index: usize) void {
@@ -181,7 +191,10 @@ export fn worker_timer_heap_pop_ready(heap: &WorkerTimerHeap, now_us: u64) !Work
     const ready: WorkerTimer = heap.items[0];
     heap.len = heap.len - 1;
     if heap.len > 0 {
-        heap.items[0] = heap.items[heap.len];
+        const last_index: usize = heap.len;
+        if last_index < WORKER_TIMER_HEAP_MAX {
+            heap.items[0] = heap.items[last_index];
+        }
         worker_timer_heap_sift_down(heap, 0);
     }
     return ready;
@@ -196,8 +209,20 @@ export fn transport_worker_init(worker: &TransportWorker, config: TransportWorke
     if config.max_events == 0 || config.max_events > WORKER_EPOLL_EVENT_MAX {
         return error.WorkerConfigInvalid;
     }
+    const backend_desc: NetBackendDescriptor = try net_backend_select(config.backend_kind);
+    if backend_desc.kind != NET_BACKEND_KIND_LINUX_EPOLL {
+        return error.WorkerConfigInvalid;
+    }
+    try net_backend_require_capability(&backend_desc, NET_BACKEND_CAP_EDGE_POLL);
+    try net_backend_require_capability(&backend_desc, NET_BACKEND_CAP_TIMER_QUEUE);
+    var epoll_config: LinuxEpollBackendConfig = linux_epoll_backend_config_make();
+    epoll_config.max_events = config.max_events;
+    const epoll_backend: LinuxEpollBackend = try linux_epoll_backend_open(epoll_config);
 
     worker.worker_id = config.worker_id;
+    worker.backend_kind = backend_desc.kind;
+    worker.backend_capabilities = backend_desc.capabilities;
+    worker.linux_epoll = epoll_backend;
     worker.max_events = config.max_events;
     worker.command_queue_capacity = config.command_queue_capacity;
     worker.event_queue_capacity = config.event_queue_capacity;
@@ -206,7 +231,7 @@ export fn transport_worker_init(worker: &TransportWorker, config: TransportWorke
     worker_timer_heap_init(&worker.timer_heap);
     try ring_queue_init(&worker.command_queue, config.command_queue_capacity);
     try ring_queue_init(&worker.event_queue, config.event_queue_capacity);
-    worker.epoll_fd = try sys_epoll_create1(EPOLL_CLOEXEC);
+    worker.epoll_fd = worker.linux_epoll.epoll_fd;
 }
 
 export fn transport_worker_close(worker: &TransportWorker) void {
@@ -214,21 +239,18 @@ export fn transport_worker_close(worker: &TransportWorker) void {
         return;
     }
     if worker.epoll_fd >= 0 {
-        _ = sys_close(worker.epoll_fd) catch {};
+        linux_epoll_backend_close(&worker.linux_epoll);
     }
     worker.epoll_fd = -1;
+    worker.backend_kind = NET_BACKEND_KIND_AUTO;
+    worker.backend_capabilities = 0u32;
 }
 
 export fn transport_worker_register_udp_socket(worker: &TransportWorker, socket: &UdpSocket, interest_mask: u32) !void {
     if worker == null || worker.epoll_fd < 0 {
         return error.WorkerConfigInvalid;
     }
-    var ev: EpollEvent = EpollEvent{
-        events: interest_mask,
-        _pad: 0u32,
-        data: socket.fd as u64,
-    };
-    _ = try sys_epoll_ctl(worker.epoll_fd, EPOLL_CTL_ADD, socket.fd, &ev);
+    try linux_epoll_backend_register_fd(&worker.linux_epoll, socket.fd, interest_mask);
 }
 
 export fn transport_worker_enqueue_command(worker: &TransportWorker, command: WorkerCommand) !void {
@@ -267,7 +289,11 @@ export fn transport_worker_pop_event(worker: &TransportWorker) !WorkerEvent {
     if token_result.error_id != 0 {
         return error.WorkerQueueEmpty;
     }
-    return worker.event_slots[worker_queue_slot(token_result)];
+    const slot: usize = worker_queue_slot(token_result.value);
+    if slot >= WORKER_QUEUE_CAPACITY_MAX {
+        return error.WorkerQueueEmpty;
+    }
+    return worker.event_slots[slot];
 }
 
 export fn transport_worker_arm_timer(worker: &TransportWorker, timer: WorkerTimer) !void {
@@ -277,7 +303,7 @@ export fn transport_worker_arm_timer(worker: &TransportWorker, timer: WorkerTime
     try worker_timer_heap_push(&worker.timer_heap, timer);
 }
 
-fn transport_worker_on_command(worker: &TransportWorker, command: WorkerCommand) !void {
+fn transport_worker_on_command(worker: &TransportWorker, command: &WorkerCommand) !void {
     if command.kind == WORKER_COMMAND_KIND_WAKE {
         try transport_worker_publish_event(worker, WorkerEvent{
             kind: WORKER_EVENT_KIND_WAKE_ACK,
@@ -302,8 +328,11 @@ fn transport_worker_drain_commands(worker: &TransportWorker) !usize {
     var drained: usize = 0;
     while !ring_queue_is_empty(&worker.command_queue) {
         const token: u64 = try ring_queue_pop(&worker.command_queue);
-        const command: WorkerCommand = worker.command_slots[worker_queue_slot(token)];
-        try transport_worker_on_command(worker, command);
+        const slot: usize = worker_queue_slot(token);
+        if slot >= WORKER_QUEUE_CAPACITY_MAX {
+            return error.WorkerQueueEmpty;
+        }
+        try transport_worker_on_command(worker, &worker.command_slots[slot]);
         drained = drained + 1;
     }
     return drained;
@@ -316,7 +345,7 @@ fn transport_worker_collect_ready_timers(worker: &TransportWorker, now_us: u64) 
         if timer_result.error_id != 0 {
             return fired;
         }
-        const timer: WorkerTimer = timer_result;
+        const timer: WorkerTimer = timer_result.value;
         try transport_worker_publish_event(worker, WorkerEvent{
             kind: WORKER_EVENT_KIND_TIMER_FIRED,
             transport_id: timer.id,
@@ -329,15 +358,20 @@ fn transport_worker_collect_ready_timers(worker: &TransportWorker, now_us: u64) 
 
 fn transport_worker_poll_epoll(worker: &TransportWorker, timeout_ms: i32) !usize {
     if worker.epoll_fd < 0 {
-        return 0;
+        return 0usize;
     }
 
-    const poll_result: !i32 = sys_epoll_wait(worker.epoll_fd, &worker.epoll_events[0], worker.max_events as i32, timeout_ms);
+    const poll_result: !usize = linux_epoll_backend_wait(
+        &worker.linux_epoll,
+        &worker.epoll_events[0],
+        worker.max_events,
+        timeout_ms,
+    );
     if poll_result.error_id != 0 {
-        return 0;
+        return 0usize;
     }
 
-    const count: usize = poll_result as usize;
+    const count: usize = poll_result.value;
     var i: usize = 0;
     while i < count {
         const fd: i32 = worker.epoll_events[i].data as i32;

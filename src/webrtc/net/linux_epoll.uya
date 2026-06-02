@@ -1,0 +1,117 @@
+// webrtc.net.linux_epoll - Linux epoll backend implementation
+// Module path: src/webrtc/net/linux_epoll.uya -> use webrtc.net.linux_epoll;
+
+use libc.syscall;
+use webrtc.net.backend;
+
+export const LINUX_EPOLL_BACKEND_EVENT_MAX: usize = 64usize;
+
+export error LinuxEpollBackendInvalid;
+
+export struct LinuxEpollBackendConfig {
+    max_events: usize = LINUX_EPOLL_BACKEND_EVENT_MAX,
+    close_on_exec: bool = true,
+}
+
+export struct LinuxEpollBackend {
+    epoll_fd: i32 = -1,
+    max_events: usize = LINUX_EPOLL_BACKEND_EVENT_MAX,
+    capabilities: u32 = 0u32,
+}
+
+export fn linux_epoll_backend_config_make() LinuxEpollBackendConfig {
+    return LinuxEpollBackendConfig{};
+}
+
+export fn linux_epoll_backend_descriptor() NetBackendDescriptor {
+    return net_backend_linux_epoll_descriptor();
+}
+
+fn linux_epoll_backend_validate_config(config: &LinuxEpollBackendConfig) !void {
+    if config == null {
+        return error.LinuxEpollBackendInvalid;
+    }
+    if config.max_events == 0usize || config.max_events > LINUX_EPOLL_BACKEND_EVENT_MAX {
+        return error.LinuxEpollBackendInvalid;
+    }
+}
+
+export fn linux_epoll_backend_open(config: LinuxEpollBackendConfig) !LinuxEpollBackend {
+    try linux_epoll_backend_validate_config(&config);
+    var flags: i32 = 0i32;
+    if config.close_on_exec {
+        flags = EPOLL_CLOEXEC;
+    }
+    const fd: i32 = try sys_epoll_create1(flags);
+    const desc: NetBackendDescriptor = linux_epoll_backend_descriptor();
+    return LinuxEpollBackend{
+        epoll_fd: fd,
+        max_events: config.max_events,
+        capabilities: desc.capabilities,
+    };
+}
+
+export fn linux_epoll_backend_close(backend: &LinuxEpollBackend) void {
+    if backend == null {
+        return;
+    }
+    if backend.epoll_fd >= 0 {
+        _ = sys_close(backend.epoll_fd) catch {};
+    }
+    backend.epoll_fd = -1;
+    backend.capabilities = 0u32;
+}
+
+export fn linux_epoll_backend_is_open(backend: &LinuxEpollBackend) bool {
+    if backend == null {
+        return false;
+    }
+    return backend.epoll_fd >= 0;
+}
+
+export fn linux_epoll_backend_event_make(fd: i32, interest_mask: u32) EpollEvent {
+    return EpollEvent{
+        events: interest_mask,
+        _pad: 0u32,
+        data: fd as u64,
+    };
+}
+
+export fn linux_epoll_backend_register_fd(backend: &LinuxEpollBackend, fd: i32, interest_mask: u32) !void {
+    if backend == null || backend.epoll_fd < 0 || fd < 0 {
+        return error.LinuxEpollBackendInvalid;
+    }
+    var ev: EpollEvent = linux_epoll_backend_event_make(fd, interest_mask);
+    _ = try sys_epoll_ctl(backend.epoll_fd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+export fn linux_epoll_backend_modify_fd(backend: &LinuxEpollBackend, fd: i32, interest_mask: u32) !void {
+    if backend == null || backend.epoll_fd < 0 || fd < 0 {
+        return error.LinuxEpollBackendInvalid;
+    }
+    var ev: EpollEvent = linux_epoll_backend_event_make(fd, interest_mask);
+    _ = try sys_epoll_ctl(backend.epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+export fn linux_epoll_backend_unregister_fd(backend: &LinuxEpollBackend, fd: i32) !void {
+    if backend == null || backend.epoll_fd < 0 || fd < 0 {
+        return error.LinuxEpollBackendInvalid;
+    }
+    _ = try sys_epoll_ctl_del(backend.epoll_fd, fd);
+}
+
+export fn linux_epoll_backend_wait(
+    backend: &LinuxEpollBackend,
+    events: &EpollEvent,
+    max_events: usize,
+    timeout_ms: i32,
+) !usize {
+    if backend == null || backend.epoll_fd < 0 {
+        return error.LinuxEpollBackendInvalid;
+    }
+    if max_events == 0usize || max_events > backend.max_events || max_events > LINUX_EPOLL_BACKEND_EVENT_MAX {
+        return error.LinuxEpollBackendInvalid;
+    }
+    const count: i32 = try sys_epoll_wait(backend.epoll_fd, events, max_events as i32, timeout_ms);
+    return count as usize;
+}

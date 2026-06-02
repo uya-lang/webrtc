@@ -8,6 +8,7 @@ test -f src/webrtc_net_udp_test.uya
 test -f src/webrtc_net_worker_test.uya
 test -f src/webrtc/net/udp.uya
 test -f src/webrtc/net/worker.uya
+test -f src/webrtc/net/linux_epoll.uya
 test -x tests/udp_loopback_echo.py
 test -f benchmarks/baselines/bench_udp_echo.jsonl
 test -x tests/udp_bench_baseline.py
@@ -40,7 +41,8 @@ rg -q "export struct WorkerCommand" src/webrtc/net/worker.uya
 rg -q "export struct WorkerEvent" src/webrtc/net/worker.uya
 rg -q "export struct TransportWorkerConfig" src/webrtc/net/worker.uya
 rg -q "export struct TransportWorker" src/webrtc/net/worker.uya
-rg -q "sys_epoll_create1" src/webrtc/net/worker.uya
+rg -q "sys_epoll_create1" src/webrtc/net/linux_epoll.uya
+rg -q "linux_epoll_backend_open" src/webrtc/net/worker.uya
 rg -q "worker_timer_heap_push" src/webrtc/net/worker.uya
 rg -q "worker_timer_heap_pop_ready" src/webrtc/net/worker.uya
 rg -q "transport_worker_init" src/webrtc/net/worker.uya

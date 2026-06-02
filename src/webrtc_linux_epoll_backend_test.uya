@@ -1,0 +1,41 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use webrtc.net.backend;
+use webrtc.net.linux_epoll;
+
+test "linux epoll backend exposes default descriptor capabilities" {
+    const desc: NetBackendDescriptor = linux_epoll_backend_descriptor();
+
+    try assert_eq_i32(desc.kind as i32, NET_BACKEND_KIND_LINUX_EPOLL as i32);
+    try expect(net_backend_has_capability(&desc, NET_BACKEND_CAP_UDP));
+    try expect(net_backend_has_capability(&desc, NET_BACKEND_CAP_BATCH_RECV));
+    try expect(net_backend_has_capability(&desc, NET_BACKEND_CAP_BATCH_SEND));
+    try expect(net_backend_has_capability(&desc, NET_BACKEND_CAP_EDGE_POLL));
+    try expect(net_backend_has_capability(&desc, NET_BACKEND_CAP_TIMER_QUEUE));
+}
+
+test "linux epoll backend validates event capacity" {
+    var invalid: LinuxEpollBackendConfig = linux_epoll_backend_config_make();
+    invalid.max_events = LINUX_EPOLL_BACKEND_EVENT_MAX + 1usize;
+
+    const result: !LinuxEpollBackend = linux_epoll_backend_open(invalid);
+    try expect(result.error_id == @error_id(error.LinuxEpollBackendInvalid));
+}
+
+test "linux epoll backend opens waits and closes" {
+    var config: LinuxEpollBackendConfig = linux_epoll_backend_config_make();
+    config.max_events = 4usize;
+
+    var backend_local: LinuxEpollBackend = try linux_epoll_backend_open(config);
+    try expect(linux_epoll_backend_is_open(&backend_local));
+    try expect(backend_local.epoll_fd >= 0);
+    try expect(backend_local.max_events == 4usize);
+    try expect((backend_local.capabilities & NET_BACKEND_CAP_EDGE_POLL) != 0u32);
+
+    var events: [EpollEvent: LINUX_EPOLL_BACKEND_EVENT_MAX] = [];
+    const ready: usize = try linux_epoll_backend_wait(&backend_local, &events[0], 4usize, 0i32);
+    try assert_eq_i32(ready as i32, 0);
+
+    linux_epoll_backend_close(&backend_local);
+    try expect(!linux_epoll_backend_is_open(&backend_local));
+}
