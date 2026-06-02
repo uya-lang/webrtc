@@ -471,7 +471,7 @@
 - [x] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
 - [x] 优化 packet descriptor cache locality。
 - [x] 优化 retransmission cache。
-- [ ] 优化 stats snapshot。
+- [x] 优化 stats snapshot。
 
 验收标准：
 

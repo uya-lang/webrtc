@@ -77,6 +77,8 @@ export struct PeerConnection {
     ice_state: u8 = PEER_CONNECTION_ICE_AGENT_STATE_NEW,
     transceiver_count: usize = 0usize,
     transceiver_high_watermark: usize = 0usize,
+    sender_count: usize = 0usize,
+    receiver_count: usize = 0usize,
     transceivers: [Transceiver: PEER_CONNECTION_MAX_TRANSCEIVERS] = [],
     remote_candidate: PeerConnectionRemoteIceCandidate = PeerConnectionRemoteIceCandidate{},
     data_channel_event_head: usize = 0usize,
@@ -186,6 +188,8 @@ fn peer_connection_transceivers_reset(pc: &PeerConnection) void {
 
     pc.transceiver_count = 0usize;
     pc.transceiver_high_watermark = 0usize;
+    pc.sender_count = 0usize;
+    pc.receiver_count = 0usize;
 }
 
 fn peer_connection_data_channel_event_reset(event: &PeerConnectionDataChannelEvent) void {
@@ -678,6 +682,12 @@ export fn peer_connection_add_transceiver(pc: &PeerConnection, kind: u8, init: &
 
     pc.transceivers[slot] = transceiver;
     pc.transceiver_count = slot + 1usize;
+    if peer_connection_transceiver_is_sender(&pc.transceivers[slot]) {
+        pc.sender_count = pc.sender_count + 1usize;
+    }
+    if peer_connection_transceiver_is_receiver(&pc.transceivers[slot]) {
+        pc.receiver_count = pc.receiver_count + 1usize;
+    }
     if pc.transceiver_count > pc.transceiver_high_watermark {
         pc.transceiver_high_watermark = pc.transceiver_count;
     }
@@ -707,8 +717,8 @@ export fn peer_connection_get_stats(pc: &PeerConnection, out: &RtcPeerConnection
         pc.ice_state,
         pc.data_channel_count,
         pc.transceiver_count,
-        peer_connection_sender_count(pc),
-        peer_connection_receiver_count(pc),
+        pc.sender_count,
+        pc.receiver_count,
         0u64,
         0u64,
         0u64,
