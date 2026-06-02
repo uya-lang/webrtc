@@ -441,7 +441,7 @@
 - [x] Chrome headless one-way audio。
 - [x] Chrome headless one-way video VP8。
 - [x] Chrome headless H264 payload。
-- [ ] Chrome headless trickle ICE。
+- [x] Chrome headless trickle ICE。
 - [ ] Chrome headless TURN relay。
 - [ ] Firefox headless DataChannel echo。
 - [ ] Firefox headless one-way audio/video。
