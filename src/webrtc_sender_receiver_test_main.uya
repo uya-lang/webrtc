@@ -1,0 +1,195 @@
+use libc.printf;
+use webrtc.media.model;
+use webrtc.receiver;
+use webrtc.sender;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn make_frame(codec_id: u16, media_kind: u8, sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = codec_id;
+    frame.media_kind = media_kind;
+    frame.sequence_id = sequence_id;
+    frame.timestamp = 123456789u64 + sequence_id;
+    frame.duration_us = 33333u32;
+    frame.is_keyframe = sequence_id == 0u64;
+    frame.marker = true;
+    frame.payload = payload;
+    return frame;
+}
+
+fn check_sender_queue_and_close() i32 {
+    var sender_state: Sender = sender_make();
+    const init_result: !void = sender_init(&sender_state, 7u64, MEDIA_KIND_VIDEO);
+    if init_result.error_id != 0 {
+        return 10i32;
+    }
+    if !sender_open(&sender_state) {
+        return 11i32;
+    }
+    if !sender_is_open(&sender_state) {
+        return 12i32;
+    }
+
+    var payload_a: [byte: 4] = ['p' as byte, 'i' as byte, 'n' as byte, 'g' as byte];
+    const frame_a: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1u64, payload_a[0:4]);
+    const send_a: !void = sender_send_encoded_frame(&sender_state, &frame_a);
+    if send_a.error_id != 0 {
+        return 13i32;
+    }
+    if sender_pending_count(&sender_state) != 1usize {
+        return 14i32;
+    }
+    if sender_high_watermark(&sender_state) != 1usize {
+        return 15i32;
+    }
+
+    if !sender_has_pending_frame(&sender_state) {
+        return 16i32;
+    }
+    var queued_a: EncodedFrame = sender_pop_pending_frame(&sender_state);
+    if queued_a.sequence_id != 1u64 || queued_a.codec_id != CODEC_ID_VP8 {
+        return 17i32;
+    }
+    if !bytes_equal(queued_a.payload, payload_a[0:4]) {
+        return 18i32;
+    }
+    if sender_pending_count(&sender_state) != 0usize {
+        return 19i32;
+    }
+
+    var index: usize = 0usize;
+    while index < SENDER_MAX_PENDING_FRAMES {
+        var payload: [byte: 1] = [(index as byte) + 48u8];
+        var burst: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, (index + 2usize) as u64, payload[0:1]);
+        const queued: !void = sender_send_encoded_frame(&sender_state, &burst);
+        if queued.error_id != 0 {
+            return 20i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+    var overflow_payload: [byte: 1] = [0x7Fu8 as byte];
+    var overflow_frame: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 99u64, overflow_payload[0:1]);
+    const overflow: !void = sender_send_encoded_frame(&sender_state, &overflow_frame);
+    if overflow.error_id != @error_id(error.SenderQueueFull) {
+        return 31i32;
+    }
+    if sender_drop_count(&sender_state) == 0u64 {
+        return 32i32;
+    }
+
+    if !sender_close(&sender_state) {
+        return 33i32;
+    }
+    if !sender_is_closed(&sender_state) {
+        return 34i32;
+    }
+
+    const send_after_close: !void = sender_send_encoded_frame(&sender_state, &frame_a);
+    if send_after_close.error_id != @error_id(error.SenderInvalidState) {
+        return 35i32;
+    }
+
+    return 0i32;
+}
+
+fn check_receiver_delivery_and_close() i32 {
+    var receiver_state: Receiver = receiver_make();
+    const init_result: !void = receiver_init(&receiver_state, 11u64, MEDIA_KIND_AUDIO);
+    if init_result.error_id != 0 {
+        return 40i32;
+    }
+    if !receiver_open(&receiver_state) {
+        return 41i32;
+    }
+
+    var payload_a: [byte: 5] = ['h' as byte, 'e' as byte, 'l' as byte, 'l' as byte, 'o' as byte];
+    const frame_a: EncodedFrame = make_frame(CODEC_ID_OPUS, MEDIA_KIND_AUDIO, 10u64, payload_a[0:5]);
+    const deliver_a: !void = receiver_deliver_encoded_frame(&receiver_state, &frame_a);
+    if deliver_a.error_id != 0 {
+        return 42i32;
+    }
+    if !receiver_has_pending_frame(&receiver_state) {
+        return 43i32;
+    }
+
+    var out: EncodedFrame = encoded_frame_make();
+    const has_frame: !bool = receiver_read_encoded_frame(&receiver_state, &out);
+    if has_frame.error_id != 0 || !has_frame.value {
+        return 44i32;
+    }
+    if out.sequence_id != 10u64 || out.codec_id != CODEC_ID_OPUS {
+        return 45i32;
+    }
+    if !bytes_equal(out.payload, payload_a[0:5]) {
+        return 46i32;
+    }
+    if receiver_pending_count(&receiver_state) != 0usize {
+        return 47i32;
+    }
+
+    var index: usize = 0usize;
+    while index < RECEIVER_MAX_PENDING_FRAMES {
+        var payload: [byte: 1] = [(index as byte) + 65u8];
+        var burst: EncodedFrame = make_frame(CODEC_ID_OPUS, MEDIA_KIND_AUDIO, (index + 20usize) as u64, payload[0:1]);
+        const queued: !void = receiver_deliver_encoded_frame(&receiver_state, &burst);
+        if queued.error_id != 0 {
+            return 48i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+    var overflow_payload: [byte: 1] = [0x55u8 as byte];
+    var overflow_frame: EncodedFrame = make_frame(CODEC_ID_OPUS, MEDIA_KIND_AUDIO, 99u64, overflow_payload[0:1]);
+    const overflow: !void = receiver_deliver_encoded_frame(&receiver_state, &overflow_frame);
+    if overflow.error_id != @error_id(error.ReceiverQueueFull) {
+        return 60i32;
+    }
+    if receiver_drop_count(&receiver_state) == 0u64 {
+        return 61i32;
+    }
+
+    if !receiver_close(&receiver_state) {
+        return 62i32;
+    }
+    if !receiver_is_closed(&receiver_state) {
+        return 63i32;
+    }
+
+    const deliver_after_close: !void = receiver_deliver_encoded_frame(&receiver_state, &frame_a);
+    if deliver_after_close.error_id != @error_id(error.ReceiverInvalidState) {
+        return 64i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_sender_queue_and_close();
+    if result != 0i32 {
+        printf("Sender tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_receiver_delivery_and_close();
+    if result != 0i32 {
+        printf("Receiver tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Sender/receiver tests passed\n");
+    return 0i32;
+}

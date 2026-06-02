@@ -1,0 +1,253 @@
+// webrtc.sender - encoded frame sender queue and lifecycle
+// Module: src/webrtc/sender.uya -> use webrtc.sender;
+
+use webrtc.media.model;
+
+export const SENDER_STATE_CONNECTING: u8 = 0u8;
+export const SENDER_STATE_OPEN: u8 = 1u8;
+export const SENDER_STATE_CLOSED: u8 = 2u8;
+
+export const SENDER_MAX_PENDING_FRAMES: usize = 8usize;
+export const SENDER_MAX_FRAME_BYTES: usize = 4096usize;
+
+export error SenderInvalidState;
+export error SenderQueueFull;
+export error SenderFrameTooLarge;
+
+export struct SenderQueuedFrame {
+    frame: EncodedFrame = EncodedFrame{},
+    payload: [byte: SENDER_MAX_FRAME_BYTES] = [],
+}
+
+export struct Sender {
+    id: u64 = 0u64,
+    kind: u8 = MEDIA_KIND_UNKNOWN,
+    state: u8 = SENDER_STATE_CLOSED,
+    queue_head: usize = 0usize,
+    queue_count: usize = 0usize,
+    queued_frames: [SenderQueuedFrame: SENDER_MAX_PENDING_FRAMES] = [],
+    send_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: usize = 0usize,
+}
+
+fn sender_make_default() Sender {
+    return Sender{};
+}
+
+fn sender_queue_slot(head: usize, count: usize) usize {
+    var slot: usize = head + count;
+    if slot >= SENDER_MAX_PENDING_FRAMES {
+        slot = slot - SENDER_MAX_PENDING_FRAMES;
+    }
+    return slot;
+}
+
+fn sender_reset_queued_frame(slot: &SenderQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+    var index: usize = 0usize;
+    while index < SENDER_MAX_FRAME_BYTES {
+        slot.payload[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn sender_clear_queued_frame_metadata(slot: &SenderQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+}
+
+fn sender_copy_frame(slot: &SenderQueuedFrame, frame: &EncodedFrame) !void {
+    if slot == null || frame == null {
+        return error.SenderInvalidState;
+    }
+    if frame.payload.len > SENDER_MAX_FRAME_BYTES {
+        return error.SenderFrameTooLarge;
+    }
+
+    slot.frame = *frame;
+    var index: usize = 0usize;
+    while index < frame.payload.len {
+        slot.payload[index] = frame.payload[index];
+        index = index + 1usize;
+    }
+    slot.frame.payload = slot.payload[0:frame.payload.len];
+    return;
+}
+
+fn sender_clear_queue(sender: &Sender) void {
+    if sender == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < SENDER_MAX_PENDING_FRAMES {
+        sender_reset_queued_frame(&sender.queued_frames[index]);
+        index = index + 1usize;
+    }
+
+    sender.queue_head = 0usize;
+    sender.queue_count = 0usize;
+}
+
+/// Create a default sender shell.
+export fn sender_make() Sender {
+    return sender_make_default();
+}
+
+/// Initialize the sender metadata and queue state.
+export fn sender_init(sender: &Sender, id: u64, kind: u8) !void {
+    if sender == null {
+        return error.SenderInvalidState;
+    }
+
+    sender.id = id;
+    sender.kind = kind;
+    sender.state = SENDER_STATE_CONNECTING;
+    sender.queue_head = 0usize;
+    sender.queue_count = 0usize;
+    sender.send_count = 0u64;
+    sender.drop_count = 0u64;
+    sender.high_watermark = 0usize;
+    sender_clear_queue(sender);
+    return;
+}
+
+/// Transition the sender to open.
+export fn sender_open(sender: &Sender) bool {
+    if sender == null {
+        return false;
+    }
+    if sender.state == SENDER_STATE_OPEN {
+        return true;
+    }
+    if sender.state != SENDER_STATE_CONNECTING {
+        return false;
+    }
+
+    sender.state = SENDER_STATE_OPEN;
+    return true;
+}
+
+/// Return whether the sender is open.
+export fn sender_is_open(sender: &Sender) bool {
+    if sender == null {
+        return false;
+    }
+    return sender.state == SENDER_STATE_OPEN;
+}
+
+/// Return whether the sender is closed.
+export fn sender_is_closed(sender: &Sender) bool {
+    if sender == null {
+        return true;
+    }
+    return sender.state == SENDER_STATE_CLOSED;
+}
+
+/// Transition the sender to closed and clear queued frames.
+export fn sender_close(sender: &Sender) bool {
+    if sender == null {
+        return false;
+    }
+    if sender.state == SENDER_STATE_CLOSED {
+        return true;
+    }
+
+    sender_clear_queue(sender);
+    sender.state = SENDER_STATE_CLOSED;
+    return true;
+}
+
+/// Queue a frame for transport.
+export fn sender_send_encoded_frame(sender: &Sender, frame: &EncodedFrame) !void {
+    if sender == null || frame == null || !sender_is_open(sender) {
+        return error.SenderInvalidState;
+    }
+    if sender.queue_count >= SENDER_MAX_PENDING_FRAMES {
+        sender.drop_count = sender.drop_count + 1u64;
+        return error.SenderQueueFull;
+    }
+
+    const slot_index: usize = sender_queue_slot(sender.queue_head, sender.queue_count);
+    if slot_index >= SENDER_MAX_PENDING_FRAMES {
+        sender.drop_count = sender.drop_count + 1u64;
+        return error.SenderQueueFull;
+    }
+
+    try sender_copy_frame(&sender.queued_frames[slot_index], frame);
+    sender.queue_count = sender.queue_count + 1usize;
+    sender.send_count = sender.send_count + 1u64;
+    if sender.queue_count > sender.high_watermark {
+        sender.high_watermark = sender.queue_count;
+    }
+    return;
+}
+
+/// Return whether there is a queued frame ready to pop.
+export fn sender_has_pending_frame(sender: &Sender) bool {
+    if sender == null {
+        return false;
+    }
+    return sender.queue_count > 0usize;
+}
+
+/// Pop the next queued frame.
+export fn sender_pop_pending_frame(sender: &Sender) EncodedFrame {
+    if sender == null || sender.queue_count == 0usize {
+        return EncodedFrame{};
+    }
+
+    const slot_index: usize = sender.queue_head;
+    if slot_index >= SENDER_MAX_PENDING_FRAMES {
+        return EncodedFrame{};
+    }
+
+    const frame: EncodedFrame = sender.queued_frames[slot_index].frame;
+    sender_clear_queued_frame_metadata(&sender.queued_frames[slot_index]);
+    sender.queue_head = sender.queue_head + 1usize;
+    if sender.queue_head >= SENDER_MAX_PENDING_FRAMES {
+        sender.queue_head = 0usize;
+    }
+    sender.queue_count = sender.queue_count - 1usize;
+    return frame;
+}
+
+/// Return the number of queued frames.
+export fn sender_pending_count(sender: &Sender) usize {
+    if sender == null {
+        return 0usize;
+    }
+    return sender.queue_count;
+}
+
+/// Return the number of frames sent successfully.
+export fn sender_send_count(sender: &Sender) u64 {
+    if sender == null {
+        return 0u64;
+    }
+    return sender.send_count;
+}
+
+/// Return the number of frames dropped because the queue was full.
+export fn sender_drop_count(sender: &Sender) u64 {
+    if sender == null {
+        return 0u64;
+    }
+    return sender.drop_count;
+}
+
+/// Return the highest queue depth observed.
+export fn sender_high_watermark(sender: &Sender) usize {
+    if sender == null {
+        return 0usize;
+    }
+    return sender.high_watermark;
+}

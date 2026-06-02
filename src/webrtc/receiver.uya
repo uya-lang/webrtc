@@ -1,0 +1,267 @@
+// webrtc.receiver - encoded frame receiver queue and lifecycle
+// Module: src/webrtc/receiver.uya -> use webrtc.receiver;
+
+use webrtc.media.model;
+
+export const RECEIVER_STATE_CONNECTING: u8 = 0u8;
+export const RECEIVER_STATE_OPEN: u8 = 1u8;
+export const RECEIVER_STATE_CLOSED: u8 = 2u8;
+
+export const RECEIVER_MAX_PENDING_FRAMES: usize = 8usize;
+export const RECEIVER_MAX_FRAME_BYTES: usize = 4096usize;
+
+export error ReceiverInvalidState;
+export error ReceiverQueueFull;
+export error ReceiverFrameTooLarge;
+
+export struct ReceiverQueuedFrame {
+    frame: EncodedFrame = EncodedFrame{},
+    payload: [byte: RECEIVER_MAX_FRAME_BYTES] = [],
+}
+
+export struct Receiver {
+    id: u64 = 0u64,
+    kind: u8 = MEDIA_KIND_UNKNOWN,
+    state: u8 = RECEIVER_STATE_CLOSED,
+    queue_head: usize = 0usize,
+    queue_count: usize = 0usize,
+    queued_frames: [ReceiverQueuedFrame: RECEIVER_MAX_PENDING_FRAMES] = [],
+    receive_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: usize = 0usize,
+}
+
+fn receiver_make_default() Receiver {
+    return Receiver{};
+}
+
+fn receiver_queue_slot(head: usize, count: usize) usize {
+    var slot: usize = head + count;
+    if slot >= RECEIVER_MAX_PENDING_FRAMES {
+        slot = slot - RECEIVER_MAX_PENDING_FRAMES;
+    }
+    return slot;
+}
+
+fn receiver_reset_queued_frame(slot: &ReceiverQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+    var index: usize = 0usize;
+    while index < RECEIVER_MAX_FRAME_BYTES {
+        slot.payload[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn receiver_clear_queued_frame_metadata(slot: &ReceiverQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+}
+
+fn receiver_copy_frame(slot: &ReceiverQueuedFrame, frame: &EncodedFrame) !void {
+    if slot == null || frame == null {
+        return error.ReceiverInvalidState;
+    }
+    if frame.payload.len > RECEIVER_MAX_FRAME_BYTES {
+        return error.ReceiverFrameTooLarge;
+    }
+
+    slot.frame = *frame;
+    var index: usize = 0usize;
+    while index < frame.payload.len {
+        slot.payload[index] = frame.payload[index];
+        index = index + 1usize;
+    }
+    slot.frame.payload = slot.payload[0:frame.payload.len];
+    return;
+}
+
+fn receiver_clear_queue(receiver: &Receiver) void {
+    if receiver == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < RECEIVER_MAX_PENDING_FRAMES {
+        receiver_reset_queued_frame(&receiver.queued_frames[index]);
+        index = index + 1usize;
+    }
+
+    receiver.queue_head = 0usize;
+    receiver.queue_count = 0usize;
+}
+
+/// Create a default receiver shell.
+export fn receiver_make() Receiver {
+    return receiver_make_default();
+}
+
+/// Initialize the receiver metadata and queue state.
+export fn receiver_init(receiver: &Receiver, id: u64, kind: u8) !void {
+    if receiver == null {
+        return error.ReceiverInvalidState;
+    }
+
+    receiver.id = id;
+    receiver.kind = kind;
+    receiver.state = RECEIVER_STATE_CONNECTING;
+    receiver.queue_head = 0usize;
+    receiver.queue_count = 0usize;
+    receiver.receive_count = 0u64;
+    receiver.drop_count = 0u64;
+    receiver.high_watermark = 0usize;
+    receiver_clear_queue(receiver);
+    return;
+}
+
+/// Transition the receiver to open.
+export fn receiver_open(receiver: &Receiver) bool {
+    if receiver == null {
+        return false;
+    }
+    if receiver.state == RECEIVER_STATE_OPEN {
+        return true;
+    }
+    if receiver.state != RECEIVER_STATE_CONNECTING {
+        return false;
+    }
+
+    receiver.state = RECEIVER_STATE_OPEN;
+    return true;
+}
+
+/// Return whether the receiver is open.
+export fn receiver_is_open(receiver: &Receiver) bool {
+    if receiver == null {
+        return false;
+    }
+    return receiver.state == RECEIVER_STATE_OPEN;
+}
+
+/// Return whether the receiver is closed.
+export fn receiver_is_closed(receiver: &Receiver) bool {
+    if receiver == null {
+        return true;
+    }
+    return receiver.state == RECEIVER_STATE_CLOSED;
+}
+
+/// Transition the receiver to closed and clear queued frames.
+export fn receiver_close(receiver: &Receiver) bool {
+    if receiver == null {
+        return false;
+    }
+    if receiver.state == RECEIVER_STATE_CLOSED {
+        return true;
+    }
+
+    receiver_clear_queue(receiver);
+    receiver.state = RECEIVER_STATE_CLOSED;
+    return true;
+}
+
+/// Queue a frame as if it had arrived from the network.
+export fn receiver_deliver_encoded_frame(receiver: &Receiver, frame: &EncodedFrame) !void {
+    if receiver == null || frame == null || !receiver_is_open(receiver) {
+        return error.ReceiverInvalidState;
+    }
+    if receiver.queue_count >= RECEIVER_MAX_PENDING_FRAMES {
+        receiver.drop_count = receiver.drop_count + 1u64;
+        return error.ReceiverQueueFull;
+    }
+
+    const slot_index: usize = receiver_queue_slot(receiver.queue_head, receiver.queue_count);
+    if slot_index >= RECEIVER_MAX_PENDING_FRAMES {
+        receiver.drop_count = receiver.drop_count + 1u64;
+        return error.ReceiverQueueFull;
+    }
+
+    try receiver_copy_frame(&receiver.queued_frames[slot_index], frame);
+    receiver.queue_count = receiver.queue_count + 1usize;
+    if receiver.queue_count > receiver.high_watermark {
+        receiver.high_watermark = receiver.queue_count;
+    }
+    return;
+}
+
+/// Return whether there is a queued frame ready to read.
+export fn receiver_has_pending_frame(receiver: &Receiver) bool {
+    if receiver == null {
+        return false;
+    }
+    return receiver.queue_count > 0usize;
+}
+
+/// Pop the next queued frame.
+export fn receiver_pop_pending_frame(receiver: &Receiver) EncodedFrame {
+    if receiver == null || receiver.queue_count == 0usize {
+        return EncodedFrame{};
+    }
+
+    const slot_index: usize = receiver.queue_head;
+    if slot_index >= RECEIVER_MAX_PENDING_FRAMES {
+        return EncodedFrame{};
+    }
+
+    const frame: EncodedFrame = receiver.queued_frames[slot_index].frame;
+    receiver_clear_queued_frame_metadata(&receiver.queued_frames[slot_index]);
+    receiver.queue_head = receiver.queue_head + 1usize;
+    if receiver.queue_head >= RECEIVER_MAX_PENDING_FRAMES {
+        receiver.queue_head = 0usize;
+    }
+    receiver.queue_count = receiver.queue_count - 1usize;
+    receiver.receive_count = receiver.receive_count + 1u64;
+    return frame;
+}
+
+/// Pop the next queued frame into `out`.
+export fn receiver_read_encoded_frame(receiver: &Receiver, out: &EncodedFrame) !bool {
+    if receiver == null || out == null {
+        return error.ReceiverInvalidState;
+    }
+    if receiver.queue_count == 0usize {
+        return false;
+    }
+
+    const frame: EncodedFrame = receiver_pop_pending_frame(receiver);
+    *out = frame;
+    return true;
+}
+
+/// Return the number of queued frames.
+export fn receiver_pending_count(receiver: &Receiver) usize {
+    if receiver == null {
+        return 0usize;
+    }
+    return receiver.queue_count;
+}
+
+/// Return the number of frames delivered successfully.
+export fn receiver_receive_count(receiver: &Receiver) u64 {
+    if receiver == null {
+        return 0u64;
+    }
+    return receiver.receive_count;
+}
+
+/// Return the number of frames dropped because the queue was full.
+export fn receiver_drop_count(receiver: &Receiver) u64 {
+    if receiver == null {
+        return 0u64;
+    }
+    return receiver.drop_count;
+}
+
+/// Return the highest queue depth observed.
+export fn receiver_high_watermark(receiver: &Receiver) usize {
+    if receiver == null {
+        return 0usize;
+    }
+    return receiver.high_watermark;
+}
