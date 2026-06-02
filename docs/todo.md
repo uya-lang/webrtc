@@ -460,12 +460,12 @@
 
 - [x] 汇总前序阶段已有 benchmark 基线。
 - [x] 补齐遗漏的 RTP/RTCP parser microbench。
-- [ ] 补齐遗漏的 STUN parser microbench。
-- [ ] 补齐遗漏的 SRTP protect/unprotect microbench。
-- [ ] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
-- [ ] 补齐遗漏的 DataChannel throughput benchmark。
+- [x] 补齐遗漏的 STUN parser microbench。
+- [x] 补齐遗漏的 SRTP protect/unprotect microbench。
+- [x] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
+- [x] 补齐遗漏的 DataChannel throughput benchmark。
 - [ ] 补齐遗漏的 RTP loopback multi-peer benchmark。
-- [ ] 补齐遗漏的 JitterBuffer benchmark。
+- [x] 补齐遗漏的 JitterBuffer benchmark。
 - [ ] 补齐遗漏的 Pacer queue benchmark。
 - [ ] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
 - [ ] 优化 packet descriptor cache locality。
