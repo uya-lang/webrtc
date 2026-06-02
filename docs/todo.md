@@ -485,7 +485,7 @@
   - blocked: 直接编译真实 Uya SDP parser fuzz smoke 时，Uya C99 后端会把 `[[byte: 32]: N]` 结构字段生成为非法 C（见 `.agent/toolchain-bugs/20260602223335-nested-byte-array-field.md`）；在工具链修复前无法用真实 parser 入口完成 SDP fuzz 验证。
 - [x] STUN fuzz。
 - [x] DTLS record/handshake fuzz。
-- [ ] RTP/RTCP fuzz。
+- [x] RTP/RTCP fuzz。
 - [ ] SCTP fuzz。
 - [ ] SRTP replay/rollover property tests。
 - [ ] ICE candidate 上限测试。

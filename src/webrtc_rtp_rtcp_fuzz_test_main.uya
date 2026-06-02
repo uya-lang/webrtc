@@ -1,0 +1,159 @@
+use libc.printf;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.rtp_packet;
+
+fn expect_rtp(packet: &[byte], should_parse: bool, code: i32) i32 {
+    const parsed: !RtpPacket = rtp_packet_parse(packet);
+    if should_parse && parsed.error_id != 0 {
+        printf("RTP fuzz seed unexpectedly failed: %d\n", code);
+        return code;
+    }
+    if !should_parse && parsed.error_id == 0 {
+        printf("RTP fuzz seed unexpectedly parsed: %d\n", code);
+        return code;
+    }
+    return 0i32;
+}
+
+fn parse_rtcp(packet: &[byte]) bool {
+    if packet.len < 2usize {
+        const sr: !RtcpSenderReport = rtcp_sender_report_parse(packet);
+        return sr.error_id == 0;
+    }
+    const fmt: u8 = (packet[0] as u8) & 0x1fu8;
+    const packet_type: u8 = packet[1] as u8;
+    if packet_type == 200u8 {
+        const parsed: !RtcpSenderReport = rtcp_sender_report_parse(packet);
+        return parsed.error_id == 0;
+    }
+    if packet_type == 201u8 {
+        const parsed: !RtcpReceiverReport = rtcp_receiver_report_parse(packet);
+        return parsed.error_id == 0;
+    }
+    if packet_type == 205u8 && fmt == 1u8 {
+        const parsed: !RtcpNackPacket = rtcp_nack_parse(packet);
+        return parsed.error_id == 0;
+    }
+    if packet_type == 205u8 && fmt == 15u8 {
+        const parsed: !RtcpTransportCcPacket = rtcp_transport_cc_parse(packet);
+        return parsed.error_id == 0;
+    }
+    if packet_type == 206u8 && fmt == 1u8 {
+        const parsed: !RtcpPliPacket = rtcp_pli_parse(packet);
+        return parsed.error_id == 0;
+    }
+    if packet_type == 206u8 && fmt == 4u8 {
+        const parsed: !RtcpFirPacket = rtcp_fir_parse(packet);
+        return parsed.error_id == 0;
+    }
+    return false;
+}
+
+fn expect_rtcp(packet: &[byte], should_parse: bool, code: i32) i32 {
+    const parsed: bool = parse_rtcp(packet);
+    if should_parse != parsed {
+        printf("RTCP fuzz seed parse mismatch: %d\n", code);
+        return code;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var rtp_minimal_valid: [byte: 12] = [
+        0x80 as byte, 0x60 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x01 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+    ];
+    var result: i32 = expect_rtp(rtp_minimal_valid[0:12], true, 10i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtp_csrc_extension_valid: [byte: 24] = [
+        0x91 as byte, 0x60 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x01 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte, 0xbe as byte, 0xde as byte,
+        0x00 as byte, 0x01 as byte, 0x11 as byte, 0xaa as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    result = expect_rtp(rtp_csrc_extension_valid[0:24], true, 11i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtp_extension_truncated: [byte: 18] = [
+        0x90 as byte, 0x60 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x01 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0xbe as byte, 0xde as byte, 0x00 as byte, 0x01 as byte, 0x11 as byte, 0x00 as byte,
+    ];
+    result = expect_rtp(rtp_extension_truncated[0:18], false, 12i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtp_padding_overflow: [byte: 13] = [
+        0xa0 as byte, 0x60 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x01 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x14 as byte,
+    ];
+    result = expect_rtp(rtp_padding_overflow[0:13], false, 13i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_sr_valid: [byte: 28] = [
+        0x80 as byte, 0xc8 as byte, 0x00 as byte, 0x06 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x02 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x03 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    result = expect_rtcp(rtcp_sr_valid[0:28], true, 20i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_rr_valid: [byte: 8] = [
+        0x80 as byte, 0xc9 as byte, 0x00 as byte, 0x01 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte,
+    ];
+    result = expect_rtcp(rtcp_rr_valid[0:8], true, 21i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_nack_valid: [byte: 16] = [
+        0x81 as byte, 0xcd as byte, 0x00 as byte, 0x03 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x00 as byte, 0x64 as byte, 0x00 as byte, 0x05 as byte,
+    ];
+    result = expect_rtcp(rtcp_nack_valid[0:16], true, 22i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_pli_valid: [byte: 12] = [
+        0x81 as byte, 0xce as byte, 0x00 as byte, 0x02 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+    ];
+    result = expect_rtcp(rtcp_pli_valid[0:12], true, 23i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_length_overflow: [byte: 8] = [
+        0x80 as byte, 0xc8 as byte, 0x00 as byte, 0x10 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte,
+    ];
+    result = expect_rtcp(rtcp_length_overflow[0:8], false, 24i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var rtcp_truncated_header: [byte: 3] = [0x80 as byte, 0xc8 as byte, 0x00 as byte];
+    result = expect_rtcp(rtcp_truncated_header[0:3], false, 25i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    printf("RTP/RTCP fuzz corpus smoke passed\n");
+    return 0i32;
+}
