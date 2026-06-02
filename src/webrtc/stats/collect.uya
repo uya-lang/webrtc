@@ -5,6 +5,7 @@ use webrtc.api;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
+use webrtc.media.model;
 use webrtc.rtcp.rtcp_packet;
 use webrtc.stats.types;
 
@@ -141,6 +142,19 @@ fn rtc_stats_bytes_handle(bytes: &[byte]) u64 {
     return hash;
 }
 
+fn rtc_stats_codec_handle(codec: &CodecNegotiatedCodec) u64 {
+    var hash: u64 = RTC_STATS_FNV_OFFSET_BASIS;
+    hash = (hash ^ (codec.codec_id as u64)) * RTC_STATS_FNV_PRIME;
+    hash = (hash ^ (codec.media_kind as u64)) * RTC_STATS_FNV_PRIME;
+    hash = (hash ^ (codec.payload_type as u64)) * RTC_STATS_FNV_PRIME;
+    hash = (hash ^ (codec.clock_rate_hz as u64)) * RTC_STATS_FNV_PRIME;
+    hash = (hash ^ (codec.channels as u64)) * RTC_STATS_FNV_PRIME;
+    if hash == 0u64 {
+        return 1u64;
+    }
+    return hash;
+}
+
 /// Snapshot one ICE candidate pair from the live checklist.
 export fn rtc_ice_candidate_pair_stats_collect(
     agent: &IceAgent,
@@ -211,5 +225,26 @@ export fn rtc_data_channel_stats_collect(
     stats.buffered_amount = channel.buffered_amount;
     stats.buffered_amount_high_watermark = channel.buffered_amount_high_watermark;
     stats.drop_count = channel.drop_count;
+    return stats;
+}
+
+/// Snapshot one negotiated codec.
+export fn rtc_codec_stats_collect(
+    codec: &CodecNegotiatedCodec,
+    timestamp_us: u64,
+    bitrate_bps: u64,
+) !RtcCodecStats {
+    if codec == null {
+        return error.InvalidPacket;
+    }
+
+    var stats: RtcCodecStats = rtc_codec_stats_make();
+    stats.handle = rtc_stats_codec_handle(codec);
+    stats.timestamp_us = timestamp_us;
+    stats.payload_type = codec.payload_type;
+    stats.media_kind = codec.media_kind;
+    stats.clock_rate_hz = codec.clock_rate_hz;
+    stats.channels = codec.channels;
+    stats.bitrate_bps = bitrate_bps;
     return stats;
 }

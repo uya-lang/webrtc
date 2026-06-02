@@ -3,6 +3,7 @@ use webrtc.api;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
+use webrtc.media.model;
 use webrtc.rtcp.rtcp_packet;
 use webrtc.stats.collect;
 use webrtc.stats.types;
@@ -186,6 +187,37 @@ fn check_data_channel_stats_collect() i32 {
     return 0i32;
 }
 
+fn check_codec_stats_collect() i32 {
+    var codec: CodecNegotiatedCodec = CodecNegotiatedCodec{
+        codec_id: CODEC_ID_OPUS,
+        media_kind: MEDIA_KIND_AUDIO,
+        payload_type: 111u8,
+        clock_rate_hz: 48000u32,
+        channels: 2u8,
+    };
+
+    const stats_result: !RtcCodecStats = rtc_codec_stats_collect(&codec, 5555u64, 256000u64);
+    if stats_result.error_id != 0 {
+        return 60i32;
+    }
+
+    const stats: RtcCodecStats = stats_result.value;
+    if stats.timestamp_us != 5555u64 {
+        return 61i32;
+    }
+    if stats.payload_type != 111u8 || stats.media_kind != MEDIA_KIND_AUDIO {
+        return 62i32;
+    }
+    if stats.clock_rate_hz != 48000u32 || stats.channels != 2u8 {
+        return 63i32;
+    }
+    if stats.bitrate_bps != 256000u64 || stats.handle == 0u64 {
+        return 64i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_candidate_pair_stats_collect();
     if result != 0i32 {
@@ -205,6 +237,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("candidate pair stats tests passed\n");
+    result = check_codec_stats_collect();
+    if result != 0i32 {
+        printf("codec stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("stats collect tests passed\n");
     return 0i32;
 }
