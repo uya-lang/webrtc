@@ -261,13 +261,32 @@ def make_datachannel_test_page(peer_config_json: str = '{"iceServers": []}') -> 
         <title>Phase 14 Browser DataChannel Interop</title>
         <script>
         window.__phase14Result = null;
+        window.__phase14Progress = [];
         const peerConfig = JSON.parse(__PEER_CONFIG_JSON__);
 
+        function mark(step) {
+          window.__phase14Progress.push(step);
+        }
+
         function fail(message, error) {
+          const detail = [];
+          if (error) {
+            if (error.name) {
+              detail.push(String(error.name));
+            }
+            if (error.message) {
+              detail.push(String(error.message));
+            }
+            if (error.stack) {
+              detail.push(String(error.stack));
+            } else {
+              detail.push(String(error));
+            }
+          }
           window.__phase14Result = {
             ok: false,
             error: message,
-            detail: error && error.stack ? String(error.stack) : (error ? String(error) : "")
+            detail: detail.join("\\n")
           };
         }
 
@@ -347,8 +366,10 @@ def make_datachannel_test_page(peer_config_json: str = '{"iceServers": []}') -> 
         }
 
         async function run() {
+          mark('start');
           const pc1 = new RTCPeerConnection(peerConfig);
           const pc2 = new RTCPeerConnection(peerConfig);
+          mark('pc-created');
           const relay12 = makeIceRelay(pc1, pc2, 'pc2');
           const relay21 = makeIceRelay(pc2, pc1, 'pc1');
           const messages = [];
@@ -358,22 +379,32 @@ def make_datachannel_test_page(peer_config_json: str = '{"iceServers": []}') -> 
           pc2.addEventListener('connectionstatechange', () => states.push('pc2:' + pc2.connectionState));
 
           const dc1 = pc1.createDataChannel('phase14', {ordered: true});
+          mark('datachannel-created');
           const dc2Promise = waitForEvent(pc2, 'datachannel');
 
           const dc1Open = waitForEvent(dc1, 'open');
           const dc1Close = waitForEvent(dc1, 'close');
 
           const offer = await pc1.createOffer();
+          mark('offer-created');
           await pc1.setLocalDescription(offer);
+          mark('pc1-local-description');
           await pc2.setRemoteDescription(pc1.localDescription);
+          mark('pc2-remote-description');
           await relay12.enable();
+          mark('relay12-enabled');
 
           const answer = await pc2.createAnswer();
+          mark('answer-created');
           await pc2.setLocalDescription(answer);
+          mark('pc2-local-description');
           await pc1.setRemoteDescription(pc2.localDescription);
+          mark('pc1-remote-description');
           await relay21.enable();
+          mark('relay21-enabled');
 
           const dc2 = (await dc2Promise).channel;
+          mark('datachannel-received');
           const dc2Open = waitForEvent(dc2, 'open');
           const dc2Close = waitForEvent(dc2, 'close');
           const pong = waitForEvent(dc1, 'message', event => String(event.data) === 'phase14-pong');
@@ -396,38 +427,71 @@ def make_datachannel_test_page(peer_config_json: str = '{"iceServers": []}') -> 
             waitForState(pc1, 'connectionstatechange', () => pc1.connectionState === 'connected'),
             waitForState(pc2, 'connectionstatechange', () => pc2.connectionState === 'connected'),
           ]);
+          mark('connected');
 
           dc1.send('phase14-ping');
           await Promise.all([receivedOnDc2, pong]);
+          mark('message-exchanged');
 
           dc1.close();
           await Promise.all([dc1Close, dc2Close]);
+          mark('channels-closed');
 
           const complete = await Promise.all([
             waitForState(pc1, 'icegatheringstatechange', () => pc1.iceGatheringState === 'complete'),
             waitForState(pc2, 'icegatheringstatechange', () => pc2.iceGatheringState === 'complete'),
           ]);
           void complete;
+          mark('ice-complete');
 
           const candidatePairTypes = await describeSelectedCandidateTypes(pc1);
+          const offerSdp = pc1.localDescription ? pc1.localDescription.sdp : '';
+          const answerSdp = pc2.localDescription ? pc2.localDescription.sdp : '';
 
           pc1.close();
           pc2.close();
           await delay(25);
+          mark('closed');
+
+          let pc1ConnectionState = '';
+          let pc2ConnectionState = '';
+          let dc1ReadyState = '';
+          let dc2ReadyState = '';
+          try {
+            pc1ConnectionState = pc1.connectionState;
+          } catch (error) {
+            pc1ConnectionState = 'closed';
+          }
+          try {
+            pc2ConnectionState = pc2.connectionState;
+          } catch (error) {
+            pc2ConnectionState = 'closed';
+          }
+          try {
+            dc1ReadyState = dc1.readyState;
+          } catch (error) {
+            dc1ReadyState = 'closed';
+          }
+          try {
+            dc2ReadyState = dc2.readyState;
+          } catch (error) {
+            dc2ReadyState = 'closed';
+          }
 
           window.__phase14Result = {
             ok: true,
             browser: navigator.userAgent,
             messages,
             states,
-            pc1ConnectionState: pc1.connectionState,
-            pc2ConnectionState: pc2.connectionState,
-            dc1ReadyState: dc1.readyState,
-            dc2ReadyState: dc2.readyState,
+            pc1ConnectionState,
+            pc2ConnectionState,
+            dc1ReadyState,
+            dc2ReadyState,
             selectedCandidatePairLocalType: candidatePairTypes.localCandidateType,
             selectedCandidatePairRemoteType: candidatePairTypes.remoteCandidateType,
-            offerSdp: pc1.localDescription ? pc1.localDescription.sdp : '',
-            answerSdp: pc2.localDescription ? pc2.localDescription.sdp : '',
+            offerSdp,
+            answerSdp,
+            progress: window.__phase14Progress.slice(),
           };
         }
 
@@ -447,10 +511,24 @@ def make_audio_test_page() -> str:
         window.__phase14Result = null;
 
         function fail(message, error) {
+          const detail = [];
+          if (error) {
+            if (error.name) {
+              detail.push(String(error.name));
+            }
+            if (error.message) {
+              detail.push(String(error.message));
+            }
+            if (error.stack) {
+              detail.push(String(error.stack));
+            } else {
+              detail.push(String(error));
+            }
+          }
           window.__phase14Result = {
             ok: false,
             error: message,
-            detail: error && error.stack ? String(error.stack) : (error ? String(error) : "")
+            detail: detail.join("\\n")
           };
         }
 
@@ -590,6 +668,19 @@ def make_audio_test_page() -> str:
           pc2.close();
           await delay(25);
 
+          let pc1ConnectionState = '';
+          let pc2ConnectionState = '';
+          try {
+            pc1ConnectionState = pc1.connectionState;
+          } catch (error) {
+            pc1ConnectionState = 'closed';
+          }
+          try {
+            pc2ConnectionState = pc2.connectionState;
+          } catch (error) {
+            pc2ConnectionState = 'closed';
+          }
+
           window.__phase14Result = {
             ok: true,
             browser: navigator.userAgent,
@@ -597,8 +688,8 @@ def make_audio_test_page() -> str:
             receivedTrackKind,
             receivedTrackReadyState,
             packetsReceived,
-            pc1ConnectionState: pc1.connectionState,
-            pc2ConnectionState: pc2.connectionState,
+            pc1ConnectionState,
+            pc2ConnectionState,
           };
         }
 
@@ -619,10 +710,24 @@ def make_video_test_page(codec_mode: str = "vp8") -> str:
         const codecMode = "__CODEC_MODE__";
 
         function fail(message, error) {
+          const detail = [];
+          if (error) {
+            if (error.name) {
+              detail.push(String(error.name));
+            }
+            if (error.message) {
+              detail.push(String(error.message));
+            }
+            if (error.stack) {
+              detail.push(String(error.stack));
+            } else {
+              detail.push(String(error));
+            }
+          }
           window.__phase14Result = {
             ok: false,
             error: message,
-            detail: error && error.stack ? String(error.stack) : (error ? String(error) : "")
+            detail: detail.join("\\n")
           };
         }
 
@@ -797,6 +902,19 @@ def make_video_test_page(codec_mode: str = "vp8") -> str:
           pc2.close();
           await delay(25);
 
+          let pc1ConnectionState = '';
+          let pc2ConnectionState = '';
+          try {
+            pc1ConnectionState = pc1.connectionState;
+          } catch (error) {
+            pc1ConnectionState = 'closed';
+          }
+          try {
+            pc2ConnectionState = pc2.connectionState;
+          } catch (error) {
+            pc2ConnectionState = 'closed';
+          }
+
           window.__phase14Result = {
             ok: true,
             browser: navigator.userAgent,
@@ -805,8 +923,8 @@ def make_video_test_page(codec_mode: str = "vp8") -> str:
             receivedTrackReadyState,
             packetsReceived: videoStats.packetsReceived,
             codecMimeType: videoStats.codecMimeType,
-            pc1ConnectionState: pc1.connectionState,
-            pc2ConnectionState: pc2.connectionState,
+            pc1ConnectionState,
+            pc2ConnectionState,
           };
         }
 
@@ -825,14 +943,14 @@ def start_http_server(directory: Path) -> tuple[ThreadingHTTPServer, threading.T
     return server, thread, port
 
 
-def load_browser_case() -> dict[str, Any]:
+def load_browser_case(browser_name: str) -> dict[str, Any]:
     data = read_json(FIXTURE_PATH)
     cases = data.get("cases")
     require(isinstance(cases, list) and cases, "browser fixture must contain at least one case")
     for case in cases:
-        if isinstance(case, dict) and case.get("browser") == "chrome":
+        if isinstance(case, dict) and case.get("browser") == browser_name:
             return case
-    raise InteropError("no chrome case found in browser_handshake.json")
+    raise InteropError(f"no {browser_name} case found in browser_handshake.json")
 
 
 def parse_transport_profiles(sdp_text: str) -> set[str]:
@@ -854,7 +972,32 @@ def parse_setup_values(sdp_text: str) -> list[str]:
     return values
 
 
-def validate_browser_result(result: dict[str, Any], mode: str) -> None:
+def datachannel_transport_profiles(browser_name: str) -> set[str]:
+    profiles = {"UDP/DTLS/SCTP"}
+    if browser_name == "firefox":
+        profiles.add("DTLS/SCTP")
+    return profiles
+
+
+def has_datachannel_mline(
+    sdp_text: str,
+    expected_profiles: set[str],
+    require_default_port: bool,
+) -> bool:
+    for line in sdp_text.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[0] != "m=application":
+            continue
+        if require_default_port and parts[1] != "9":
+            continue
+        if parts[2] not in expected_profiles:
+            continue
+        if "webrtc-datachannel" in parts[3:] or "5000" in parts[3:]:
+            return True
+    return False
+
+
+def validate_browser_result(result: dict[str, Any], mode: str, browser_name: str) -> None:
     require(result.get("ok") is True, f"browser page reported failure: {result}")
     require(result.get("pc1ConnectionState") == "closed", "pc1 should be closed after cleanup")
     require(result.get("pc2ConnectionState") == "closed", "pc2 should be closed after cleanup")
@@ -869,28 +1012,39 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
 
         offer_sdp = str(result.get("offerSdp", ""))
         answer_sdp = str(result.get("answerSdp", ""))
-        if mode == "turn":
-            require("m=application" in offer_sdp and "UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
-        else:
-            require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
+        expected_profiles = datachannel_transport_profiles(browser_name)
+        require_default_port = mode != "turn"
+        require(
+            has_datachannel_mline(offer_sdp, expected_profiles, require_default_port),
+            "offer SDP missing DataChannel m-line",
+        )
         require("a=setup:actpass" in offer_sdp, "offer SDP missing actpass setup")
-        require("a=sctp-port:5000" in offer_sdp, "offer SDP missing sctp-port")
-        require("a=max-message-size:262144" in offer_sdp, "offer SDP missing max-message-size")
-
-        if mode == "turn":
-            require("m=application" in answer_sdp and "UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
+        require(
+            "a=sctp-port:5000" in offer_sdp or "a=sctpmap:5000 webrtc-datachannel" in offer_sdp,
+            "offer SDP missing SCTP DataChannel negotiation",
+        )
+        if browser_name == "chrome":
+            require("a=max-message-size:262144" in offer_sdp, "offer SDP missing max-message-size")
         else:
-            require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
+            require("a=max-message-size:" in offer_sdp, "offer SDP missing max-message-size")
+
+        require(
+            has_datachannel_mline(answer_sdp, expected_profiles, require_default_port),
+            "answer SDP missing DataChannel m-line",
+        )
         require("a=setup:active" in answer_sdp, "answer SDP missing active setup")
 
-        browser_case = load_browser_case()
-        expected_profiles = set(browser_case.get("transport_profiles", []))
-        require("UDP/DTLS/SCTP" in parse_transport_profiles(offer_sdp), "browser offer transport profile mismatch")
+        browser_case = load_browser_case(browser_name)
+        fixture_profiles = set(browser_case.get("transport_profiles", []))
+        require(fixture_profiles, "browser fixture has no transport profiles")
+        require(
+            any(profile in parse_transport_profiles(offer_sdp) for profile in expected_profiles),
+            "browser offer transport profile mismatch",
+        )
         require(
             str(browser_case.get("setup_role")) in parse_setup_values(offer_sdp),
             "browser offer setup role mismatch",
         )
-        require(expected_profiles, "browser fixture has no transport profiles")
 
         if mode == "turn":
             require(
@@ -949,7 +1103,7 @@ def make_test_page(mode: str, peer_config_json: str = '{"iceServers": []}') -> s
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
-def run_browser_test(mode: str) -> dict[str, Any]:
+def run_chromium_browser_test(mode: str) -> dict[str, Any]:
     browser_exe = find_browser_executable()
     peer_config_json = os.environ.get("WEBRTC_PEER_CONFIG_JSON", '{"iceServers": []}')
     with tempfile.TemporaryDirectory(prefix="webrtc-browser-datachannel-") as tempdir:
@@ -1022,7 +1176,7 @@ def run_browser_test(mode: str) -> dict[str, Any]:
                             break
                     time.sleep(0.2)
                 require(result is not None, "browser page did not publish a result")
-                validate_browser_result(result, mode)
+                validate_browser_result(result, mode, "chrome")
                 return result
             finally:
                 client.close()
@@ -1038,12 +1192,86 @@ def run_browser_test(mode: str) -> dict[str, Any]:
             thread.join(timeout=2.0)
 
 
+def run_firefox_browser_test(mode: str) -> dict[str, Any]:
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise InteropError(
+            "Firefox interop requires the Playwright Python package; "
+            "install it with `python3 -m pip install --user playwright`"
+        ) from exc
+
+    peer_config_json = os.environ.get("WEBRTC_PEER_CONFIG_JSON", '{"iceServers": []}')
+    with tempfile.TemporaryDirectory(prefix="webrtc-browser-datachannel-") as tempdir:
+        tempdir_path = Path(tempdir)
+        page_path = tempdir_path / "index.html"
+        page_path.write_text(make_test_page(mode, peer_config_json), encoding="utf-8")
+
+        server, thread, http_port = start_http_server(tempdir_path)
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.firefox.launch(headless=True)
+                try:
+                    context = browser.new_context()
+                    page = context.new_page()
+                    try:
+                        try:
+                            page.goto(f"http://127.0.0.1:{http_port}/index.html", wait_until="load")
+                            page.wait_for_function(
+                                "typeof window.__phase14Result !== 'undefined' && window.__phase14Result !== null",
+                                timeout=int(DEFAULT_TIMEOUT_SECONDS * 1000),
+                            )
+                        except PlaywrightTimeoutError as exc:
+                            try:
+                                progress = page.evaluate("window.__phase14Progress || []")
+                            except Exception:
+                                progress = []
+                            try:
+                                partial = page.evaluate("window.__phase14Result || null")
+                            except Exception:
+                                partial = None
+                            raise TimeoutError(
+                                "browser page did not publish a result; "
+                                f"progress={progress}; partial={partial}"
+                            ) from exc
+                        except PlaywrightError as exc:
+                            raise InteropError(f"firefox browser automation failed: {exc}") from exc
+                        result = page.evaluate("window.__phase14Result")
+                        require(isinstance(result, dict), "browser page did not publish a valid result")
+                        validate_browser_result(result, mode, "firefox")
+                        return result
+                    finally:
+                        context.close()
+                finally:
+                    browser.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
+
+
 def main() -> int:
     try:
+        browser_name = "chrome"
         mode = "datachannel"
         if len(sys.argv) > 1:
-            mode = sys.argv[1]
-        result = run_browser_test(mode)
+            first_arg = sys.argv[1]
+            if first_arg in {"chrome", "firefox"}:
+                browser_name = first_arg
+                if len(sys.argv) > 2:
+                    mode = sys.argv[2]
+            else:
+                mode = first_arg
+                if len(sys.argv) > 2 and sys.argv[2] in {"chrome", "firefox"}:
+                    browser_name = sys.argv[2]
+        if browser_name == "chrome":
+            result = run_chromium_browser_test(mode)
+        elif browser_name == "firefox":
+            result = run_firefox_browser_test(mode)
+        else:
+            raise InteropError(f"unsupported browser name: {browser_name}")
         if mode == "datachannel":
             print("Browser DataChannel interop checks passed")
             print(f"  Browser: {result.get('browser')}")

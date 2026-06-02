@@ -443,7 +443,7 @@
 - [x] Chrome headless H264 payload。
 - [x] Chrome headless trickle ICE。
 - [x] Chrome headless TURN relay。
-- [~] Firefox headless DataChannel echo。
+- [x] Firefox headless DataChannel echo。
 - [ ] Firefox headless one-way audio/video。
 - [ ] Pion WebRTC interop。
 - [ ] aiortc interop。
