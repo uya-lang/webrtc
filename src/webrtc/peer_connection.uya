@@ -68,6 +68,7 @@ export struct PeerConnection {
     runtime: &RtcRuntime = null,
     config: RtcConfiguration = RtcConfiguration{},
     state: u8 = PEER_CONNECTION_STATE_CLOSED,
+    connection_state: u8 = PEER_CONNECTION_CONNECTION_STATE_CLOSED,
     has_local_description: bool = false,
     has_remote_description: bool = false,
     ice_role: u8 = PEER_CONNECTION_ICE_AGENT_ROLE_UNKNOWN,
@@ -247,6 +248,40 @@ fn peer_connection_set_answer_ice_state(pc: &PeerConnection) !void {
     return;
 }
 
+fn peer_connection_sync_connection_state(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+    if pc.state == PEER_CONNECTION_STATE_CLOSED {
+        pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_CLOSED;
+        return;
+    }
+    if pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_FAILED {
+        pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_FAILED;
+        return;
+    }
+    if pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_DISCONNECTED {
+        pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_DISCONNECTED;
+        return;
+    }
+    if pc.has_local_description && pc.has_remote_description && pc.remote_candidate.count > 0usize {
+        pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_CONNECTED;
+        return;
+    }
+    if pc.has_local_description
+        || pc.has_remote_description
+        || pc.remote_candidate.count > 0usize
+        || pc.transceiver_count > 0usize
+        || pc.data_channel_event_count > 0usize
+        || pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_CHECKING
+        || pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_GATHERING {
+        pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_CONNECTING;
+        return;
+    }
+
+    pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_NEW;
+}
+
 fn peer_connection_queue_data_channel_event(pc: &PeerConnection, channel: &DataChannel) !void {
     if pc == null || channel == null {
         return error.PeerConnectionInvalidState;
@@ -306,6 +341,7 @@ export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
     peer_connection_clear_descriptions(pc);
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -335,6 +371,7 @@ export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !
     peer_connection_transceivers_reset(&pc);
     peer_connection_data_channel_events_reset(&pc);
     peer_connection_clear_descriptions(&pc);
+    peer_connection_sync_connection_state(&pc);
     return pc;
 }
 
@@ -352,6 +389,14 @@ export fn peer_connection_state(pc: &PeerConnection) u8 {
         return PEER_CONNECTION_STATE_CLOSED;
     }
     return pc.state;
+}
+
+/// Return the aggregated ICE / description / data-channel connection state.
+export fn peer_connection_connection_state(pc: &PeerConnection) u8 {
+    if pc == null {
+        return PEER_CONNECTION_CONNECTION_STATE_CLOSED;
+    }
+    return pc.connection_state;
 }
 
 /// Return whether the PeerConnection is open.
@@ -482,6 +527,7 @@ export fn peer_connection_create_offer(pc: &PeerConnection, offer: &PeerConnecti
         offer,
         "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Uya WebRTC Offer\r\nt=0 0\r\na=group:BUNDLE data\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:uya-offer\r\na=ice-pwd:uya-offer-pwd\r\na=setup:actpass\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte],
     );
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -496,6 +542,7 @@ export fn peer_connection_create_answer(pc: &PeerConnection, answer: &PeerConnec
         answer,
         "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Uya WebRTC Answer\r\nt=0 0\r\na=group:BUNDLE data\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:uya-answer\r\na=ice-pwd:uya-answer-pwd\r\na=setup:active\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte],
     );
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -517,6 +564,7 @@ export fn peer_connection_create_data_channel(
 
     var channel: DataChannel = channel_result.value;
     try peer_connection_queue_data_channel_event(pc, &channel);
+    peer_connection_sync_connection_state(pc);
     return channel;
 }
 
@@ -528,6 +576,7 @@ export fn peer_connection_set_local_description(pc: &PeerConnection, description
 
     try peer_connection_copy_description(&pc.local_description, description);
     pc.has_local_description = true;
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -539,6 +588,7 @@ export fn peer_connection_set_remote_description(pc: &PeerConnection, descriptio
 
     try peer_connection_copy_description(&pc.remote_description, description);
     pc.has_remote_description = true;
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -555,6 +605,7 @@ export fn peer_connection_add_ice_candidate(pc: &PeerConnection, candidate: &Ice
     if pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_NEW {
         pc.ice_state = PEER_CONNECTION_ICE_AGENT_STATE_CHECKING;
     }
+    peer_connection_sync_connection_state(pc);
     return;
 }
 
@@ -576,6 +627,7 @@ export fn peer_connection_add_transceiver(pc: &PeerConnection, kind: u8, init: &
     if pc.transceiver_count > pc.transceiver_high_watermark {
         pc.transceiver_high_watermark = pc.transceiver_count;
     }
+    peer_connection_sync_connection_state(pc);
 
     return pc.transceivers[slot];
 }
@@ -602,6 +654,7 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
     }
 
     pc.state = PEER_CONNECTION_STATE_CLOSED;
+    pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
@@ -623,6 +676,7 @@ export fn peer_connection_reset(pc: &PeerConnection) void {
     pc.runtime = null;
     pc.config = RtcConfiguration{};
     pc.state = PEER_CONNECTION_STATE_CLOSED;
+    pc.connection_state = PEER_CONNECTION_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
