@@ -420,9 +420,9 @@
 - [x] 定义 stats 类型。
 - [~] 实现 transport stats。
 - [x] 实现 ICE candidate pair stats。
-- [ ] 实现 inbound RTP stats。
+- [~] 实现 inbound RTP stats。
 - [ ] 实现 outbound RTP stats。
-- [ ] 实现 remote inbound RTP stats。
+- [x] 实现 remote inbound RTP stats。
 - [ ] 实现 data channel stats。
 - [ ] 实现 codec stats。
 - [x] 实现 trace ring。

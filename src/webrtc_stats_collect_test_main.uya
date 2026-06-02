@@ -2,6 +2,7 @@ use libc.printf;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
+use webrtc.rtcp.rtcp_packet;
 use webrtc.stats.collect;
 use webrtc.stats.types;
 
@@ -87,10 +88,56 @@ fn check_candidate_pair_stats_collect() i32 {
     return 0i32;
 }
 
+fn check_remote_inbound_rtp_stats_collect() i32 {
+    var report: RtcpReceiverReport = rtcp_receiver_report_make();
+    report.sender_ssrc = 0x11223344u32;
+    report.report_count = 1u8;
+    report.report_blocks[0usize].ssrc = 0x55667788u32;
+    report.report_blocks[0usize].fraction_lost = 128u8;
+    report.report_blocks[0usize].cumulative_lost = 42u32;
+    report.report_blocks[0usize].jitter = 90u32;
+    report.report_blocks[0usize].lsr = 0u32;
+    report.report_blocks[0usize].dlsr = 0u32;
+
+    const stats_result: !RtcRemoteInboundRtpStreamStats = rtc_remote_inbound_rtp_stream_stats_collect(
+        &report,
+        0x55667788u32,
+        0xABCDEF01u64,
+        65536u32,
+        90000u32,
+        3333u64,
+    );
+    if stats_result.error_id != 0 {
+        return 30i32;
+    }
+
+    const stats: RtcRemoteInboundRtpStreamStats = stats_result.value;
+    if stats.timestamp_us != 3333u64 || stats.handle != 0xABCDEF01u64 {
+        return 31i32;
+    }
+    if stats.local_outbound_rtp_handle != 0xABCDEF01u64 || stats.ssrc != 0x55667788u32 {
+        return 32i32;
+    }
+    if stats.packets_lost != 42u64 || stats.fraction_lost_percent != 50u8 {
+        return 33i32;
+    }
+    if stats.jitter_us != 1000u64 || stats.round_trip_time_us != 1000000u64 {
+        return 34i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
-    const result: i32 = check_candidate_pair_stats_collect();
+    var result: i32 = check_candidate_pair_stats_collect();
     if result != 0i32 {
         printf("candidate pair stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_remote_inbound_rtp_stats_collect();
+    if result != 0i32 {
+        printf("remote inbound rtp stats tests failed: %d\n", result);
         return 1i32;
     }
 
