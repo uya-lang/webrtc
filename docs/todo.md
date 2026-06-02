@@ -458,7 +458,7 @@
 
 ## Phase 18：性能优化
 
-- [ ] 汇总前序阶段已有 benchmark 基线。
+- [x] 汇总前序阶段已有 benchmark 基线。
 - [ ] 补齐遗漏的 RTP/RTCP parser microbench。
 - [ ] 补齐遗漏的 STUN parser microbench。
 - [ ] 补齐遗漏的 SRTP protect/unprotect microbench。
