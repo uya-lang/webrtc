@@ -95,6 +95,7 @@ export struct RtpRetransmissionCache {
     hit_count: u64 = 0u64,
     miss_count: u64 = 0u64,
     drop_count: u64 = 0u64,
+    last_lookup_probes: u64 = 0u64,
 }
 
 fn rtp_jitter_sequence_next(sequence: u16) u16 {
@@ -828,6 +829,7 @@ export fn rtp_retransmission_cache_reset(cache: &RtpRetransmissionCache, owner_a
     cache.hit_count = 0u64;
     cache.miss_count = 0u64;
     cache.drop_count = 0u64;
+    cache.last_lookup_probes = 0u64;
 }
 
 fn rtp_retransmission_cache_remove_index(
@@ -905,15 +907,17 @@ export fn rtp_retransmission_cache_store(
     }
     const parsed: RtpPacket = parsed_result.value;
 
-    var index: usize = 0usize;
-    while index < cache.entry_count {
-        if cache.entries[index].present
-            && cache.entries[index].ssrc == parsed.header.ssrc
-            && cache.entries[index].sequence_number == parsed.header.sequence_number {
-            _ = rtp_retransmission_cache_remove_index(cache, owner_arena, budget, index);
-            break;
+    var index: usize = cache.entry_count;
+    while index > 0usize {
+        index = index - 1usize;
+        if index < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+            if cache.entries[index].present
+                && cache.entries[index].ssrc == parsed.header.ssrc
+                && cache.entries[index].sequence_number == parsed.header.sequence_number {
+                _ = rtp_retransmission_cache_remove_index(cache, owner_arena, budget, index);
+                break;
+            }
         }
-        index = index + 1usize;
     }
 
     if cache.entry_count >= cache.max_entries || cache.entry_count >= RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
@@ -970,15 +974,19 @@ export fn rtp_retransmission_cache_lookup(
         return error.RtpJitterBufferInvalidState;
     }
 
-    var index: usize = 0usize;
-    while index < cache.entry_count {
-        if cache.entries[index].present
-            && cache.entries[index].ssrc == ssrc
-            && cache.entries[index].sequence_number == sequence_number {
-            cache.hit_count = cache.hit_count + 1u64;
-            return cache.entries[index].packet;
+    cache.last_lookup_probes = 0u64;
+    var index: usize = cache.entry_count;
+    while index > 0usize {
+        index = index - 1usize;
+        if index < RTP_RETRANSMISSION_CACHE_MAX_ENTRIES {
+            cache.last_lookup_probes = cache.last_lookup_probes + 1u64;
+            if cache.entries[index].present
+                && cache.entries[index].ssrc == ssrc
+                && cache.entries[index].sequence_number == sequence_number {
+                cache.hit_count = cache.hit_count + 1u64;
+                return cache.entries[index].packet;
+            }
         }
-        index = index + 1usize;
     }
 
     cache.miss_count = cache.miss_count + 1u64;

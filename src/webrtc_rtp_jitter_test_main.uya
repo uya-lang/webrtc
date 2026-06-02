@@ -277,6 +277,8 @@ fn check_clone_budget_and_cache() i32 {
     var payload: [byte: 4] = [0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte];
     var packet_bytes_a: [byte: 32] = [];
     var packet_bytes_b: [byte: 32] = [];
+    var packet_bytes_c: [byte: 32] = [];
+    var packet_bytes_d: [byte: 32] = [];
     const packet_len_a: !usize = make_rtp_packet_bytes(700u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_a[0:32]);
     if packet_len_a.error_id != 0 {
         return 72i32;
@@ -284,6 +286,14 @@ fn check_clone_budget_and_cache() i32 {
     const packet_len_b: !usize = make_rtp_packet_bytes(701u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_b[0:32]);
     if packet_len_b.error_id != 0 {
         return 73i32;
+    }
+    const packet_len_c: !usize = make_rtp_packet_bytes(702u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_c[0:32]);
+    if packet_len_c.error_id != 0 {
+        return 93i32;
+    }
+    const packet_len_d: !usize = make_rtp_packet_bytes(703u16, 4400u32, 0x55667788u32, false, payload[0:4], packet_bytes_d[0:32]);
+    if packet_len_d.error_id != 0 {
+        return 94i32;
     }
 
     const src_packet_a: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_a[0:packet_len_a.value], 1000u64, 0x100u32, 96u16);
@@ -371,6 +381,38 @@ fn check_clone_budget_and_cache() i32 {
     const still_present: !PacketRef = rtp_retransmission_cache_lookup(&newest_cache, 0x55667788u32, 700u16);
     if still_present.error_id != 0 {
         return 92i32;
+    }
+
+    packet_arena_reset(&src_arena);
+    packet_arena_reset(&owner_arena);
+    packet_clone_budget_init(&budget, 512u64, 4u64);
+    rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+    cache.max_entries = 4usize;
+
+    const recent_a: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_a[0:packet_len_a.value], 11000u64, 0x120u32, 96u16);
+    const recent_b: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_b[0:packet_len_b.value], 12000u64, 0x121u32, 96u16);
+    const recent_c: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_c[0:packet_len_c.value], 13000u64, 0x122u32, 96u16);
+    const recent_d: !PacketRef = make_rtp_packet_ref(&src_arena, packet_bytes_d[0:packet_len_d.value], 14000u64, 0x123u32, 96u16);
+    if recent_a.error_id != 0 || recent_b.error_id != 0 || recent_c.error_id != 0 || recent_d.error_id != 0 {
+        return 95i32;
+    }
+    if rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &recent_a.value, &budget, 15000u64).error_id != 0 {
+        return 96i32;
+    }
+    if rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &recent_b.value, &budget, 16000u64).error_id != 0 {
+        return 97i32;
+    }
+    if rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &recent_c.value, &budget, 17000u64).error_id != 0 {
+        return 98i32;
+    }
+    if rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &recent_d.value, &budget, 18000u64).error_id != 0 {
+        return 99i32;
+    }
+    if rtp_retransmission_cache_lookup(&cache, 0x55667788u32, 703u16).error_id != 0 || cache.last_lookup_probes != 1u64 {
+        return 100i32;
+    }
+    if rtp_retransmission_cache_lookup(&cache, 0x55667788u32, 700u16).error_id != 0 || cache.last_lookup_probes != 4u64 {
+        return 101i32;
     }
 
     return 0i32;
