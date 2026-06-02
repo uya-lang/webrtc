@@ -444,7 +444,7 @@
 - [x] Chrome headless trickle ICE。
 - [x] Chrome headless TURN relay。
 - [x] Firefox headless DataChannel echo。
-- [ ] Firefox headless one-way audio/video。
+- [x] Firefox headless one-way audio/video。
 - [ ] Pion WebRTC interop。
 - [ ] aiortc interop。
 - [ ] GStreamer webrtcbin interop。

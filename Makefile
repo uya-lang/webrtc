@@ -72,6 +72,9 @@ test: build
 	test -x tests/check_phase16_trace_ring.sh
 	test -x tests/check_phase18_rtp_rtcp_bench.sh
 	test -x tests/check_phase18_rtp_loopback_bench.sh
+	test -x tests/check_phase17_browser_firefox_media.sh
+	rg -Fq 'tests/browser_datachannel_interop.py firefox audio' tests/check_phase17_browser_firefox_media.sh
+	rg -Fq 'tests/browser_datachannel_interop.py firefox video' tests/check_phase17_browser_firefox_media.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya

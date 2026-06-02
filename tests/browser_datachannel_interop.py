@@ -1207,49 +1207,44 @@ def run_firefox_browser_test(mode: str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="webrtc-browser-datachannel-") as tempdir:
         tempdir_path = Path(tempdir)
         page_path = tempdir_path / "index.html"
-        page_path.write_text(make_test_page(mode, peer_config_json), encoding="utf-8")
+        page_html = make_test_page(mode, peer_config_json)
+        page_path.write_text(page_html, encoding="utf-8")
 
-        server, thread, http_port = start_http_server(tempdir_path)
-        try:
-            with sync_playwright() as playwright:
-                browser = playwright.firefox.launch(headless=True)
+        with sync_playwright() as playwright:
+            browser = playwright.firefox.launch(headless=True)
+            try:
+                context = browser.new_context()
+                page = context.new_page()
                 try:
-                    context = browser.new_context()
-                    page = context.new_page()
                     try:
+                        page.set_content(page_html, wait_until="load")
+                        page.wait_for_function(
+                            "typeof window.__phase14Result !== 'undefined' && window.__phase14Result !== null",
+                            timeout=int(DEFAULT_TIMEOUT_SECONDS * 1000),
+                        )
+                    except PlaywrightTimeoutError as exc:
                         try:
-                            page.goto(f"http://127.0.0.1:{http_port}/index.html", wait_until="load")
-                            page.wait_for_function(
-                                "typeof window.__phase14Result !== 'undefined' && window.__phase14Result !== null",
-                                timeout=int(DEFAULT_TIMEOUT_SECONDS * 1000),
-                            )
-                        except PlaywrightTimeoutError as exc:
-                            try:
-                                progress = page.evaluate("window.__phase14Progress || []")
-                            except Exception:
-                                progress = []
-                            try:
-                                partial = page.evaluate("window.__phase14Result || null")
-                            except Exception:
-                                partial = None
-                            raise TimeoutError(
-                                "browser page did not publish a result; "
-                                f"progress={progress}; partial={partial}"
-                            ) from exc
-                        except PlaywrightError as exc:
-                            raise InteropError(f"firefox browser automation failed: {exc}") from exc
-                        result = page.evaluate("window.__phase14Result")
-                        require(isinstance(result, dict), "browser page did not publish a valid result")
-                        validate_browser_result(result, mode, "firefox")
-                        return result
-                    finally:
-                        context.close()
+                            progress = page.evaluate("window.__phase14Progress || []")
+                        except Exception:
+                            progress = []
+                        try:
+                            partial = page.evaluate("window.__phase14Result || null")
+                        except Exception:
+                            partial = None
+                        raise TimeoutError(
+                            "browser page did not publish a result; "
+                            f"progress={progress}; partial={partial}; page={page_path}"
+                        ) from exc
+                    except PlaywrightError as exc:
+                        raise InteropError(f"firefox browser automation failed: {exc}") from exc
+                    result = page.evaluate("window.__phase14Result")
+                    require(isinstance(result, dict), "browser page did not publish a valid result")
+                    validate_browser_result(result, mode, "firefox")
+                    return result
                 finally:
-                    browser.close()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2.0)
+                    context.close()
+            finally:
+                browser.close()
 
 
 def main() -> int:
