@@ -438,7 +438,7 @@
 ## Phase 17：互通测试矩阵
 
 - [x] Chrome headless DataChannel echo。
-- [~] Chrome headless one-way audio。
+- [x] Chrome headless one-way audio。
 - [~] Chrome headless one-way video VP8。
 - [~] Chrome headless H264 payload。
 - [~] Chrome headless trickle ICE。
