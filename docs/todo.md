@@ -420,8 +420,8 @@
 - [x] 定义 stats 类型。
 - [x] 实现 transport stats。
 - [x] 实现 ICE candidate pair stats。
-- [x] 实现 inbound RTP stats。
-- [x] 实现 outbound RTP stats。
+- [~] 实现 inbound RTP stats。
+- [~] 实现 outbound RTP stats。
 - [x] 实现 remote inbound RTP stats。
 - [x] 实现 data channel stats。
 - [x] 实现 codec stats。
@@ -437,19 +437,19 @@
 
 ## Phase 17：互通测试矩阵
 
-- [x] Chrome headless DataChannel echo。
-- [x] Chrome headless one-way audio。
-- [x] Chrome headless one-way video VP8。
-- [x] Chrome headless H264 payload。
-- [x] Chrome headless trickle ICE。
-- [x] Chrome headless TURN relay。
+- [~] Chrome headless DataChannel echo。
+- [~] Chrome headless one-way audio。
+- [~] Chrome headless one-way video VP8。
+- [~] Chrome headless H264 payload。
+- [~] Chrome headless trickle ICE。
+- [~] Chrome headless TURN relay。
 - [~] Firefox headless DataChannel echo。
 - [ ] Firefox headless one-way audio/video。
 - [ ] Pion WebRTC interop。
 - [ ] aiortc interop。
 - [ ] GStreamer webrtcbin interop。
-- [x] 网络模拟：1%/5%/10% loss。
-- [x] 网络模拟：reorder/duplicate/jitter。
+- [~] 网络模拟：1%/5%/10% loss。
+- [~] 网络模拟：reorder/duplicate/jitter。
 
 验收标准：
 
@@ -458,15 +458,15 @@
 
 ## Phase 18：性能优化
 
-- [x] 汇总前序阶段已有 benchmark 基线。
-- [x] 补齐遗漏的 RTP/RTCP parser microbench。
-- [x] 补齐遗漏的 STUN parser microbench。
-- [x] 补齐遗漏的 SRTP protect/unprotect microbench。
-- [x] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
-- [x] 补齐遗漏的 DataChannel throughput benchmark。
-- [x] 补齐遗漏的 RTP loopback multi-peer benchmark。
-- [x] 补齐遗漏的 JitterBuffer benchmark。
-- [ ] 补齐遗漏的 Pacer queue benchmark。
+- [~] 汇总前序阶段已有 benchmark 基线。
+- [~] 补齐遗漏的 RTP/RTCP parser microbench。
+- [~] 补齐遗漏的 STUN parser microbench。
+- [~] 补齐遗漏的 SRTP protect/unprotect microbench。
+- [~] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
+- [~] 补齐遗漏的 DataChannel throughput benchmark。
+- [~] 补齐遗漏的 RTP loopback multi-peer benchmark。
+- [~] 补齐遗漏的 JitterBuffer benchmark。
+- [~] 补齐遗漏的 Pacer queue benchmark。
 - [ ] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
 - [ ] 优化 packet descriptor cache locality。
 - [ ] 优化 retransmission cache。
