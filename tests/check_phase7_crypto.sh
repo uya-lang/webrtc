@@ -42,10 +42,13 @@ rg -Fq "crypto_test_check_ecdsa_p256_vectors" src/webrtc_crypto_test_main.uya
 rg -Fq "crypto_test_check_csprng_wrapper" src/webrtc_crypto_test_main.uya
 rg -Fq "export fn crypto_aes_key_schedule_init" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_aes_ctr_xor" src/webrtc/crypto/aes.uya
+rg -Fq "type CryptoU8x16 = @vector(u8, 16)" src/webrtc/crypto/aes.uya
+rg -Fq "crypto_aes_xor_full_block_vector" src/webrtc/crypto/aes.uya
 rg -Fq "export fn crypto_aes_gcm_encrypt" src/webrtc/crypto/gcm.uya
 rg -Fq "export fn crypto_aes_gcm_decrypt_and_verify" src/webrtc/crypto/gcm.uya
 rg -Fq "export fn crypto_ghash_multiply" src/webrtc/crypto/ghash.uya
 rg -Fq "export fn crypto_ghash_digest" src/webrtc/crypto/ghash.uya
+rg -Fq "vectorized: true" src/webrtc_crypto_bench_main.uya
 rg -Fq "export fn crypto_sha1_digest" src/webrtc/crypto/hash.uya
 rg -Fq "export fn crypto_sha256_digest" src/webrtc/crypto/hash.uya
 rg -Fq "export fn crypto_hmac_sha1_digest" src/webrtc/crypto/hmac.uya

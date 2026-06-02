@@ -8,6 +8,8 @@ export const CRYPTO_AES_BLOCK_BYTES: usize = 16usize;
 export const CRYPTO_AES_MAX_ROUNDS: usize = 14usize;
 export const CRYPTO_AES_MAX_ROUND_WORDS: usize = 60usize;
 
+type CryptoU8x16 = @vector(u8, 16);
+
 export struct CryptoAesKeySchedule {
     round_keys: [u32: CRYPTO_AES_MAX_ROUND_WORDS] = [],
     round_count: usize = 0usize,
@@ -164,6 +166,13 @@ fn crypto_aes_increment_counter(counter: &[byte]) void {
     }
 }
 
+fn crypto_aes_xor_full_block_vector(input: &[byte], keystream: &[byte], out: &[byte]) void {
+    const input_vec: CryptoU8x16 = @vector.load(&input[0]);
+    const key_vec: CryptoU8x16 = @vector.load(&keystream[0]);
+    const xored: CryptoU8x16 = input_vec ^ key_vec;
+    @vector.store(&out[0], xored);
+}
+
 export fn crypto_aes_key_schedule_make() CryptoAesKeySchedule {
     var round_keys: [u32: CRYPTO_AES_MAX_ROUND_WORDS] = [];
     return CryptoAesKeySchedule{
@@ -266,10 +275,18 @@ export fn crypto_aes_ctr_xor(schedule: &CryptoAesKeySchedule, counter: &[byte], 
     while offset < input.len {
         try crypto_aes_encrypt_block(schedule, counter_block[0:CRYPTO_AES_BLOCK_BYTES], keystream[0:CRYPTO_AES_BLOCK_BYTES]);
 
-        var block_index: usize = 0usize;
-        while block_index < CRYPTO_AES_BLOCK_BYTES && offset + block_index < input.len {
-            out[offset + block_index] = input[offset + block_index] ^ keystream[block_index];
-            block_index = block_index + 1usize;
+        if offset + CRYPTO_AES_BLOCK_BYTES <= input.len {
+            crypto_aes_xor_full_block_vector(
+                input[offset:CRYPTO_AES_BLOCK_BYTES],
+                keystream[0:CRYPTO_AES_BLOCK_BYTES],
+                out[offset:CRYPTO_AES_BLOCK_BYTES],
+            );
+        } else {
+            var block_index: usize = 0usize;
+            while block_index < CRYPTO_AES_BLOCK_BYTES && offset + block_index < input.len {
+                out[offset + block_index] = input[offset + block_index] ^ keystream[block_index];
+                block_index = block_index + 1usize;
+            }
         }
 
         crypto_aes_increment_counter(counter_block[0:CRYPTO_AES_BLOCK_BYTES]);

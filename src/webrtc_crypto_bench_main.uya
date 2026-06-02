@@ -133,7 +133,7 @@ fn benchmark_emit_aes_ctr() !void {
         throughput_mb_s: bench_throughput_mb_s((BENCH_AES_BYTES as u64) * BENCH_AES_CTR_ITERATIONS, elapsed_ns),
         allocations: 0u64,
         high_watermark: 0u64,
-        vectorized: false,
+        vectorized: true,
     };
     try bench_emit_sample(&sample);
 }

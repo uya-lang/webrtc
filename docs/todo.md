@@ -468,7 +468,7 @@
 - [x] 补齐遗漏的 RTP loopback multi-peer benchmark。
 - [x] 补齐遗漏的 JitterBuffer benchmark。
 - [x] 补齐遗漏的 Pacer queue benchmark。
-- [ ] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
+- [x] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
 - [ ] 优化 packet descriptor cache locality。
 - [ ] 优化 retransmission cache。
 - [ ] 优化 stats snapshot。
