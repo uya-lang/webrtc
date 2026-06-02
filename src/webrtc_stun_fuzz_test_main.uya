@@ -1,0 +1,109 @@
+use libc.printf;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+
+fn run_seed(packet: &[byte], expect_header_error: bool, expect_validation_error: bool, code: i32) i32 {
+    const header_result: !StunMessageHeader = stun_header_parse(packet);
+    if expect_header_error {
+        if header_result.error_id == 0 {
+            printf("STUN fuzz seed expected header error: %d\n", code);
+            return code;
+        }
+        return 0i32;
+    }
+    if header_result.error_id != 0 {
+        printf("STUN fuzz seed unexpected header error: %d\n", code);
+        return code + 100i32;
+    }
+
+    const header: StunMessageHeader = header_result.value;
+    var iter: StunAttributeIterator = StunAttributeIterator{};
+    stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:header.message_length as usize]);
+    var seen_mask: u32 = 0u32;
+    var saw_validation_error: bool = false;
+    while iter.cursor < iter.bytes.len {
+        const attr_result: !StunAttribute = stun_attribute_iterator_next(&iter);
+        if attr_result.error_id != 0 {
+            saw_validation_error = true;
+            break;
+        }
+        var attr: StunAttribute = attr_result.value;
+        const validated: !u32 = stun_binding_request_validate_attribute(&attr, seen_mask);
+        if validated.error_id != 0 {
+            saw_validation_error = true;
+            break;
+        }
+        seen_mask = seen_mask | validated.value;
+    }
+
+    if expect_validation_error != saw_validation_error {
+        printf("STUN fuzz seed validation mismatch: %d\n", code);
+        return code + 200i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var truncated_header: [byte: 12] = [
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte, 0x21 as byte, 0x12 as byte,
+        0xa4 as byte, 0x42 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+    ];
+    var result: i32 = run_seed(truncated_header[0:12], true, false, 10i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var bad_length: [byte: 24] = [
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x08 as byte, 0x21 as byte, 0x12 as byte,
+        0xa4 as byte, 0x42 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+        0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x00 as byte, 0x06 as byte, 0x00 as byte, 0x04 as byte,
+    ];
+    result = run_seed(bad_length[0:24], true, false, 11i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var bad_padding: [byte: 28] = [
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x08 as byte, 0x21 as byte, 0x12 as byte,
+        0xa4 as byte, 0x42 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+        0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x00 as byte, 0x06 as byte, 0x00 as byte, 0x05 as byte,
+        0x61 as byte, 0x62 as byte, 0x63 as byte, 0x64 as byte,
+    ];
+    result = run_seed(bad_padding[0:28], false, true, 12i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var unknown_required: [byte: 36] = [
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x10 as byte, 0x21 as byte, 0x12 as byte,
+        0xa4 as byte, 0x42 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+        0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x12 as byte, 0x34 as byte, 0x00 as byte, 0x04 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x24 as byte,
+        0x00 as byte, 0x04 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    result = run_seed(unknown_required[0:36], false, true, 13i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var duplicate_username: [byte: 44] = [
+        0x00 as byte, 0x01 as byte, 0x00 as byte, 0x18 as byte, 0x21 as byte, 0x12 as byte,
+        0xa4 as byte, 0x42 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+        0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x00 as byte, 0x06 as byte, 0x00 as byte, 0x04 as byte,
+        0x64 as byte, 0x65 as byte, 0x6d as byte, 0x6f as byte, 0x00 as byte, 0x06 as byte,
+        0x00 as byte, 0x04 as byte, 0x64 as byte, 0x65 as byte, 0x6d as byte, 0x6f as byte,
+        0x00 as byte, 0x24 as byte, 0x00 as byte, 0x04 as byte, 0x6e as byte, 0x00 as byte,
+        0x01 as byte, 0xff as byte,
+    ];
+    result = run_seed(duplicate_username[0:44], false, true, 14i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    printf("STUN fuzz corpus smoke passed\n");
+    return 0i32;
+}
