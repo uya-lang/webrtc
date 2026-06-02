@@ -446,7 +446,7 @@
 - [x] Firefox headless DataChannel echo。
 - [x] Firefox headless one-way audio/video。
 - [x] Pion WebRTC interop。
-- [ ] aiortc interop。
+- [x] aiortc interop。
 - [ ] GStreamer webrtcbin interop。
 - [x] 网络模拟：1%/5%/10% loss。
 - [x] 网络模拟：reorder/duplicate/jitter。

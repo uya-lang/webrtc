@@ -74,11 +74,15 @@ test: build
 	test -x tests/check_phase18_rtp_loopback_bench.sh
 	test -x tests/check_phase17_browser_firefox_media.sh
 	test -x tests/check_phase17_pion_interop.sh
+	test -x tests/check_phase17_aiortc_interop.sh
 	test -x tests/pion_interop.py
+	test -x tests/aiortc_interop.py
 	rg -Fq 'tests/browser_datachannel_interop.py firefox audio' tests/check_phase17_browser_firefox_media.sh
 	rg -Fq 'tests/browser_datachannel_interop.py firefox video' tests/check_phase17_browser_firefox_media.sh
 	rg -Fq 'Pion WebRTC interop checks passed' tests/pion_interop.py
 	rg -Fq 'recentSrtpRtcpErrors' tests/pion_interop.py
+	rg -Fq 'aiortc interop checks passed' tests/aiortc_interop.py
+	rg -Fq 'recentSrtpRtcpErrors' tests/aiortc_interop.py
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya
