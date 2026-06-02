@@ -405,8 +405,8 @@
 - [x] 实现 delay-based estimator。
 - [x] 实现 loss-based fallback。
 - [x] 实现 probing。
-- [ ] 实现 bitrate allocator。
-- [ ] 实现 audio/video priority。
+- [~] 实现 bitrate allocator。
+- [x] 实现 audio/video priority。
 - [ ] 将 RTP sender 接入 pacer。
 
 验收标准：

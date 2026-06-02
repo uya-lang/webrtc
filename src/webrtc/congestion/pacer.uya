@@ -18,6 +18,7 @@ export error PacerTransportWideSeqInvalidState;
 export error PacerDelayBasedEstimatorInvalidState;
 export error PacerLossBasedFallbackInvalidState;
 export error PacerProbeControllerInvalidState;
+export error PacerBitrateAllocatorInvalidState;
 
 export struct PacerQueueConfig {
     max_packets: usize = 16usize,
@@ -101,6 +102,21 @@ export struct PacerProbeController {
     probe_interval_us: u64 = 1000000u64,
     probe_multiplier_percent: u8 = 120u8,
     probe_count: u64 = 0u64,
+}
+
+export struct PacerBitrateAllocation {
+    audio_bitrate_bps: u64 = 0u64,
+    video_bitrate_bps: u64 = 0u64,
+    total_bitrate_bps: u64 = 0u64,
+}
+
+export struct PacerBitrateAllocator {
+    audio_min_bitrate_bps: u64 = 64000u64,
+    video_min_bitrate_bps: u64 = 150000u64,
+    audio_share_percent: u8 = 20u8,
+    video_share_percent: u8 = 80u8,
+    audio_priority_weight: u8 = 2u8,
+    video_priority_weight: u8 = 1u8,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -671,4 +687,54 @@ export fn pacer_probe_controller_next_probe_bitrate_bps(
         probe_bitrate_bps = target_bitrate_bps;
     }
     return probe_bitrate_bps;
+}
+
+/// Create the conservative bitrate allocator.
+export fn pacer_bitrate_allocator_make() PacerBitrateAllocator {
+    return PacerBitrateAllocator{};
+}
+
+/// Split a total target bitrate into audio and video budgets.
+export fn pacer_bitrate_allocator_allocate(
+    allocator: &PacerBitrateAllocator,
+    target_bitrate_bps: u64,
+) !PacerBitrateAllocation {
+    if allocator == null {
+        return error.PacerBitrateAllocatorInvalidState;
+    }
+
+    var audio_bitrate_bps: u64 = 0u64;
+    var video_bitrate_bps: u64 = 0u64;
+
+    if allocator.audio_priority_weight >= allocator.video_priority_weight {
+        audio_bitrate_bps = (target_bitrate_bps * (allocator.audio_share_percent as u64)) / 100u64;
+        if audio_bitrate_bps < allocator.audio_min_bitrate_bps {
+            audio_bitrate_bps = allocator.audio_min_bitrate_bps;
+        }
+        if audio_bitrate_bps > target_bitrate_bps {
+            audio_bitrate_bps = target_bitrate_bps;
+        }
+
+        if target_bitrate_bps > audio_bitrate_bps {
+            video_bitrate_bps = target_bitrate_bps - audio_bitrate_bps;
+        }
+    } else {
+        video_bitrate_bps = (target_bitrate_bps * (allocator.video_share_percent as u64)) / 100u64;
+        if video_bitrate_bps < allocator.video_min_bitrate_bps {
+            video_bitrate_bps = allocator.video_min_bitrate_bps;
+        }
+        if video_bitrate_bps > target_bitrate_bps {
+            video_bitrate_bps = target_bitrate_bps;
+        }
+
+        if target_bitrate_bps > video_bitrate_bps {
+            audio_bitrate_bps = target_bitrate_bps - video_bitrate_bps;
+        }
+    }
+
+    return PacerBitrateAllocation{
+        audio_bitrate_bps: audio_bitrate_bps,
+        video_bitrate_bps: video_bitrate_bps,
+        total_bitrate_bps: target_bitrate_bps,
+    };
 }

@@ -32,6 +32,12 @@ rg -q "export fn pacer_probe_controller_make" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_probe_controller_should_probe" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_probe_controller_note_probe" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_probe_controller_next_probe_bitrate_bps" src/webrtc/congestion/pacer.uya
+rg -q "export struct PacerBitrateAllocator" src/webrtc/congestion/pacer.uya
+rg -q "export struct PacerBitrateAllocation" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_bitrate_allocator_make" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_bitrate_allocator_allocate" src/webrtc/congestion/pacer.uya
+rg -q "audio_priority_weight" src/webrtc/congestion/pacer.uya
+rg -q "video_priority_weight" src/webrtc/congestion/pacer.uya
 
 ../uya/bin/uya run src/webrtc_congestion_pacer_test_main.uya
 

@@ -276,6 +276,57 @@ fn check_probing_controller() i32 {
     return 0i32;
 }
 
+fn check_bitrate_allocator() i32 {
+    var allocator: PacerBitrateAllocator = pacer_bitrate_allocator_make();
+    allocator.audio_min_bitrate_bps = 250000u64;
+    allocator.audio_share_percent = 20u8;
+    allocator.video_share_percent = 80u8;
+
+    const allocation: !PacerBitrateAllocation = pacer_bitrate_allocator_allocate(&allocator, 1000000u64);
+    if allocation.error_id != 0 {
+        return 100i32;
+    }
+    if allocation.value.audio_bitrate_bps != 250000u64 {
+        return 101i32;
+    }
+    if allocation.value.video_bitrate_bps != 750000u64 {
+        return 102i32;
+    }
+    if allocation.value.total_bitrate_bps != 1000000u64 {
+        return 103i32;
+    }
+
+    return 0i32;
+}
+
+fn check_audio_video_priority() i32 {
+    var allocator: PacerBitrateAllocator = pacer_bitrate_allocator_make();
+    allocator.audio_min_bitrate_bps = 250000u64;
+    allocator.video_min_bitrate_bps = 150000u64;
+    allocator.audio_share_percent = 20u8;
+    allocator.video_share_percent = 80u8;
+
+    const audio_first: !PacerBitrateAllocation = pacer_bitrate_allocator_allocate(&allocator, 400000u64);
+    if audio_first.error_id != 0 {
+        return 110i32;
+    }
+    if audio_first.value.audio_bitrate_bps != 250000u64 || audio_first.value.video_bitrate_bps != 150000u64 {
+        return 111i32;
+    }
+
+    allocator.audio_priority_weight = 1u8;
+    allocator.video_priority_weight = 2u8;
+    const video_first: !PacerBitrateAllocation = pacer_bitrate_allocator_allocate(&allocator, 400000u64);
+    if video_first.error_id != 0 {
+        return 112i32;
+    }
+    if video_first.value.audio_bitrate_bps != 80000u64 || video_first.value.video_bitrate_bps != 320000u64 {
+        return 113i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -322,6 +373,18 @@ fn main() i32 {
     result = check_probing_controller();
     if result != 0i32 {
         printf("probing tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_bitrate_allocator();
+    if result != 0i32 {
+        printf("bitrate allocator tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_audio_video_priority();
+    if result != 0i32 {
+        printf("audio/video priority tests failed: %d\n", result);
         return 1i32;
     }
 
