@@ -378,7 +378,7 @@
 - [x] 实现 `create_offer`。
 - [x] 实现 `create_answer`。
 - [x] 实现 `add_ice_candidate`。
-- [ ] 实现 transceiver。
+- [x] 实现 transceiver。
 - [ ] 实现 sender/receiver。
 - [ ] 实现 track。
 - [ ] 实现 DataChannel 事件。

@@ -1,0 +1,215 @@
+// webrtc.transceiver - PeerConnection transceiver model
+// Module path: src/webrtc/transceiver.uya -> use webrtc.transceiver;
+
+use webrtc.errors;
+use webrtc.media.model;
+
+export const TRANSCEIVER_DIRECTION_SENDRECV: u8 = 0u8;
+export const TRANSCEIVER_DIRECTION_SENDONLY: u8 = 1u8;
+export const TRANSCEIVER_DIRECTION_RECVONLY: u8 = 2u8;
+export const TRANSCEIVER_DIRECTION_INACTIVE: u8 = 3u8;
+
+export const TRANSCEIVER_MAX_MID_BYTES: usize = 32usize;
+
+export error TransceiverInvalidState;
+
+export struct TransceiverInit {
+    direction: u8 = TRANSCEIVER_DIRECTION_SENDRECV,
+}
+
+export struct Transceiver {
+    peer_connection_id: u64 = 0u64,
+    index: usize = 0usize,
+    kind: u8 = MEDIA_KIND_UNKNOWN,
+    direction: u8 = TRANSCEIVER_DIRECTION_SENDRECV,
+    current_direction: u8 = TRANSCEIVER_DIRECTION_SENDRECV,
+    mid: [byte: TRANSCEIVER_MAX_MID_BYTES] = [],
+    mid_len: usize = 0usize,
+    stopped: bool = false,
+}
+
+fn transceiver_copy_bytes(dst: &[byte], src: &[byte]) !void {
+    if src.len > dst.len {
+        return error.TransceiverInvalidState;
+    }
+
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn transceiver_reset_mid(transceiver: &Transceiver) void {
+    if transceiver == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < TRANSCEIVER_MAX_MID_BYTES {
+        transceiver.mid[index] = 0 as byte;
+        index = index + 1usize;
+    }
+    transceiver.mid_len = 0usize;
+}
+
+fn transceiver_validate_direction(direction: u8) !void {
+    if direction == TRANSCEIVER_DIRECTION_SENDRECV
+        || direction == TRANSCEIVER_DIRECTION_SENDONLY
+        || direction == TRANSCEIVER_DIRECTION_RECVONLY
+        || direction == TRANSCEIVER_DIRECTION_INACTIVE {
+        return;
+    }
+    return error.UnsupportedCapability;
+}
+
+fn transceiver_validate_kind(kind: u8) !void {
+    if kind == MEDIA_KIND_AUDIO || kind == MEDIA_KIND_VIDEO {
+        return;
+    }
+    return error.UnsupportedCapability;
+}
+
+fn transceiver_make_default() Transceiver {
+    var mid: [byte: TRANSCEIVER_MAX_MID_BYTES] = [];
+    return Transceiver{
+        peer_connection_id: 0u64,
+        index: 0usize,
+        kind: MEDIA_KIND_UNKNOWN,
+        direction: TRANSCEIVER_DIRECTION_SENDRECV,
+        current_direction: TRANSCEIVER_DIRECTION_SENDRECV,
+        mid: mid,
+        mid_len: 0usize,
+        stopped: false,
+    };
+}
+
+fn transceiver_encode_mid_prefix(kind: u8) &[byte] {
+    if kind == MEDIA_KIND_AUDIO {
+        return "audio" as &[byte];
+    }
+    return "video" as &[byte];
+}
+
+fn transceiver_write_decimal(dst: &[byte], value: usize) !usize {
+    if dst.len == 0usize {
+        return error.TransceiverInvalidState;
+    }
+
+    var reversed: [byte: TRANSCEIVER_MAX_MID_BYTES] = [];
+    var reversed_count: usize = 0usize;
+    var remaining: usize = value;
+
+    if remaining == 0usize {
+        dst[0usize] = '0' as byte;
+        return 1usize;
+    }
+
+    while remaining > 0usize {
+        if reversed_count >= TRANSCEIVER_MAX_MID_BYTES {
+            return error.TransceiverInvalidState;
+        }
+        reversed[reversed_count] = ('0' as byte) + ((remaining % 10usize) as byte);
+        reversed_count = reversed_count + 1usize;
+        remaining = remaining / 10usize;
+    }
+
+    var written: usize = 0usize;
+    while reversed_count > 0usize {
+        reversed_count = reversed_count - 1usize;
+        dst[written] = reversed[reversed_count];
+        written = written + 1usize;
+    }
+
+    return written;
+}
+
+fn transceiver_build_mid(transceiver: &Transceiver) !void {
+    if transceiver == null {
+        return error.TransceiverInvalidState;
+    }
+
+    transceiver_reset_mid(transceiver);
+    const prefix: &[byte] = transceiver_encode_mid_prefix(transceiver.kind);
+    if prefix.len >= TRANSCEIVER_MAX_MID_BYTES {
+        return error.TransceiverInvalidState;
+    }
+
+    try transceiver_copy_bytes(transceiver.mid[0:TRANSCEIVER_MAX_MID_BYTES], prefix);
+    var cursor: usize = prefix.len;
+    const written: !usize = transceiver_write_decimal(transceiver.mid[cursor:TRANSCEIVER_MAX_MID_BYTES - cursor], transceiver.index);
+    if written.error_id != 0 {
+        return error.TransceiverInvalidState;
+    }
+    cursor = cursor + written.value;
+    transceiver.mid_len = cursor;
+    return;
+}
+
+/// Create a default transceiver init.
+export fn transceiver_init_make() TransceiverInit {
+    return TransceiverInit{};
+}
+
+/// Create a default transceiver shell.
+export fn transceiver_make() Transceiver {
+    return transceiver_make_default();
+}
+
+/// Reset a transceiver to its default shell.
+export fn transceiver_reset(transceiver: &Transceiver) void {
+    if transceiver == null {
+        return;
+    }
+
+    transceiver.peer_connection_id = 0u64;
+    transceiver.index = 0usize;
+    transceiver.kind = MEDIA_KIND_UNKNOWN;
+    transceiver.direction = TRANSCEIVER_DIRECTION_SENDRECV;
+    transceiver.current_direction = TRANSCEIVER_DIRECTION_SENDRECV;
+    transceiver_reset_mid(transceiver);
+    transceiver.stopped = false;
+}
+
+/// Initialize a transceiver from a PeerConnection slot.
+export fn transceiver_assign(transceiver: &Transceiver, peer_connection_id: u64, index: usize, kind: u8, direction: u8) !void {
+    if transceiver == null {
+        return error.TransceiverInvalidState;
+    }
+    try transceiver_validate_kind(kind);
+    try transceiver_validate_direction(direction);
+
+    transceiver.peer_connection_id = peer_connection_id;
+    transceiver.index = index;
+    transceiver.kind = kind;
+    transceiver.direction = direction;
+    transceiver.current_direction = direction;
+    transceiver.stopped = false;
+    try transceiver_build_mid(transceiver);
+    return;
+}
+
+/// Return whether the transceiver has been stopped.
+export fn transceiver_is_stopped(transceiver: &Transceiver) bool {
+    if transceiver == null {
+        return true;
+    }
+    return transceiver.stopped;
+}
+
+/// Return the transceiver MID bytes.
+export fn transceiver_mid_bytes(transceiver: &Transceiver) &[byte] {
+    if transceiver == null || transceiver.mid_len == 0usize {
+        return [] as &[byte];
+    }
+    return transceiver.mid[0:transceiver.mid_len];
+}
+
+/// Return the transceiver MID length.
+export fn transceiver_mid_len(transceiver: &Transceiver) usize {
+    if transceiver == null {
+        return 0usize;
+    }
+    return transceiver.mid_len;
+}

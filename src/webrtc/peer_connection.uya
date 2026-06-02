@@ -3,7 +3,9 @@
 
 use webrtc.errors;
 use webrtc.ice.candidate;
+use webrtc.media.model;
 use webrtc.runtime;
+use webrtc.transceiver;
 
 export const PEER_CONNECTION_STATE_NEW: u8 = 0u8;
 export const PEER_CONNECTION_STATE_CLOSED: u8 = 1u8;
@@ -16,6 +18,7 @@ export const PEER_CONNECTION_CONNECTION_STATE_FAILED: u8 = 4u8;
 export const PEER_CONNECTION_CONNECTION_STATE_CLOSED: u8 = 5u8;
 
 export const PEER_CONNECTION_MAX_DESCRIPTION_BYTES: usize = 4096usize;
+export const PEER_CONNECTION_MAX_TRANSCEIVERS: usize = 8usize;
 
 export error PeerConnectionInvalidState;
 export error PeerConnectionDescriptionEmpty;
@@ -58,6 +61,9 @@ export struct PeerConnection {
     has_remote_description: bool = false,
     ice_role: u8 = PEER_CONNECTION_ICE_AGENT_ROLE_UNKNOWN,
     ice_state: u8 = PEER_CONNECTION_ICE_AGENT_STATE_NEW,
+    transceiver_count: usize = 0usize,
+    transceiver_high_watermark: usize = 0usize,
+    transceivers: [Transceiver: PEER_CONNECTION_MAX_TRANSCEIVERS] = [],
     remote_candidate: PeerConnectionRemoteIceCandidate = PeerConnectionRemoteIceCandidate{},
     local_description: PeerConnectionDescription = PeerConnectionDescription{},
     remote_description: PeerConnectionDescription = PeerConnectionDescription{},
@@ -125,6 +131,28 @@ fn peer_connection_ice_reset(pc: &PeerConnection) void {
     pc.remote_candidate.count = 0usize;
 }
 
+fn peer_connection_transceiver_clear_slot(transceiver: &Transceiver) void {
+    if transceiver == null {
+        return;
+    }
+    transceiver_reset(transceiver);
+}
+
+fn peer_connection_transceivers_reset(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < PEER_CONNECTION_MAX_TRANSCEIVERS {
+        peer_connection_transceiver_clear_slot(&pc.transceivers[index]);
+        index = index + 1usize;
+    }
+
+    pc.transceiver_count = 0usize;
+    pc.transceiver_high_watermark = 0usize;
+}
+
 fn peer_connection_ice_store_remote_candidate(pc: &PeerConnection, candidate: &IceCandidate) !void {
     if pc == null || candidate == null {
         return error.InvalidPacket;
@@ -179,6 +207,7 @@ export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config
     pc.config = *config;
     pc.state = PEER_CONNECTION_STATE_NEW;
     peer_connection_ice_reset(pc);
+    peer_connection_transceivers_reset(pc);
     peer_connection_clear_descriptions(pc);
     return;
 }
@@ -206,6 +235,7 @@ export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !
     pc.config = *config;
     pc.state = PEER_CONNECTION_STATE_NEW;
     peer_connection_ice_reset(&pc);
+    peer_connection_transceivers_reset(&pc);
     peer_connection_clear_descriptions(&pc);
     return pc;
 }
@@ -372,6 +402,36 @@ export fn peer_connection_add_ice_candidate(pc: &PeerConnection, candidate: &Ice
     return;
 }
 
+/// Add a transceiver to the PeerConnection and return its slot snapshot.
+export fn peer_connection_add_transceiver(pc: &PeerConnection, kind: u8, init: &TransceiverInit) !Transceiver {
+    if pc == null || init == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+    if pc.transceiver_count >= PEER_CONNECTION_MAX_TRANSCEIVERS {
+        return error.RtcRuntimeLimitReached;
+    }
+
+    const slot: usize = pc.transceiver_count;
+    var transceiver: Transceiver = transceiver_make();
+    try transceiver_assign(&transceiver, pc.id, slot, kind, init.direction);
+
+    pc.transceivers[slot] = transceiver;
+    pc.transceiver_count = slot + 1usize;
+    if pc.transceiver_count > pc.transceiver_high_watermark {
+        pc.transceiver_high_watermark = pc.transceiver_count;
+    }
+
+    return pc.transceivers[slot];
+}
+
+/// Return the number of registered transceivers.
+export fn peer_connection_transceiver_count(pc: &PeerConnection) usize {
+    if pc == null {
+        return 0usize;
+    }
+    return pc.transceiver_count;
+}
+
 /// Close the PeerConnection and unregister it from the runtime.
 export fn peer_connection_close(pc: &PeerConnection) bool {
     if pc == null {
@@ -387,6 +447,7 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
 
     pc.state = PEER_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
+    peer_connection_transceivers_reset(pc);
     peer_connection_clear_descriptions(pc);
     return true;
 }
@@ -406,5 +467,6 @@ export fn peer_connection_reset(pc: &PeerConnection) void {
     pc.config = RtcConfiguration{};
     pc.state = PEER_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
+    peer_connection_transceivers_reset(pc);
     peer_connection_clear_descriptions(pc);
 }
