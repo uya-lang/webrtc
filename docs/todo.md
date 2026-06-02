@@ -465,7 +465,7 @@
 - [x] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
 - [x] 补齐遗漏的 DataChannel throughput benchmark。
 - [x] 补齐遗漏的 RTP loopback multi-peer benchmark。
-- [~] 补齐遗漏的 JitterBuffer benchmark。
+- [x] 补齐遗漏的 JitterBuffer benchmark。
 - [~] 补齐遗漏的 Pacer queue benchmark。
 - [ ] 用 `@vector` 优化 AES/GHASH/CRC 可行路径。
 - [ ] 优化 packet descriptor cache locality。
