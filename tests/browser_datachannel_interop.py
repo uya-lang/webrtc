@@ -16,6 +16,7 @@ import os
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -252,7 +253,7 @@ class CDPClient:
                 return message.get("result", {})
 
 
-def make_test_page() -> str:
+def make_datachannel_test_page() -> str:
     return textwrap.dedent(
         """
         <!doctype html>
@@ -409,6 +410,177 @@ def make_test_page() -> str:
     ).strip()
 
 
+def make_audio_test_page() -> str:
+    return textwrap.dedent(
+        """
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>Phase 17 Browser Audio Interop</title>
+        <script>
+        window.__phase14Result = null;
+
+        function fail(message, error) {
+          window.__phase14Result = {
+            ok: false,
+            error: message,
+            detail: error && error.stack ? String(error.stack) : (error ? String(error) : "")
+          };
+        }
+
+        function delay(ms) {
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function waitForEvent(target, name, predicate) {
+          return new Promise((resolve, reject) => {
+            const handler = event => {
+              try {
+                if (!predicate || predicate(event)) {
+                  target.removeEventListener(name, handler);
+                  resolve(event);
+                }
+              } catch (error) {
+                target.removeEventListener(name, handler);
+                reject(error);
+              }
+            };
+            target.addEventListener(name, handler);
+          });
+        }
+
+        function waitForState(target, name, predicate) {
+          if (predicate()) {
+            return Promise.resolve();
+          }
+          return waitForEvent(target, name, () => predicate());
+        }
+
+        function makeIceRelay(source, sink, sinkName) {
+          const queue = [];
+          let ready = false;
+          source.addEventListener('icecandidate', event => {
+            if (!event.candidate) {
+              return;
+            }
+            if (ready) {
+              void sink.addIceCandidate(event.candidate).catch(error => {
+                fail(sinkName + ' addIceCandidate failed', error);
+              });
+              return;
+            }
+            queue.push(event.candidate);
+          });
+          return {
+            async enable() {
+              ready = true;
+              for (const candidate of queue.splice(0)) {
+                await sink.addIceCandidate(candidate);
+              }
+            }
+          };
+        }
+
+        async function waitForInboundAudioPackets(receiver) {
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
+            const stats = await receiver.getStats();
+            for (const stat of stats.values()) {
+              if (stat.type === 'inbound-rtp' && (stat.kind === 'audio' || stat.mediaType === 'audio')) {
+                const packets = stat.packetsReceived || 0;
+                if (packets > 0) {
+                  return packets;
+                }
+              }
+            }
+            await delay(100);
+          }
+          return 0;
+        }
+
+        async function run() {
+          const pc1 = new RTCPeerConnection({iceServers: []});
+          const pc2 = new RTCPeerConnection({iceServers: []});
+          const relay12 = makeIceRelay(pc1, pc2, 'pc2');
+          const relay21 = makeIceRelay(pc2, pc1, 'pc1');
+          const tracks = [];
+
+          pc2.addEventListener('track', event => {
+            tracks.push(event.track.kind);
+          });
+
+          const audioContext = new AudioContext({sampleRate: 48000});
+          await audioContext.resume();
+          const oscillator = audioContext.createOscillator();
+          oscillator.type = 'sine';
+          oscillator.frequency.value = 440;
+          const gain = audioContext.createGain();
+          gain.gain.value = 0.02;
+          const destination = audioContext.createMediaStreamDestination();
+          oscillator.connect(gain);
+          gain.connect(destination);
+          oscillator.start();
+
+          const sourceTrack = destination.stream.getAudioTracks()[0];
+          pc1.addTrack(sourceTrack, destination.stream);
+
+          const trackPromise = waitForEvent(pc2, 'track');
+
+          const offer = await pc1.createOffer();
+          await pc1.setLocalDescription(offer);
+          await pc2.setRemoteDescription(pc1.localDescription);
+          await relay12.enable();
+
+          const answer = await pc2.createAnswer();
+          await pc2.setLocalDescription(answer);
+          await pc1.setRemoteDescription(pc2.localDescription);
+          await relay21.enable();
+
+          const trackEvent = await trackPromise;
+          const receivedTrack = trackEvent.track;
+          const receiver = pc2.getReceivers().find(r => r.track === receivedTrack) || pc2.getReceivers()[0];
+          if (!receiver) {
+            throw new Error('receiver not found for audio track');
+          }
+
+          await Promise.all([
+            waitForState(pc1, 'connectionstatechange', () => pc1.connectionState === 'connected'),
+            waitForState(pc2, 'connectionstatechange', () => pc2.connectionState === 'connected'),
+          ]);
+
+          const packetsReceived = await waitForInboundAudioPackets(receiver);
+          if (packetsReceived <= 0) {
+            throw new Error('audio packets were not received');
+          }
+
+          const receivedTrackKind = receivedTrack.kind;
+          const receivedTrackReadyState = receivedTrack.readyState;
+
+          sourceTrack.stop();
+          oscillator.stop();
+          await audioContext.close();
+
+          pc1.close();
+          pc2.close();
+          await delay(25);
+
+          window.__phase14Result = {
+            ok: true,
+            browser: navigator.userAgent,
+            tracks,
+            receivedTrackKind,
+            receivedTrackReadyState,
+            packetsReceived,
+            pc1ConnectionState: pc1.connectionState,
+            pc2ConnectionState: pc2.connectionState,
+          };
+        }
+
+        run().catch(error => fail('phase17 browser audio test failed', error));
+        </script>
+        """
+    ).strip()
+
+
 def start_http_server(directory: Path) -> tuple[ThreadingHTTPServer, threading.Thread, int]:
     port = find_free_port()
     handler = partial(SimpleHTTPRequestHandler, directory=str(directory))
@@ -447,44 +619,65 @@ def parse_setup_values(sdp_text: str) -> list[str]:
     return values
 
 
-def validate_browser_result(result: dict[str, Any]) -> None:
+def validate_browser_result(result: dict[str, Any], mode: str) -> None:
     require(result.get("ok") is True, f"browser page reported failure: {result}")
     require(result.get("pc1ConnectionState") == "closed", "pc1 should be closed after cleanup")
     require(result.get("pc2ConnectionState") == "closed", "pc2 should be closed after cleanup")
-    require(result.get("dc1ReadyState") == "closed", "dc1 should be closed after cleanup")
-    require(result.get("dc2ReadyState") == "closed", "dc2 should be closed after cleanup")
+    if mode == "datachannel":
+        require(result.get("dc1ReadyState") == "closed", "dc1 should be closed after cleanup")
+        require(result.get("dc2ReadyState") == "closed", "dc2 should be closed after cleanup")
 
-    messages = result.get("messages")
-    require(isinstance(messages, list), "browser result messages must be an array")
-    require("dc2:phase14-ping" in messages, "browser did not receive ping on dc2")
-    require("dc1:phase14-pong" in messages, "browser did not receive pong on dc1")
+        messages = result.get("messages")
+        require(isinstance(messages, list), "browser result messages must be an array")
+        require("dc2:phase14-ping" in messages, "browser did not receive ping on dc2")
+        require("dc1:phase14-pong" in messages, "browser did not receive pong on dc1")
 
-    offer_sdp = str(result.get("offerSdp", ""))
-    answer_sdp = str(result.get("answerSdp", ""))
-    require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
-    require("a=setup:actpass" in offer_sdp, "offer SDP missing actpass setup")
-    require("a=sctp-port:5000" in offer_sdp, "offer SDP missing sctp-port")
-    require("a=max-message-size:262144" in offer_sdp, "offer SDP missing max-message-size")
+        offer_sdp = str(result.get("offerSdp", ""))
+        answer_sdp = str(result.get("answerSdp", ""))
+        require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
+        require("a=setup:actpass" in offer_sdp, "offer SDP missing actpass setup")
+        require("a=sctp-port:5000" in offer_sdp, "offer SDP missing sctp-port")
+        require("a=max-message-size:262144" in offer_sdp, "offer SDP missing max-message-size")
 
-    require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
-    require("a=setup:active" in answer_sdp, "answer SDP missing active setup")
+        require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
+        require("a=setup:active" in answer_sdp, "answer SDP missing active setup")
 
-    browser_case = load_browser_case()
-    expected_profiles = set(browser_case.get("transport_profiles", []))
-    require("UDP/DTLS/SCTP" in parse_transport_profiles(offer_sdp), "browser offer transport profile mismatch")
-    require(
-        str(browser_case.get("setup_role")) in parse_setup_values(offer_sdp),
-        "browser offer setup role mismatch",
-    )
-    require(expected_profiles, "browser fixture has no transport profiles")
+        browser_case = load_browser_case()
+        expected_profiles = set(browser_case.get("transport_profiles", []))
+        require("UDP/DTLS/SCTP" in parse_transport_profiles(offer_sdp), "browser offer transport profile mismatch")
+        require(
+            str(browser_case.get("setup_role")) in parse_setup_values(offer_sdp),
+            "browser offer setup role mismatch",
+        )
+        require(expected_profiles, "browser fixture has no transport profiles")
+        return
+
+    if mode == "audio":
+        require(result.get("receivedTrackKind") == "audio", "browser did not receive an audio track")
+        require(result.get("receivedTrackReadyState") == "live", "audio track should be live before cleanup")
+        packets_received = result.get("packetsReceived")
+        require(isinstance(packets_received, int) and packets_received > 0, "audio packets were not received")
+        tracks = result.get("tracks")
+        require(isinstance(tracks, list) and "audio" in tracks, "browser did not surface an audio track event")
+        return
+
+    raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
-def run_browser_test() -> dict[str, Any]:
+def make_test_page(mode: str) -> str:
+    if mode == "datachannel":
+        return make_datachannel_test_page()
+    if mode == "audio":
+        return make_audio_test_page()
+    raise InteropError(f"unsupported browser interop mode: {mode}")
+
+
+def run_browser_test(mode: str) -> dict[str, Any]:
     browser_exe = find_browser_executable()
     with tempfile.TemporaryDirectory(prefix="webrtc-browser-datachannel-") as tempdir:
         tempdir_path = Path(tempdir)
         page_path = tempdir_path / "index.html"
-        page_path.write_text(make_test_page(), encoding="utf-8")
+        page_path.write_text(make_test_page(mode), encoding="utf-8")
 
         server, thread, http_port = start_http_server(tempdir_path)
         browser_user_data_dir = tempdir_path / "profile"
@@ -498,6 +691,7 @@ def run_browser_test() -> dict[str, Any]:
                 "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
+                "--autoplay-policy=no-user-gesture-required",
                 "--user-data-dir=" + str(browser_user_data_dir),
             ],
             stdout=subprocess.PIPE,
@@ -550,7 +744,7 @@ def run_browser_test() -> dict[str, Any]:
                             break
                     time.sleep(0.2)
                 require(result is not None, "browser page did not publish a result")
-                validate_browser_result(result)
+                validate_browser_result(result, mode)
                 return result
             finally:
                 client.close()
@@ -568,10 +762,20 @@ def run_browser_test() -> dict[str, Any]:
 
 def main() -> int:
     try:
-        result = run_browser_test()
-        print("Browser DataChannel interop checks passed")
-        print(f"  Browser: {result.get('browser')}")
-        print(f"  Messages: {', '.join(result.get('messages', []))}")
+        mode = "datachannel"
+        if len(sys.argv) > 1:
+            mode = sys.argv[1]
+        result = run_browser_test(mode)
+        if mode == "datachannel":
+            print("Browser DataChannel interop checks passed")
+            print(f"  Browser: {result.get('browser')}")
+            print(f"  Messages: {', '.join(result.get('messages', []))}")
+        elif mode == "audio":
+            print("Browser audio interop checks passed")
+            print(f"  Browser: {result.get('browser')}")
+            print(f"  Packets received: {result.get('packetsReceived')}")
+        else:
+            print(f"Browser {mode} interop checks passed")
         return 0
     except (InteropError, TimeoutError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}")
