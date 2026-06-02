@@ -276,6 +276,51 @@ fn check_data_channel_stats_collect() i32 {
     return 0i32;
 }
 
+fn check_outbound_rtp_stats_collect() i32 {
+    const stats_result: !RtcOutboundRtpStreamStats = rtc_outbound_rtp_stream_stats_collect(
+        0xE1u64,
+        3333u64,
+        0xAABBCCDDu32,
+        MEDIA_KIND_AUDIO,
+        34u64,
+        5678u64,
+        21u64,
+        2u64,
+        128000u64,
+        0u32,
+        0u32,
+        1u8,
+    );
+    if stats_result.error_id != 0 {
+        return 60i32;
+    }
+
+    const stats: RtcOutboundRtpStreamStats = stats_result.value;
+    if stats.handle != 0xE1u64 || stats.timestamp_us != 3333u64 {
+        return 61i32;
+    }
+    if stats.ssrc != 0xAABBCCDDu32 || stats.media_kind != MEDIA_KIND_AUDIO {
+        return 62i32;
+    }
+    if stats.packets_sent != 34u64 || stats.bytes_sent != 5678u64 {
+        return 63i32;
+    }
+    if stats.frames_encoded != 21u64 || stats.key_frames_encoded != 2u64 {
+        return 64i32;
+    }
+    if stats.target_bitrate_bps != 128000u64 {
+        return 65i32;
+    }
+    if stats.frame_width != 0u32 || stats.frame_height != 0u32 {
+        return 66i32;
+    }
+    if stats.quality_limitation_reason != 1u8 {
+        return 67i32;
+    }
+
+    return 0i32;
+}
+
 fn check_codec_stats_collect() i32 {
     var codec: CodecNegotiatedCodec = CodecNegotiatedCodec{
         codec_id: CODEC_ID_OPUS,
@@ -335,6 +380,12 @@ fn main() i32 {
     result = check_data_channel_stats_collect();
     if result != 0i32 {
         printf("data channel stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_outbound_rtp_stats_collect();
+    if result != 0i32 {
+        printf("outbound rtp stats tests failed: %d\n", result);
         return 1i32;
     }
 
