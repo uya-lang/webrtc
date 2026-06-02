@@ -71,6 +71,7 @@ test: build
 	test -x tests/check_phase16_dump_stats.sh
 	test -x tests/check_phase16_trace_ring.sh
 	test -x tests/check_phase18_rtp_rtcp_bench.sh
+	test -x tests/check_phase18_rtp_loopback_bench.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya
@@ -141,6 +142,7 @@ bench: build
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
 	python3 tests/jitter_bench_baseline.py
+	python3 tests/rtp_loopback_bench_baseline.py
 	python3 tests/congestion_bench_baseline.py
 	test -s $(BENCH_FILE)
 	rg -q '"name":"placeholder"' $(BENCH_FILE)
@@ -152,6 +154,7 @@ bench: build
 	rg -q '"name":"bench_aes_ctr"' $(BENCH_FILE)
 	rg -q '"name":"bench_ghash"' $(BENCH_FILE)
 	rg -q '"name":"bench_jitter"' $(BENCH_FILE)
+	rg -q '"name":"bench_rtp_loopback"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_bandwidth_drop"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_bandwidth_recovery"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_queue_delay"' $(BENCH_FILE)

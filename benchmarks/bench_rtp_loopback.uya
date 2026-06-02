@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 18 RTP loopback benchmark baseline placeholder.
+export fn benchmark_main_emit_rtp_loopback_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_rtp_loopback" as &[byte],
+        suite: "phase18" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

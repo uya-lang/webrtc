@@ -47,6 +47,12 @@ append_jitter_baseline_rows() {
 EOF
 }
 
+append_rtp_loopback_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_rtp_loopback","suite":"phase18","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 append_congestion_baseline_rows() {
     cat >> "$out_file" <<'EOF'
 {"name":"bench_congestion_bandwidth_drop","suite":"phase15","unit":"ms","value":0,"allocations":0,"high_watermark":0}
@@ -81,5 +87,6 @@ fi
 append_srtp_baseline_rows
 append_rtp_rtcp_parser_baseline_rows
 append_jitter_baseline_rows
+append_rtp_loopback_baseline_rows
 append_congestion_baseline_rows
 append_datachannel_baseline_rows
