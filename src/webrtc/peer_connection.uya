@@ -1,6 +1,7 @@
 // webrtc.peer_connection - PeerConnection 生命周期
 // 模块路径：src/webrtc/peer_connection.uya → use webrtc.peer_connection;
 
+use webrtc.api;
 use webrtc.errors;
 use webrtc.ice.candidate;
 use webrtc.media.model;
@@ -19,6 +20,7 @@ export const PEER_CONNECTION_CONNECTION_STATE_CLOSED: u8 = 5u8;
 
 export const PEER_CONNECTION_MAX_DESCRIPTION_BYTES: usize = 4096usize;
 export const PEER_CONNECTION_MAX_TRANSCEIVERS: usize = 8usize;
+export const PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS: usize = 8usize;
 
 export error PeerConnectionInvalidState;
 export error PeerConnectionDescriptionEmpty;
@@ -52,6 +54,15 @@ export struct PeerConnectionRemoteIceCandidate {
     count: usize = 0usize,
 }
 
+export struct PeerConnectionDataChannelEvent {
+    label: [byte: DATA_CHANNEL_MAX_LABEL_BYTES] = [],
+    label_len: usize = 0usize,
+    protocol: [byte: DATA_CHANNEL_MAX_PROTOCOL_BYTES] = [],
+    protocol_len: usize = 0usize,
+    ready_state: u8 = DATA_CHANNEL_STATE_CONNECTING,
+    buffered_amount: usize = 0usize,
+}
+
 export struct PeerConnection {
     id: u64 = 0u64,
     runtime: &RtcRuntime = null,
@@ -65,6 +76,10 @@ export struct PeerConnection {
     transceiver_high_watermark: usize = 0usize,
     transceivers: [Transceiver: PEER_CONNECTION_MAX_TRANSCEIVERS] = [],
     remote_candidate: PeerConnectionRemoteIceCandidate = PeerConnectionRemoteIceCandidate{},
+    data_channel_event_head: usize = 0usize,
+    data_channel_event_count: usize = 0usize,
+    data_channel_event_drop_count: u64 = 0u64,
+    data_channel_events: [PeerConnectionDataChannelEvent: PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS] = [],
     local_description: PeerConnectionDescription = PeerConnectionDescription{},
     remote_description: PeerConnectionDescription = PeerConnectionDescription{},
 }
@@ -153,6 +168,45 @@ fn peer_connection_transceivers_reset(pc: &PeerConnection) void {
     pc.transceiver_high_watermark = 0usize;
 }
 
+fn peer_connection_data_channel_event_reset(event: &PeerConnectionDataChannelEvent) void {
+    if event == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < DATA_CHANNEL_MAX_LABEL_BYTES {
+        event.label[index] = 0 as byte;
+        index = index + 1usize;
+    }
+
+    index = 0usize;
+    while index < DATA_CHANNEL_MAX_PROTOCOL_BYTES {
+        event.protocol[index] = 0 as byte;
+        index = index + 1usize;
+    }
+
+    event.label_len = 0usize;
+    event.protocol_len = 0usize;
+    event.ready_state = DATA_CHANNEL_STATE_CONNECTING;
+    event.buffered_amount = 0usize;
+}
+
+fn peer_connection_data_channel_events_reset(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        peer_connection_data_channel_event_reset(&pc.data_channel_events[index]);
+        index = index + 1usize;
+    }
+
+    pc.data_channel_event_head = 0usize;
+    pc.data_channel_event_count = 0usize;
+    pc.data_channel_event_drop_count = 0u64;
+}
+
 fn peer_connection_ice_store_remote_candidate(pc: &PeerConnection, candidate: &IceCandidate) !void {
     if pc == null || candidate == null {
         return error.InvalidPacket;
@@ -193,6 +247,48 @@ fn peer_connection_set_answer_ice_state(pc: &PeerConnection) !void {
     return;
 }
 
+fn peer_connection_queue_data_channel_event(pc: &PeerConnection, channel: &DataChannel) !void {
+    if pc == null || channel == null {
+        return error.PeerConnectionInvalidState;
+    }
+    if pc.data_channel_event_count >= PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        pc.data_channel_event_drop_count = pc.data_channel_event_drop_count + 1u64;
+        return error.RtcRuntimeLimitReached;
+    }
+
+    const slot: usize = pc.data_channel_event_head + pc.data_channel_event_count;
+    const event_index: usize = if slot >= PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        slot - PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS
+    } else {
+        slot
+    };
+
+    if event_index >= PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        pc.data_channel_event_drop_count = pc.data_channel_event_drop_count + 1u64;
+        return error.RtcRuntimeLimitReached;
+    }
+
+    peer_connection_data_channel_event_reset(&pc.data_channel_events[event_index]);
+    var index: usize = 0usize;
+    while index < channel.label_len {
+        pc.data_channel_events[event_index].label[index] = channel.label[index];
+        index = index + 1usize;
+    }
+    pc.data_channel_events[event_index].label_len = channel.label_len;
+
+    index = 0usize;
+    while index < channel.protocol_len {
+        pc.data_channel_events[event_index].protocol[index] = channel.protocol[index];
+        index = index + 1usize;
+    }
+    pc.data_channel_events[event_index].protocol_len = channel.protocol_len;
+    pc.data_channel_events[event_index].ready_state = data_channel_ready_state(channel);
+    pc.data_channel_events[event_index].buffered_amount = data_channel_buffered_amount(channel);
+
+    pc.data_channel_event_count = pc.data_channel_event_count + 1usize;
+    return;
+}
+
 /// Create a PeerConnection and register it with the runtime.
 export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config: &RtcConfiguration) !void {
     if pc == null {
@@ -208,6 +304,7 @@ export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config
     pc.state = PEER_CONNECTION_STATE_NEW;
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
+    peer_connection_data_channel_events_reset(pc);
     peer_connection_clear_descriptions(pc);
     return;
 }
@@ -236,6 +333,7 @@ export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !
     pc.state = PEER_CONNECTION_STATE_NEW;
     peer_connection_ice_reset(&pc);
     peer_connection_transceivers_reset(&pc);
+    peer_connection_data_channel_events_reset(&pc);
     peer_connection_clear_descriptions(&pc);
     return pc;
 }
@@ -280,6 +378,43 @@ export fn peer_connection_has_remote_description(pc: &PeerConnection) bool {
         return false;
     }
     return pc.has_remote_description;
+}
+
+/// Return the number of queued DataChannel events.
+export fn peer_connection_data_channel_event_count(pc: &PeerConnection) usize {
+    if pc == null {
+        return 0usize;
+    }
+    return pc.data_channel_event_count;
+}
+
+/// Return whether a DataChannel event is available.
+export fn peer_connection_has_data_channel_event(pc: &PeerConnection) bool {
+    return peer_connection_data_channel_event_count(pc) > 0usize;
+}
+
+/// Pop the next queued DataChannel event.
+export fn peer_connection_pop_data_channel_event(pc: &PeerConnection) !PeerConnectionDataChannelEvent {
+    if pc == null {
+        return error.PeerConnectionInvalidState;
+    }
+    if pc.data_channel_event_count == 0usize {
+        return error.PeerConnectionInvalidState;
+    }
+
+    const slot: usize = pc.data_channel_event_head;
+    if slot >= PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        return error.PeerConnectionInvalidState;
+    }
+
+    const event: PeerConnectionDataChannelEvent = pc.data_channel_events[slot];
+    peer_connection_data_channel_event_reset(&pc.data_channel_events[slot]);
+    pc.data_channel_event_head = pc.data_channel_event_head + 1usize;
+    if pc.data_channel_event_head >= PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS {
+        pc.data_channel_event_head = 0usize;
+    }
+    pc.data_channel_event_count = pc.data_channel_event_count - 1usize;
+    return event;
 }
 
 /// Return the current local description bytes, if any.
@@ -362,6 +497,27 @@ export fn peer_connection_create_answer(pc: &PeerConnection, answer: &PeerConnec
         "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Uya WebRTC Answer\r\nt=0 0\r\na=group:BUNDLE data\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:uya-answer\r\na=ice-pwd:uya-answer-pwd\r\na=setup:active\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte],
     );
     return;
+}
+
+/// Create a DataChannel and enqueue a creation event.
+export fn peer_connection_create_data_channel(
+    pc: &PeerConnection,
+    label: &[byte],
+    protocol: &[byte],
+    init: &SctpDataChannelInit,
+) !DataChannel {
+    if pc == null || init == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+
+    const channel_result: !DataChannel = data_channel_make(label, protocol, init);
+    if channel_result.error_id != 0 {
+        return channel_result.error_id;
+    }
+
+    var channel: DataChannel = channel_result.value;
+    try peer_connection_queue_data_channel_event(pc, &channel);
+    return channel;
 }
 
 /// Attach a local SDP description to the PeerConnection.
@@ -448,6 +604,7 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
     pc.state = PEER_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
+    peer_connection_data_channel_events_reset(pc);
     peer_connection_clear_descriptions(pc);
     return true;
 }
@@ -468,5 +625,6 @@ export fn peer_connection_reset(pc: &PeerConnection) void {
     pc.state = PEER_CONNECTION_STATE_CLOSED;
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
+    peer_connection_data_channel_events_reset(pc);
     peer_connection_clear_descriptions(pc);
 }

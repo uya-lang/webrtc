@@ -1,0 +1,131 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.peer_connection;
+use webrtc.runtime;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn bytes_match_array(lhs: &[byte], rhs: [byte: 64], rhs_len: usize) bool {
+    if lhs.len != rhs_len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < rhs_len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn check_data_channel_creation_queues_event() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 10i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 11i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.ordered = false;
+    init.negotiated = true;
+
+    const channel_result: !DataChannel = peer_connection_create_data_channel(
+        &pc,
+        "chat" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if channel_result.error_id != 0 {
+        return 12i32;
+    }
+    var channel: DataChannel = channel_result.value;
+    if !bytes_equal(data_channel_label(&channel), "chat" as &[byte]) {
+        return 13i32;
+    }
+    if !bytes_equal(data_channel_protocol(&channel), "webrtc-datachannel" as &[byte]) {
+        return 14i32;
+    }
+    if data_channel_ready_state(&channel) != DATA_CHANNEL_STATE_CONNECTING {
+        return 15i32;
+    }
+    if peer_connection_data_channel_event_count(&pc) != 1usize {
+        return 16i32;
+    }
+
+    const event: !PeerConnectionDataChannelEvent = peer_connection_pop_data_channel_event(&pc);
+    if event.error_id != 0 {
+        return 17i32;
+    }
+    if !bytes_match_array("chat" as &[byte], event.value.label, event.value.label_len) {
+        return 18i32;
+    }
+    if !bytes_match_array("webrtc-datachannel" as &[byte], event.value.protocol, event.value.protocol_len) {
+        return 19i32;
+    }
+    if event.value.ready_state != DATA_CHANNEL_STATE_CONNECTING {
+        return 20i32;
+    }
+    if peer_connection_data_channel_event_count(&pc) != 0usize {
+        return 21i32;
+    }
+
+    return 0i32;
+}
+
+fn check_closed_peer_rejects_data_channel_creation() i32 {
+    var pc: PeerConnection = peer_connection_make();
+    var init: SctpDataChannelInit = data_channel_init_make();
+
+    const result: !DataChannel = peer_connection_create_data_channel(
+        &pc,
+        "closed" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if result.error_id != @error_id(error.PeerConnectionInvalidState) {
+        return 30i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_data_channel_creation_queues_event();
+    if result != 0i32 {
+        printf("PeerConnection DataChannel event tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_closed_peer_rejects_data_channel_creation();
+    if result != 0i32 {
+        printf("PeerConnection DataChannel event invalid state tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("PeerConnection DataChannel event tests passed\n");
+    return 0i32;
+}
