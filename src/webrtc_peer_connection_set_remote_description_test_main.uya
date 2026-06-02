@@ -20,11 +20,11 @@ fn check_set_remote_description_and_overwrite() i32 {
     }
     var runtime: RtcRuntime = runtime_result.value;
 
-    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
-    if pc_result.error_id != 0 {
+    var pc: PeerConnection = peer_connection_make();
+    const pc_init_result: !void = peer_connection_init(&pc, &runtime, &config);
+    if pc_init_result.error_id != 0 {
         return 21i32;
     }
-    var pc: PeerConnection = pc_result.value;
 
     const local_description: &[byte] = "v=0\r\ns=local\r\n" as &[byte];
     const first_remote_description: &[byte] = "v=0\r\ns=remote\r\n" as &[byte];
@@ -73,7 +73,7 @@ fn check_set_remote_description_and_overwrite() i32 {
 }
 
 fn check_closed_peer_rejects_remote_description() i32 {
-    var pc: PeerConnection = peer_connection_make();
+    var pc: PeerConnection = PeerConnection{};
     const description: &[byte] = "v=0\r\ns=closed-remote\r\n" as &[byte];
 
     const result: !void = peer_connection_set_remote_description(&pc, description);

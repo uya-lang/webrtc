@@ -1,18 +1,52 @@
 // webrtc.peer_connection - PeerConnection 生命周期
 // 模块路径：src/webrtc/peer_connection.uya → use webrtc.peer_connection;
 
+use webrtc.errors;
+use webrtc.ice.candidate;
 use webrtc.runtime;
+
 export const PEER_CONNECTION_STATE_NEW: u8 = 0u8;
 export const PEER_CONNECTION_STATE_CLOSED: u8 = 1u8;
+
+export const PEER_CONNECTION_CONNECTION_STATE_NEW: u8 = 0u8;
+export const PEER_CONNECTION_CONNECTION_STATE_CONNECTING: u8 = 1u8;
+export const PEER_CONNECTION_CONNECTION_STATE_CONNECTED: u8 = 2u8;
+export const PEER_CONNECTION_CONNECTION_STATE_DISCONNECTED: u8 = 3u8;
+export const PEER_CONNECTION_CONNECTION_STATE_FAILED: u8 = 4u8;
+export const PEER_CONNECTION_CONNECTION_STATE_CLOSED: u8 = 5u8;
+
 export const PEER_CONNECTION_MAX_DESCRIPTION_BYTES: usize = 4096usize;
 
 export error PeerConnectionInvalidState;
 export error PeerConnectionDescriptionEmpty;
 export error PeerConnectionDescriptionTooLong;
 
+const PEER_CONNECTION_ICE_AGENT_ROLE_UNKNOWN: u8 = 0u8;
+const PEER_CONNECTION_ICE_AGENT_ROLE_CONTROLLING: u8 = 1u8;
+const PEER_CONNECTION_ICE_AGENT_ROLE_CONTROLLED: u8 = 2u8;
+
+const PEER_CONNECTION_ICE_AGENT_STATE_NEW: u8 = 0u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_GATHERING: u8 = 1u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_CHECKING: u8 = 2u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_CONNECTED: u8 = 3u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_COMPLETED: u8 = 4u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_DISCONNECTED: u8 = 5u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_FAILED: u8 = 6u8;
+const PEER_CONNECTION_ICE_AGENT_STATE_CLOSED: u8 = 7u8;
+
 export struct PeerConnectionDescription {
     text: [byte: PEER_CONNECTION_MAX_DESCRIPTION_BYTES] = [],
     text_len: usize = 0usize,
+}
+
+export struct PeerConnectionRemoteIceCandidate {
+    foundation: [byte: ICE_MAX_FOUNDATION_BYTES] = [],
+    foundation_len: usize = 0usize,
+    component_id: u16 = 0u16,
+    transport: u8 = 0u8,
+    candidate_type: u8 = 0u8,
+    priority: u32 = 0u32,
+    count: usize = 0usize,
 }
 
 export struct PeerConnection {
@@ -22,6 +56,9 @@ export struct PeerConnection {
     state: u8 = PEER_CONNECTION_STATE_CLOSED,
     has_local_description: bool = false,
     has_remote_description: bool = false,
+    ice_role: u8 = PEER_CONNECTION_ICE_AGENT_ROLE_UNKNOWN,
+    ice_state: u8 = PEER_CONNECTION_ICE_AGENT_STATE_NEW,
+    remote_candidate: PeerConnectionRemoteIceCandidate = PeerConnectionRemoteIceCandidate{},
     local_description: PeerConnectionDescription = PeerConnectionDescription{},
     remote_description: PeerConnectionDescription = PeerConnectionDescription{},
 }
@@ -37,55 +74,118 @@ fn peer_connection_clear_descriptions(pc: &PeerConnection) void {
     pc.remote_description = PeerConnectionDescription{};
 }
 
-fn peer_connection_copy_description(description: &PeerConnectionDescription, bytes: &[byte]) !void {
-    if description == null {
+fn peer_connection_copy_description_bytes(dst: &[byte], dst_len: &usize, bytes: &[byte]) !void {
+    if dst_len == null {
         return error.PeerConnectionInvalidState;
     }
     if bytes.len == 0usize {
         return error.PeerConnectionDescriptionEmpty;
     }
-    if bytes.len > PEER_CONNECTION_MAX_DESCRIPTION_BYTES {
+    if bytes.len > dst.len {
         return error.PeerConnectionDescriptionTooLong;
     }
 
     var index: usize = 0usize;
     while index < bytes.len {
-        description.text[index] = bytes[index];
+        dst[index] = bytes[index];
         index = index + 1usize;
     }
-    description.text_len = bytes.len;
+    *dst_len = bytes.len;
     return;
 }
 
-fn peer_connection_make_default() PeerConnection {
-    return PeerConnection{};
-}
-
-fn peer_connection_offer_append_bytes(buf: &[byte], cursor: &usize, bytes: &[byte]) !void {
-    if cursor == null {
+fn peer_connection_copy_description(description: &PeerConnectionDescription, bytes: &[byte]) !void {
+    if description == null {
         return error.PeerConnectionInvalidState;
     }
-    if *cursor + bytes.len > buf.len {
-        return error.PeerConnectionDescriptionTooLong;
-    }
 
-    var index: usize = 0usize;
-    while index < bytes.len {
-        buf[*cursor + index] = bytes[index];
-        index = index + 1usize;
-    }
-    *cursor = *cursor + bytes.len;
+    try peer_connection_copy_description_bytes(description.text[0:PEER_CONNECTION_MAX_DESCRIPTION_BYTES], &description.text_len, bytes);
     return;
 }
 
-fn peer_connection_offer_append_line(buf: &[byte], cursor: &usize, line: &[byte]) !void {
-    try peer_connection_offer_append_bytes(buf, cursor, line);
-    try peer_connection_offer_append_bytes(buf, cursor, "\r\n" as &[byte]);
+fn peer_connection_ice_reset(pc: &PeerConnection) void {
+    if pc == null {
+        return;
+    }
+
+    pc.ice_role = PEER_CONNECTION_ICE_AGENT_ROLE_UNKNOWN;
+    pc.ice_state = PEER_CONNECTION_ICE_AGENT_STATE_NEW;
+
+    var index: usize = 0usize;
+    while index < ICE_MAX_FOUNDATION_BYTES {
+        pc.remote_candidate.foundation[index] = 0 as byte;
+        index = index + 1usize;
+    }
+
+    pc.remote_candidate.foundation_len = 0usize;
+    pc.remote_candidate.component_id = 0u16;
+    pc.remote_candidate.transport = 0u8;
+    pc.remote_candidate.candidate_type = 0u8;
+    pc.remote_candidate.priority = 0u32;
+    pc.remote_candidate.count = 0usize;
+}
+
+fn peer_connection_ice_store_remote_candidate(pc: &PeerConnection, candidate: &IceCandidate) !void {
+    if pc == null || candidate == null {
+        return error.InvalidPacket;
+    }
+    if candidate.foundation_len == 0usize || candidate.foundation_len > ICE_MAX_FOUNDATION_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var index: usize = 0usize;
+    while index < ICE_MAX_FOUNDATION_BYTES && index < candidate.foundation_len {
+        pc.remote_candidate.foundation[index] = candidate.foundation[index];
+        index = index + 1usize;
+    }
+
+    pc.remote_candidate.foundation_len = candidate.foundation_len;
+    pc.remote_candidate.component_id = candidate.component_id;
+    pc.remote_candidate.transport = candidate.transport;
+    pc.remote_candidate.candidate_type = candidate.candidate_type;
+    pc.remote_candidate.priority = candidate.priority;
+    pc.remote_candidate.count = 1usize;
+}
+
+fn peer_connection_set_offer_ice_state(pc: &PeerConnection) !void {
+    if pc == null {
+        return error.PeerConnectionInvalidState;
+    }
+    pc.ice_role = PEER_CONNECTION_ICE_AGENT_ROLE_CONTROLLING;
+    pc.ice_state = PEER_CONNECTION_ICE_AGENT_STATE_CHECKING;
+    return;
+}
+
+fn peer_connection_set_answer_ice_state(pc: &PeerConnection) !void {
+    if pc == null {
+        return error.PeerConnectionInvalidState;
+    }
+    pc.ice_role = PEER_CONNECTION_ICE_AGENT_ROLE_CONTROLLED;
+    pc.ice_state = PEER_CONNECTION_ICE_AGENT_STATE_CHECKING;
+    return;
+}
+
+/// Create a PeerConnection and register it with the runtime.
+export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config: &RtcConfiguration) !void {
+    if pc == null {
+        return error.PeerConnectionInvalidState;
+    }
+    if runtime == null || config == null {
+        return error.RtcRuntimeInvalidState;
+    }
+
+    pc.id = 0u64;
+    pc.runtime = runtime;
+    pc.config = *config;
+    pc.state = PEER_CONNECTION_STATE_NEW;
+    peer_connection_ice_reset(pc);
+    peer_connection_clear_descriptions(pc);
+    return;
 }
 
 /// Create an empty PeerConnection shell.
 export fn peer_connection_make() PeerConnection {
-    return peer_connection_make_default();
+    return PeerConnection{};
 }
 
 /// Create a PeerConnection and register it with the runtime.
@@ -100,11 +200,12 @@ export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !
     try rtc_configuration_validate(config);
     const peer_connection_id: u64 = try rtc_runtime_register_peer_connection(runtime);
 
-    var pc: PeerConnection = peer_connection_make_default();
+    var pc: PeerConnection = PeerConnection{};
     pc.id = peer_connection_id;
     pc.runtime = runtime;
     pc.config = *config;
     pc.state = PEER_CONNECTION_STATE_NEW;
+    peer_connection_ice_reset(&pc);
     peer_connection_clear_descriptions(&pc);
     return pc;
 }
@@ -153,6 +254,12 @@ export fn peer_connection_has_remote_description(pc: &PeerConnection) bool {
 
 /// Return the current local description bytes, if any.
 export fn peer_connection_local_description_bytes(pc: &PeerConnection) &[byte] {
+    if pc == null {
+        return [] as &[byte];
+    }
+    if !pc.has_local_description || pc.local_description.text_len == 0usize {
+        return pc.local_description.text[0:0];
+    }
     return pc.local_description.text[0:pc.local_description.text_len];
 }
 
@@ -166,6 +273,12 @@ export fn peer_connection_local_description_len(pc: &PeerConnection) usize {
 
 /// Return the current remote description bytes, if any.
 export fn peer_connection_remote_description_bytes(pc: &PeerConnection) &[byte] {
+    if pc == null {
+        return [] as &[byte];
+    }
+    if !pc.has_remote_description || pc.remote_description.text_len == 0usize {
+        return pc.remote_description.text[0:0];
+    }
     return pc.remote_description.text[0:pc.remote_description.text_len];
 }
 
@@ -199,28 +312,25 @@ export fn peer_connection_create_offer(pc: &PeerConnection, offer: &PeerConnecti
         return error.PeerConnectionInvalidState;
     }
 
-    var buffer: [byte: PEER_CONNECTION_MAX_DESCRIPTION_BYTES] = [];
-    var cursor: usize = 0usize;
-    const writable: &[byte] = buffer[0:PEER_CONNECTION_MAX_DESCRIPTION_BYTES];
+    try peer_connection_set_offer_ice_state(pc);
+    try peer_connection_copy_description(
+        offer,
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Uya WebRTC Offer\r\nt=0 0\r\na=group:BUNDLE data\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:uya-offer\r\na=ice-pwd:uya-offer-pwd\r\na=setup:actpass\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte],
+    );
+    return;
+}
 
-    try peer_connection_offer_append_line(writable, &cursor, "v=0" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "o=- 1 1 IN IP4 127.0.0.1" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "s=Uya WebRTC Offer" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "t=0 0" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=group:BUNDLE data" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "m=application 9 UDP/DTLS/SCTP webrtc-datachannel" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "c=IN IP4 0.0.0.0" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=mid:data" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=sendrecv" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=ice-ufrag:uya-offer" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=ice-pwd:uya-offer-pwd" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=setup:actpass" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=rtcp-mux" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=sctp-port:5000" as &[byte]);
-    try peer_connection_offer_append_line(writable, &cursor, "a=max-message-size:262144" as &[byte]);
+/// Build a canonical SDP answer for the current remote description.
+export fn peer_connection_create_answer(pc: &PeerConnection, answer: &PeerConnectionDescription) !void {
+    if pc == null || answer == null || pc.state != PEER_CONNECTION_STATE_NEW || !pc.has_remote_description {
+        return error.PeerConnectionInvalidState;
+    }
 
-    const written_len: usize = cursor;
-    try peer_connection_copy_description(offer, buffer[0:written_len]);
+    try peer_connection_set_answer_ice_state(pc);
+    try peer_connection_copy_description(
+        answer,
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Uya WebRTC Answer\r\nt=0 0\r\na=group:BUNDLE data\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:uya-answer\r\na=ice-pwd:uya-answer-pwd\r\na=setup:active\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte],
+    );
     return;
 }
 
@@ -246,6 +356,22 @@ export fn peer_connection_set_remote_description(pc: &PeerConnection, descriptio
     return;
 }
 
+/// Add a remote ICE candidate to the peer connection.
+export fn peer_connection_add_ice_candidate(pc: &PeerConnection, candidate: &IceCandidate) !void {
+    if pc == null || pc.state != PEER_CONNECTION_STATE_NEW {
+        return error.PeerConnectionInvalidState;
+    }
+    if candidate == null {
+        return error.InvalidPacket;
+    }
+
+    try peer_connection_ice_store_remote_candidate(pc, candidate);
+    if pc.ice_state == PEER_CONNECTION_ICE_AGENT_STATE_NEW {
+        pc.ice_state = PEER_CONNECTION_ICE_AGENT_STATE_CHECKING;
+    }
+    return;
+}
+
 /// Close the PeerConnection and unregister it from the runtime.
 export fn peer_connection_close(pc: &PeerConnection) bool {
     if pc == null {
@@ -260,6 +386,7 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
     }
 
     pc.state = PEER_CONNECTION_STATE_CLOSED;
+    peer_connection_ice_reset(pc);
     peer_connection_clear_descriptions(pc);
     return true;
 }
@@ -278,5 +405,6 @@ export fn peer_connection_reset(pc: &PeerConnection) void {
     pc.runtime = null;
     pc.config = RtcConfiguration{};
     pc.state = PEER_CONNECTION_STATE_CLOSED;
+    peer_connection_ice_reset(pc);
     peer_connection_clear_descriptions(pc);
 }

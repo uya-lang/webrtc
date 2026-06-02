@@ -1,0 +1,129 @@
+use libc.printf;
+use webrtc.ice.candidate;
+use webrtc.peer_connection;
+use webrtc.runtime;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn peer_connection_description_make() PeerConnectionDescription {
+    return PeerConnectionDescription{};
+}
+
+fn build_candidate(foundation: &[byte]) !IceCandidate {
+    var candidate: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&candidate);
+    try ice_candidate_set_foundation(&candidate, foundation);
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate.priority = 2122260223u32;
+    try ice_transport_address_set(
+        &candidate.address,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.10" as &[byte],
+        54400u16,
+    );
+    return candidate;
+}
+
+fn check_add_ice_candidate_appends_and_overwrites_remote_state() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 10i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 11i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    const first_candidate_result: !IceCandidate = build_candidate("cand-1" as &[byte]);
+    if first_candidate_result.error_id != 0 {
+        return 12i32;
+    }
+    var first: IceCandidate = first_candidate_result.value;
+    const first_result: !void = peer_connection_add_ice_candidate(&pc, &first);
+    if first_result.error_id != 0 {
+        return 12i32;
+    }
+    if pc.remote_candidate.count != 1usize {
+        return 13i32;
+    }
+    if !bytes_equal(
+        pc.remote_candidate.foundation[0:pc.remote_candidate.foundation_len],
+        "cand-1" as &[byte],
+    ) {
+        return 14i32;
+    }
+
+    const duplicate_candidate_result: !IceCandidate = build_candidate("cand-2" as &[byte]);
+    if duplicate_candidate_result.error_id != 0 {
+        return 15i32;
+    }
+    var duplicate: IceCandidate = duplicate_candidate_result.value;
+    const duplicate_result: !void = peer_connection_add_ice_candidate(&pc, &duplicate);
+    if duplicate_result.error_id != 0 {
+        return 15i32;
+    }
+    if pc.remote_candidate.count != 1usize {
+        return 16i32;
+    }
+    if !bytes_equal(
+        pc.remote_candidate.foundation[0:pc.remote_candidate.foundation_len],
+        "cand-2" as &[byte],
+    ) {
+        return 17i32;
+    }
+
+    return 0i32;
+}
+
+fn check_closed_peer_rejects_candidate() i32 {
+    var pc: PeerConnection = peer_connection_make();
+    const candidate_result: !IceCandidate = build_candidate("cand-closed" as &[byte]);
+    if candidate_result.error_id != 0 {
+        return 20i32;
+    }
+    var candidate: IceCandidate = candidate_result.value;
+
+    const result: !void = peer_connection_add_ice_candidate(&pc, &candidate);
+    if result.error_id != @error_id(error.PeerConnectionInvalidState) {
+        return 20i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_add_ice_candidate_appends_and_overwrites_remote_state();
+    if result != 0i32 {
+        printf("PeerConnection add_ice_candidate tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_closed_peer_rejects_candidate();
+    if result != 0i32 {
+        printf("PeerConnection add_ice_candidate invalid state tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("PeerConnection add_ice_candidate tests passed\n");
+    return 0i32;
+}

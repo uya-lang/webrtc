@@ -20,28 +20,28 @@ fn sdp_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     return true;
 }
 
-fn sdp_writer_append_bytes(buf: &mut [byte], cursor: &usize, src: &[byte]) !void {
+fn sdp_writer_append_bytes(buf: &[byte], cursor: &usize, src: &[byte]) !void {
     if cursor == null || buf == null {
         return error.InvalidPacket;
     }
-    if cursor + src.len > buf.len {
+    if *cursor + src.len > buf.len {
         return error.InvalidPacket;
     }
 
     var i: usize = 0;
     while i < src.len {
-        buf[cursor + i] = src[i];
+        buf[*cursor + i] = src[i];
         i = i + 1;
     }
-    cursor = cursor + src.len;
+    *cursor = *cursor + src.len;
 }
 
-fn sdp_writer_append_byte(buf: &mut [byte], cursor: &usize, value: byte) !void {
+fn sdp_writer_append_byte(buf: &[byte], cursor: &usize, value: byte) !void {
     const raw: [byte: 1] = [value];
     try sdp_writer_append_bytes(buf, cursor, &raw);
 }
 
-fn sdp_writer_append_decimal_u32(buf: &mut [byte], cursor: &usize, value: u32) !void {
+fn sdp_writer_append_decimal_u32(buf: &[byte], cursor: &usize, value: u32) !void {
     var digits: [byte: 16] = [];
     var digit_count: usize = 0;
     var remaining: u32 = value;
@@ -63,17 +63,17 @@ fn sdp_writer_append_decimal_u32(buf: &mut [byte], cursor: &usize, value: u32) !
     }
 }
 
-fn sdp_writer_append_decimal_u16(buf: &mut [byte], cursor: &usize, value: u16) !void {
+fn sdp_writer_append_decimal_u16(buf: &[byte], cursor: &usize, value: u16) !void {
     try sdp_writer_append_decimal_u32(buf, cursor, value as u32);
 }
 
-fn sdp_writer_append_line(buf: &mut [byte], cursor: &usize, prefix: &[byte], value: &[byte]) !void {
+fn sdp_writer_append_line(buf: &[byte], cursor: &usize, prefix: &[byte], value: &[byte]) !void {
     try sdp_writer_append_bytes(buf, cursor, prefix);
     try sdp_writer_append_bytes(buf, cursor, value);
     try sdp_writer_append_byte(buf, cursor, 10 as byte);
 }
 
-fn sdp_writer_append_fingerprint_line(buf: &mut [byte], cursor: &usize, fingerprint: &Fingerprint) !void {
+fn sdp_writer_append_fingerprint_line(buf: &[byte], cursor: &usize, fingerprint: &Fingerprint) !void {
     if fingerprint.value.len == 0 {
         return;
     }
@@ -84,7 +84,7 @@ fn sdp_writer_append_fingerprint_line(buf: &mut [byte], cursor: &usize, fingerpr
     try sdp_writer_append_byte(buf, cursor, 10 as byte);
 }
 
-fn sdp_writer_append_bundle_group(buf: &mut [byte], cursor: &usize, desc: &SessionDescription) !void {
+fn sdp_writer_append_bundle_group(buf: &[byte], cursor: &usize, desc: &SessionDescription) !void {
     if desc.bundle_mid_count == 0 {
         return;
     }
@@ -101,7 +101,7 @@ fn sdp_writer_append_bundle_group(buf: &mut [byte], cursor: &usize, desc: &Sessi
     try sdp_writer_append_byte(buf, cursor, 10 as byte);
 }
 
-fn sdp_writer_append_media_line(buf: &mut [byte], cursor: &usize, media: &MediaSection) !void {
+fn sdp_writer_append_media_line(buf: &[byte], cursor: &usize, media: &MediaSection) !void {
     try sdp_writer_append_bytes(buf, cursor, "m=" as &[byte]);
     try sdp_writer_append_bytes(buf, cursor, media.kind);
     try sdp_writer_append_byte(buf, cursor, ' ' as byte);
@@ -118,7 +118,7 @@ fn sdp_writer_append_media_line(buf: &mut [byte], cursor: &usize, media: &MediaS
     try sdp_writer_append_byte(buf, cursor, 10 as byte);
 }
 
-fn sdp_writer_append_candidate(buf: &mut [byte], cursor: &usize, candidate: &IceCandidate) !void {
+fn sdp_writer_append_candidate(buf: &[byte], cursor: &usize, candidate: &IceCandidate) !void {
     try sdp_writer_append_bytes(buf, cursor, "a=candidate:" as &[byte]);
     try sdp_writer_append_bytes(buf, cursor, candidate.foundation);
     try sdp_writer_append_byte(buf, cursor, ' ' as byte);
@@ -144,7 +144,7 @@ fn sdp_writer_append_candidate(buf: &mut [byte], cursor: &usize, candidate: &Ice
     try sdp_writer_append_byte(buf, cursor, 10 as byte);
 }
 
-fn sdp_writer_append_codec_attributes(buf: &mut [byte], cursor: &usize, media: &MediaSection) !void {
+fn sdp_writer_append_codec_attributes(buf: &[byte], cursor: &usize, media: &MediaSection) !void {
     var format_index: usize = 0;
     while format_index < media.format_token_count {
         const payload_token: &[byte] = media.format_tokens[format_index];
@@ -205,7 +205,7 @@ fn sdp_writer_append_codec_attributes(buf: &mut [byte], cursor: &usize, media: &
     }
 }
 
-fn sdp_writer_append_extmaps(buf: &mut [byte], cursor: &usize, media: &MediaSection) !void {
+fn sdp_writer_append_extmaps(buf: &[byte], cursor: &usize, media: &MediaSection) !void {
     var ext_index: usize = 0;
     while ext_index < media.header_extension_count {
         const ext: &HeaderExtension = &media.header_extensions[ext_index];
@@ -222,15 +222,28 @@ fn sdp_writer_append_extmaps(buf: &mut [byte], cursor: &usize, media: &MediaSect
     }
 }
 
-export fn sdp_write_session_description(desc: &SessionDescription, out: &mut [byte]) !usize {
+export fn sdp_write_session_description(desc: &SessionDescription, out: &[byte]) !usize {
     var cursor: usize = 0;
+    var origin: &[byte] = "-" as &[byte];
+    var session_name: &[byte] = "-" as &[byte];
+    var timing: &[byte] = "0 0" as &[byte];
+
+    if desc.origin.len > 0 {
+        origin = desc.origin;
+    }
+    if desc.session_name.len > 0 {
+        session_name = desc.session_name;
+    }
+    if desc.timing.len > 0 {
+        timing = desc.timing;
+    }
 
     try sdp_writer_append_bytes(out, &cursor, "v=" as &[byte]);
     try sdp_writer_append_decimal_u16(out, &cursor, desc.version);
     try sdp_writer_append_byte(out, &cursor, 10 as byte);
-    try sdp_writer_append_line(out, &cursor, "o=" as &[byte], if desc.origin.len > 0 { desc.origin } else { "-" as &[byte] });
-    try sdp_writer_append_line(out, &cursor, "s=" as &[byte], if desc.session_name.len > 0 { desc.session_name } else { "-" as &[byte] });
-    try sdp_writer_append_line(out, &cursor, "t=" as &[byte], if desc.timing.len > 0 { desc.timing } else { "0 0" as &[byte] });
+    try sdp_writer_append_line(out, &cursor, "o=" as &[byte], origin);
+    try sdp_writer_append_line(out, &cursor, "s=" as &[byte], session_name);
+    try sdp_writer_append_line(out, &cursor, "t=" as &[byte], timing);
     try sdp_writer_append_fingerprint_line(out, &cursor, &desc.fingerprint);
     try sdp_writer_append_bundle_group(out, &cursor, desc);
 

@@ -4,7 +4,7 @@ use webrtc.peer_connection;
 use webrtc.runtime;
 
 fn peer_connection_description_make() PeerConnectionDescription {
-    var pc: PeerConnection = peer_connection_make();
+    var pc: PeerConnection = PeerConnection{};
     return pc.local_description;
 }
 
@@ -16,11 +16,11 @@ fn check_create_offer_builds_expected_sdp() i32 {
     }
     var runtime: RtcRuntime = runtime_result.value;
 
-    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
-    if pc_result.error_id != 0 {
+    var pc: PeerConnection = peer_connection_make();
+    const pc_init_result: !void = peer_connection_init(&pc, &runtime, &config);
+    if pc_init_result.error_id != 0 {
         return 21i32;
     }
-    var pc: PeerConnection = pc_result.value;
 
     var offer: PeerConnectionDescription = peer_connection_description_make();
     const create_result: !void = peer_connection_create_offer(&pc, &offer);

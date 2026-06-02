@@ -66,7 +66,7 @@ fn ice_test_parse_decimal_u16(value: &[byte]) !u16 {
     var i: usize = 0;
     while i < value.len {
         const digit: byte = value[i];
-        if digit < '0' as byte || digit > '9' as byte {
+        if digit < ('0' as byte) || digit > ('9' as byte) {
             return error.InvalidPacket;
         }
         out = (out * 10u32) + ((digit - ('0' as byte)) as u32);
@@ -87,11 +87,11 @@ fn ice_test_parse_decimal_u32(value: &[byte]) !u32 {
     var i: usize = 0;
     while i < value.len {
         const digit: byte = value[i];
-        if digit < '0' as byte || digit > '9' as byte {
+        if digit < ('0' as byte) || digit > ('9' as byte) {
             return error.InvalidPacket;
         }
         out = (out * 10u64) + ((digit - ('0' as byte)) as u64);
-        if out > @max_value(u32) {
+        if out > 0xFFFFFFFFu32 {
             return error.InvalidPacket;
         }
         i = i + 1;

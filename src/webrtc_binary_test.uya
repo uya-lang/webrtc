@@ -31,13 +31,13 @@ test "byte writer rejects fixed buffer overflow and backfill overruns" {
 }
 
 test "checked integer helpers reject overflow and invalid alignment" {
-    const add_overflow: !usize = checked_add_usize(@max_value(usize), 1);
+    const add_overflow: !usize = checked_add_usize(0xFFFFFFFFFFFFFFFFu64 as usize, 1);
     try expect(add_overflow.error_id == @error_id(error.IntegerOverflow));
 
-    const mul_overflow: !usize = checked_mul_usize(@max_value(usize), 2);
+    const mul_overflow: !usize = checked_mul_usize(0xFFFFFFFFFFFFFFFFu64 as usize, 2);
     try expect(mul_overflow.error_id == @error_id(error.IntegerOverflow));
 
-    const align_overflow: !usize = checked_align_up_usize(@max_value(usize), 8);
+    const align_overflow: !usize = checked_align_up_usize(0xFFFFFFFFFFFFFFFFu64 as usize, 8);
     try expect(align_overflow.error_id == @error_id(error.IntegerOverflow));
 
     const invalid_alignment: !usize = checked_align_up_usize(7, 3);

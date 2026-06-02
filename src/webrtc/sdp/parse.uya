@@ -112,7 +112,7 @@ fn sdp_parse_decimal_u16(value: &[byte]) !u16 {
     var i: usize = 0;
     while i < value.len {
         const digit: byte = value[i];
-        if digit < '0' as byte || digit > '9' as byte {
+        if digit < ('0' as byte) || digit > ('9' as byte) {
             return error.InvalidPacket;
         }
         out = (out * 10u32) + ((digit - ('0' as byte)) as u32);
@@ -133,11 +133,11 @@ fn sdp_parse_decimal_u32(value: &[byte]) !u32 {
     var i: usize = 0;
     while i < value.len {
         const digit: byte = value[i];
-        if digit < '0' as byte || digit > '9' as byte {
+        if digit < ('0' as byte) || digit > ('9' as byte) {
             return error.InvalidPacket;
         }
         out = (out * 10u64) + ((digit - ('0' as byte)) as u64);
-        if out > @max_value(u32) {
+        if out > 0xFFFFFFFFu32 {
             return error.InvalidPacket;
         }
         i = i + 1;
@@ -174,7 +174,7 @@ fn sdp_media_find_codec_index(section: &MediaSection, payload_type: u16) usize {
 
 fn sdp_media_ensure_codec(section: &MediaSection, payload_type: u16) !&CodecParameters {
     const existing_index: usize = sdp_media_find_codec_index(section, payload_type);
-    if existing_index < section.codec_count {
+    if existing_index < section.codec_count && existing_index < SDP_MAX_CODECS_PER_MEDIA {
         return &section.codecs[existing_index];
     }
 
@@ -182,11 +182,12 @@ fn sdp_media_ensure_codec(section: &MediaSection, payload_type: u16) !&CodecPara
         return error.UnsupportedCapability;
     }
 
-    section.codecs[section.codec_count] = CodecParameters{
+    const codec_index: usize = section.codec_count;
+    section.codecs[codec_index] = CodecParameters{
         payload_type: payload_type,
     };
-    section.codec_count = section.codec_count + 1;
-    return &section.codecs[section.codec_count - 1];
+    section.codec_count = codec_index + 1;
+    return &section.codecs[codec_index];
 }
 
 fn sdp_parse_fingerprint_value(value: &[byte]) !Fingerprint {
@@ -309,11 +310,10 @@ fn sdp_parse_fmtp_attribute(section: &MediaSection, value: &[byte]) !void {
             i = i + 1;
         }
 
-        const raw_token: &[byte] =
-            if delimiter_index == params.len
-            { params }
-            else
-            { params[0:delimiter_index] };
+        var raw_token: &[byte] = params;
+        if delimiter_index != params.len {
+            raw_token = params[0:delimiter_index];
+        }
         const token: &[byte] = sdp_trim_ascii_space(raw_token);
         if token.len > 0 {
             if codec.fmtp_param_count >= SDP_MAX_CODEC_FMTP_PARAMS {
@@ -351,12 +351,13 @@ fn sdp_parse_rtcp_fb_attribute(section: &MediaSection, value: &[byte]) !void {
 }
 
 fn sdp_parse_extmap_attribute(section: &MediaSection, value: &[byte]) !void {
-    if section.header_extension_count >= SDP_MAX_HEADER_EXTENSIONS {
+    const ext_index: usize = section.header_extension_count;
+    if ext_index >= SDP_MAX_HEADER_EXTENSIONS {
         return error.UnsupportedCapability;
     }
 
     const split: SdpSplit = try sdp_split_once(value, ' ' as byte);
-    const ext_slot: &HeaderExtension = &section.header_extensions[section.header_extension_count];
+    const ext_slot: &HeaderExtension = &section.header_extensions[ext_index];
     ext_slot.uri = sdp_trim_ascii_space(split.right);
 
     var id_and_direction: &[byte] = split.left;
@@ -409,11 +410,10 @@ fn sdp_parse_attribute_line(session: &SessionDescription, section: &MediaSection
         return;
     }
     if sdp_bytes_starts_with(value, "fingerprint:" as &[byte]) {
-        const fingerprint: Fingerprint = try sdp_parse_fingerprint_value(value[12:value.len - 12]);
         if section == null {
-            session.fingerprint = fingerprint;
+            session.fingerprint = try sdp_parse_fingerprint_value(value[12:value.len - 12]);
         } else {
-            section.fingerprint = fingerprint;
+            section.fingerprint = try sdp_parse_fingerprint_value(value[12:value.len - 12]);
         }
         return;
     }
@@ -503,7 +503,11 @@ export fn sdp_line_scanner_next(scanner: &SdpLineScanner) !bool {
         }
 
         const raw_line: &[byte] = sdp_trim_lf(scanner.bytes[start:end]);
-        scanner.cursor = if end < scanner.bytes.len { end + 1 } else { end };
+        var next_cursor: usize = end;
+        if end < scanner.bytes.len {
+            next_cursor = end + 1;
+        }
+        scanner.cursor = next_cursor;
         scanner.line_number = scanner.line_number + 1u32;
 
         if raw_line.len == 0 {
@@ -540,8 +544,9 @@ export fn sdp_parse_session_description_bytes(bytes: &[byte]) !SessionDescriptio
             if current_media_index as usize >= SDP_MAX_MEDIA_SECTIONS {
                 return error.UnsupportedCapability;
             }
-            session.media_section_count = current_media_index as usize + 1;
-            try sdp_parse_media_line(&session.media_sections[current_media_index as usize], scanner.current.value);
+            const media_index: usize = current_media_index as usize;
+            session.media_section_count = media_index + 1;
+            try sdp_parse_media_line(&session.media_sections[media_index], scanner.current.value);
             continue;
         }
 
@@ -549,13 +554,21 @@ export fn sdp_parse_session_description_bytes(bytes: &[byte]) !SessionDescriptio
             if current_media_index < 0 {
                 return error.UnsupportedCapability;
             }
-            session.media_sections[current_media_index as usize].connection = scanner.current.value;
+            const media_index: usize = current_media_index as usize;
+            if media_index >= SDP_MAX_MEDIA_SECTIONS {
+                return error.UnsupportedCapability;
+            }
+            session.media_sections[media_index].connection = scanner.current.value;
             continue;
         }
 
         if scanner.current.kind == 'a' as byte {
             if current_media_index >= 0 {
-                try sdp_parse_attribute_line(&session, &session.media_sections[current_media_index as usize], scanner.current.value);
+                const media_index: usize = current_media_index as usize;
+                if media_index >= SDP_MAX_MEDIA_SECTIONS {
+                    return error.UnsupportedCapability;
+                }
+                try sdp_parse_attribute_line(&session, &session.media_sections[media_index], scanner.current.value);
             } else {
                 try sdp_parse_attribute_line(&session, null, scanner.current.value);
             }
