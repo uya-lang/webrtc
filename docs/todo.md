@@ -445,7 +445,7 @@
 - [x] Chrome headless TURN relay。
 - [x] Firefox headless DataChannel echo。
 - [x] Firefox headless one-way audio/video。
-- [ ] Pion WebRTC interop。
+- [x] Pion WebRTC interop。
 - [ ] aiortc interop。
 - [ ] GStreamer webrtcbin interop。
 - [x] 网络模拟：1%/5%/10% loss。
