@@ -3,6 +3,7 @@
 
 export const PACKET_ARENA_MAX_SLABS: usize = 256;
 export const PACKET_ARENA_MAX_SLAB_BYTES: usize = 2048;
+export const PACKET_REF_CACHE_BUDGET_BYTES: usize = 32;
 export const PACKET_REF_FLAG_MOVED: u16 = 1u16;
 
 const PACKET_ARENA_STORAGE_BYTES: usize = PACKET_ARENA_MAX_SLABS * PACKET_ARENA_MAX_SLAB_BYTES;
@@ -44,7 +45,6 @@ export struct PacketCloneBudget {
 
 // 固定容量 arena：每个 slab 只承载一个 packet，free-list 走 LIFO。
 export struct PacketArena {
-    storage: [byte: PACKET_ARENA_STORAGE_BYTES] = [],
     slot_generations: [u32: PACKET_ARENA_MAX_SLABS] = [],
     slot_lengths: [u16: PACKET_ARENA_MAX_SLABS] = [],
     slot_in_use: [bool: PACKET_ARENA_MAX_SLABS] = [],
@@ -57,6 +57,7 @@ export struct PacketArena {
     free_count: u64 = 0u64,
     in_use_count: u64 = 0u64,
     high_watermark: u64 = 0u64,
+    storage: [byte: PACKET_ARENA_STORAGE_BYTES] = [],
 }
 
 /// Construct an empty packet clone budget with zeroed counters.

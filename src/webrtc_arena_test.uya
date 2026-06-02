@@ -98,7 +98,7 @@ test "packet arena reset restores all slabs" {
 }
 
 test "packet ref stays within cache friendly budget" {
-    try expect(@size_of(PacketRef) <= 64);
+    try expect(@size_of(PacketRef) <= PACKET_REF_CACHE_BUDGET_BYTES);
     try expect(@align_of(PacketRef) <= 16);
 }
 
