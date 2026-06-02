@@ -4,6 +4,7 @@
 use libc.syscall;
 use std.http.server.fill_sockaddr_loopback_16;
 use std.http.server.read_port_from_sockaddr_16;
+use webrtc.net.backend;
 
 export const UDP_SOCKADDR_BYTES: usize = 16;
 export const UDP_RECV_SLOT_BYTES: usize = 2048;
@@ -26,6 +27,7 @@ export struct UdpSocketConfig {
     connect_port: u16 = 0u16,
     nonblocking: bool = true,
     reuse_port: bool = false,
+    backend_kind: u8 = NET_BACKEND_KIND_AUTO,
 }
 
 export struct UdpSocket {
@@ -33,6 +35,7 @@ export struct UdpSocket {
     local_port: u16 = 0u16,
     remote_port: u16 = 0u16,
     flags: u32 = 0u32,
+    backend_kind: u8 = NET_BACKEND_KIND_AUTO,
 }
 
 export struct UdpRecvSlot {
@@ -105,6 +108,15 @@ fn udp_socket_validate(socket: &UdpSocket) !void {
     }
 }
 
+export fn udp_socket_config_backend(config: &UdpSocketConfig) !NetBackendDescriptor {
+    if config == null {
+        return error.UdpSocketConfigInvalid;
+    }
+    const selected: NetBackendDescriptor = try net_backend_select(config.backend_kind);
+    try net_backend_require_capability(&selected, NET_BACKEND_CAP_UDP);
+    return selected;
+}
+
 fn udp_batch_validate(slot_count: usize) !usize {
     if slot_count == 0 {
         return error.UdpBatchEmpty;
@@ -167,6 +179,7 @@ export fn udp_socket_connect_optional(socket: &UdpSocket, port: u16) !bool {
 }
 
 export fn udp_socket_open(config: UdpSocketConfig) !UdpSocket {
+    const backend_desc: NetBackendDescriptor = try udp_socket_config_backend(&config);
     const fd: i32 = try sys_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     udp_socket_apply_reuse(fd, config.reuse_port);
 
@@ -175,6 +188,7 @@ export fn udp_socket_open(config: UdpSocketConfig) !UdpSocket {
         local_port: 0u16,
         remote_port: 0u16,
         flags: 0u32,
+        backend_kind: backend_desc.kind,
     };
 
     try udp_socket_bind_loopback(&socket_local, config.bind_port);
@@ -228,7 +242,6 @@ export fn udp_socket_recvmmsg(socket: &UdpSocket, slots: &UdpRecvSlot, slot_coun
     try udp_socket_validate(socket);
     const batch_len: usize = try udp_batch_validate(slot_count);
 
-    var batch_result: UdpIoBatchResult = UdpIoBatchResult{};
     var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
     var i: usize = 0;
     while i < batch_len {
@@ -243,26 +256,27 @@ export fn udp_socket_recvmmsg(socket: &UdpSocket, slots: &UdpRecvSlot, slot_coun
     const recv_result: !i32 = sys_udp_recvmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
     if recv_result.error_id != 0 {
         const fallback_len: usize = try udp_socket_recv_fallback(socket, &slots[0]);
-        batch_result.packet_count = if fallback_len > 0usize { 1usize } else { 0usize };
-        batch_result.used_fallback = true;
-        return batch_result;
+        return UdpIoBatchResult{
+            packet_count: if fallback_len > 0usize { 1usize } else { 0usize },
+            used_fallback: true,
+        };
     }
 
     const recv_count: usize = recv_result.value as usize;
-    batch_result.packet_count = recv_count;
     i = 0;
     while i < recv_count {
         slots[i].payload_len = msgs[i].len as usize;
         i = i + 1;
     }
-    return batch_result;
+    return UdpIoBatchResult{
+        packet_count: recv_count,
+    };
 }
 
 export fn udp_socket_sendmmsg(socket: &UdpSocket, slots: &UdpSendSlot, slot_count: usize) !UdpIoBatchResult {
     try udp_socket_validate(socket);
     const batch_len: usize = try udp_batch_validate(slot_count);
 
-    var batch_result: UdpIoBatchResult = UdpIoBatchResult{};
     var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
     var i: usize = 0;
     while i < batch_len {
@@ -281,15 +295,15 @@ export fn udp_socket_sendmmsg(socket: &UdpSocket, slots: &UdpSendSlot, slot_coun
     const send_result: !i32 = sys_udp_sendmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
     if send_result.error_id != 0 {
         const fallback_len: usize = try udp_socket_send_fallback(socket, &slots[0]);
-        batch_result.packet_count = if fallback_len > 0usize { 1usize } else { 0usize };
-        batch_result.used_fallback = true;
-        return batch_result;
+        return UdpIoBatchResult{
+            packet_count: if fallback_len > 0usize { 1usize } else { 0usize },
+            used_fallback: true,
+        };
     }
 
     const send_count: usize = send_result.value as usize;
-    batch_result.packet_count = send_count;
-    if send_count < batch_len {
-        batch_result.short_writes = 1u64;
-    }
-    return batch_result;
+    return UdpIoBatchResult{
+        packet_count: send_count,
+        short_writes: if send_count < batch_len { 1u64 } else { 0u64 },
+    };
 }

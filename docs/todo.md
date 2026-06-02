@@ -502,7 +502,7 @@
 
 ## Phase 20：多平台
 
-- [ ] 抽象 net backend。
+- [x] 抽象 net backend。
 - [ ] Linux epoll backend 完成。
 - [ ] macOS kqueue backend。
 - [ ] Windows IOCP backend。

@@ -1,0 +1,41 @@
+use std.testing.expect;
+use std.testing.assert_eq_i32;
+use webrtc.net.backend;
+use webrtc.net.udp;
+
+test "net backend selects linux epoll default with UDP batch capabilities" {
+    const selected: NetBackendDescriptor = try net_backend_select(NET_BACKEND_KIND_AUTO);
+
+    try assert_eq_i32(selected.kind as i32, NET_BACKEND_KIND_LINUX_EPOLL as i32);
+    try expect(net_backend_has_capability(&selected, NET_BACKEND_CAP_UDP));
+    try expect(net_backend_has_capability(&selected, NET_BACKEND_CAP_BATCH_RECV));
+    try expect(net_backend_has_capability(&selected, NET_BACKEND_CAP_BATCH_SEND));
+    try expect(net_backend_has_capability(&selected, NET_BACKEND_CAP_EDGE_POLL));
+    try expect(net_backend_has_capability(&selected, NET_BACKEND_CAP_TIMER_QUEUE));
+}
+
+test "net backend rejects unavailable platform backends until implemented" {
+    const kqueue_result: !NetBackendDescriptor = net_backend_select(NET_BACKEND_KIND_MACOS_KQUEUE);
+    try expect(kqueue_result.error_id == @error_id(error.NetBackendUnsupported));
+
+    const iocp_result: !NetBackendDescriptor = net_backend_select(NET_BACKEND_KIND_WINDOWS_IOCP);
+    try expect(iocp_result.error_id == @error_id(error.NetBackendUnsupported));
+}
+
+test "udp config carries selected net backend kind" {
+    var config: UdpSocketConfig = UdpSocketConfig{
+        bind_port: 0u16,
+        connect_port: 0u16,
+        nonblocking: true,
+        reuse_port: false,
+        backend_kind: NET_BACKEND_KIND_AUTO,
+    };
+
+    const backend: NetBackendDescriptor = try udp_socket_config_backend(&config);
+    try assert_eq_i32(backend.kind as i32, NET_BACKEND_KIND_LINUX_EPOLL as i32);
+    try net_backend_require_capability(&backend, NET_BACKEND_CAP_UDP);
+
+    config.backend_kind = NET_BACKEND_KIND_MACOS_KQUEUE;
+    const unsupported: !NetBackendDescriptor = udp_socket_config_backend(&config);
+    try expect(unsupported.error_id == @error_id(error.NetBackendUnsupported));
+}
