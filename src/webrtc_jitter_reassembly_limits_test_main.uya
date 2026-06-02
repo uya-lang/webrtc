@@ -1,0 +1,232 @@
+use libc.printf;
+use webrtc.media.model;
+use webrtc.receiver;
+use webrtc.rtp.frame_queue;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+
+fn make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = 96u8;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn make_frame(sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.timestamp = 90000u64 + sequence_id;
+    frame.duration_us = 33333u32;
+    frame.sequence_id = sequence_id;
+    frame.marker = true;
+    frame.payload = payload;
+    return frame;
+}
+
+fn check_jitter_packet_memory_cap() i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = RTP_JITTER_MAX_PACKETS;
+    buffer.config.max_missing = RTP_JITTER_MAX_MISSING;
+    buffer.config.drop_policy = RTP_JITTER_DROP_NEWEST;
+
+    var payload: [byte: 1] = [0x55u8 as byte];
+    var index: usize = 0usize;
+    while index < RTP_JITTER_MAX_PACKETS {
+        var packet: [byte: 32] = [];
+        const packet_len: !usize = make_rtp_packet_bytes(
+            (1000usize + index) as u16,
+            9000u32,
+            0x10203040u32,
+            false,
+            payload[0:1],
+            packet[0:32],
+        );
+        if packet_len.error_id != 0 {
+            return 10i32;
+        }
+        const pushed: !bool = rtp_jitter_buffer_push_packet(&buffer, packet[0:packet_len.value], 1000u64 + (index as u64));
+        if pushed.error_id != 0 || !pushed.value {
+            return 11i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    var overflow_packet: [byte: 32] = [];
+    const overflow_len: !usize = make_rtp_packet_bytes(
+        (1000usize + RTP_JITTER_MAX_PACKETS) as u16,
+        9000u32,
+        0x10203040u32,
+        true,
+        payload[0:1],
+        overflow_packet[0:32],
+    );
+    if overflow_len.error_id != 0 {
+        return 40i32;
+    }
+    const overflow: !bool = rtp_jitter_buffer_push_packet(
+        &buffer,
+        overflow_packet[0:overflow_len.value],
+        2000u64,
+    );
+    if overflow.error_id != 0 || overflow.value {
+        return 41i32;
+    }
+    if buffer.packet_count != RTP_JITTER_MAX_PACKETS {
+        return 42i32;
+    }
+    if buffer.packet_high_watermark != RTP_JITTER_MAX_PACKETS {
+        return 43i32;
+    }
+    if buffer.drop_count != 1u64 {
+        return 44i32;
+    }
+
+    return 0i32;
+}
+
+fn check_jitter_missing_memory_cap() i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = RTP_JITTER_MAX_PACKETS;
+    buffer.config.max_missing = RTP_JITTER_MAX_MISSING;
+
+    var payload: [byte: 1] = [0x66u8 as byte];
+    var first_packet: [byte: 32] = [];
+    const first_len: !usize = make_rtp_packet_bytes(1u16, 9000u32, 0x20304050u32, false, payload[0:1], first_packet[0:32]);
+    if first_len.error_id != 0 {
+        return 50i32;
+    }
+    const first_push: !bool = rtp_jitter_buffer_push_packet(&buffer, first_packet[0:first_len.value], 1000u64);
+    if first_push.error_id != 0 || !first_push.value {
+        return 51i32;
+    }
+
+    var gap_packet: [byte: 32] = [];
+    const gap_sequence: u16 = (3usize + RTP_JITTER_MAX_MISSING) as u16;
+    const gap_len: !usize = make_rtp_packet_bytes(gap_sequence, 9000u32, 0x20304050u32, true, payload[0:1], gap_packet[0:32]);
+    if gap_len.error_id != 0 {
+        return 52i32;
+    }
+    const gap_push: !bool = rtp_jitter_buffer_push_packet(&buffer, gap_packet[0:gap_len.value], 2000u64);
+    if gap_push.error_id != 0 || !gap_push.value {
+        return 53i32;
+    }
+    if buffer.missing_count != RTP_JITTER_MAX_MISSING {
+        return 54i32;
+    }
+    if buffer.overflow_drop_count == 0u64 {
+        return 55i32;
+    }
+
+    return 0i32;
+}
+
+fn check_frame_output_reassembly_cap() i32 {
+    var queue: RtpFrameOutputQueue = rtp_video_frame_output_queue_make();
+    queue.config.max_frames = RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES;
+    queue.config.drop_policy = RTP_FRAME_OUTPUT_QUEUE_DROP_NEWEST;
+
+    var payload: [byte: 1] = [0x77u8 as byte];
+    var index: usize = 0usize;
+    while index < RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        const frame: EncodedFrame = make_frame((index + 1usize) as u64, payload[0:1]);
+        if !rtp_frame_output_queue_push(&queue, &frame, index as u64) {
+            return 60i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    const overflow_frame: EncodedFrame = make_frame(999u64, payload[0:1]);
+    if rtp_frame_output_queue_push(&queue, &overflow_frame, 999u64) {
+        return 80i32;
+    }
+    if queue.frame_count != RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        return 81i32;
+    }
+    if queue.frame_high_watermark != RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES {
+        return 82i32;
+    }
+    if queue.drop_count != 1u64 {
+        return 83i32;
+    }
+
+    return 0i32;
+}
+
+fn check_receiver_reassembly_cap() i32 {
+    var state: Receiver = receiver_make();
+    const init: !void = receiver_init(&state, 77u64, MEDIA_KIND_VIDEO);
+    if init.error_id != 0 {
+        return 90i32;
+    }
+    if !receiver_open(&state) {
+        return 91i32;
+    }
+
+    var payload: [byte: 1] = [0x33u8 as byte];
+    var index: usize = 0usize;
+    while index < RECEIVER_MAX_PENDING_FRAMES {
+        const frame: EncodedFrame = make_frame((index + 1usize) as u64, payload[0:1]);
+        const delivered: !void = receiver_deliver_encoded_frame(&state, &frame);
+        if delivered.error_id != 0 {
+            return 100i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    const overflow_frame: EncodedFrame = make_frame(999u64, payload[0:1]);
+    const overflow: !void = receiver_deliver_encoded_frame(&state, &overflow_frame);
+    if overflow.error_id != @error_id(error.ReceiverQueueFull) {
+        return 120i32;
+    }
+    if receiver_pending_count(&state) != RECEIVER_MAX_PENDING_FRAMES {
+        return 121i32;
+    }
+    if receiver_high_watermark(&state) != RECEIVER_MAX_PENDING_FRAMES {
+        return 122i32;
+    }
+    if receiver_drop_count(&state) != 1u64 {
+        return 123i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_jitter_packet_memory_cap();
+    if result != 0i32 {
+        printf("JitterBuffer/reassembly memory limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_jitter_missing_memory_cap();
+    if result != 0i32 {
+        printf("JitterBuffer/reassembly memory limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_frame_output_reassembly_cap();
+    if result != 0i32 {
+        printf("JitterBuffer/reassembly memory limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_receiver_reassembly_cap();
+    if result != 0i32 {
+        printf("JitterBuffer/reassembly memory limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("JitterBuffer/reassembly memory limit tests passed\n");
+    return 0i32;
+}

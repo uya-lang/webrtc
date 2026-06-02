@@ -490,7 +490,7 @@
 - [x] SRTP replay/rollover property tests。
 - [x] ICE candidate 上限测试。
 - [x] SSRC/track/datachannel 上限测试。
-- [ ] JitterBuffer/reassembly 内存上限测试。
+- [x] JitterBuffer/reassembly 内存上限测试。
 - [ ] Secret logging audit。
 - [ ] constant-time audit。
 
