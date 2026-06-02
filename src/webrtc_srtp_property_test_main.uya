@@ -1,0 +1,96 @@
+use libc.printf;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+
+fn check_rollover_properties() i32 {
+    var seq: u16 = 0xfff0u16;
+    var highest: u64 = 0x0000fff0u64;
+    var current_roc: u32 = 0u32;
+    var expected: u64 = highest;
+    var step: usize = 0usize;
+    while step < 40usize {
+        const guessed: u64 = srtp_index_guess(current_roc, highest, seq);
+        if guessed != expected {
+            printf("SRTP rollover property mismatch\n");
+            return 10i32;
+        }
+        highest = guessed;
+        current_roc = (highest >> 16i32) as u32;
+        expected = expected + 1u64;
+        seq = seq + 1u16;
+        step = step + 1usize;
+    }
+
+    const previous_roc_guess: u64 = srtp_index_guess(1u32, 0x00010010u64, 0xfff0u16);
+    if previous_roc_guess != 0x0000fff0u64 {
+        printf("SRTP rollover previous ROC guess failed\n");
+        return 11i32;
+    }
+    return 0i32;
+}
+
+fn init_replay_context(ctx: &SrtpContext) i32 {
+    var master_key: [byte: SRTP_KEY_BYTES] = [];
+    var master_salt: [byte: SRTP_SALT_BYTES] = [];
+    const init_result: !void = srtp_context_init(
+        ctx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x01020304u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    );
+    if init_result.error_id != 0 {
+        printf("SRTP property context init failed\n");
+        return 20i32;
+    }
+    return 0i32;
+}
+
+fn check_replay_window_properties() i32 {
+    var ctx: SrtpContext = srtp_context_make();
+    var result: i32 = init_replay_context(&ctx);
+    if result != 0i32 {
+        return result;
+    }
+
+    var index: u64 = 0u64;
+    while index < 96u64 {
+        if !srtp_replay_check(&ctx, index) {
+            printf("SRTP replay property rejected fresh packet\n");
+            return 21i32;
+        }
+        const accepted: !void = srtp_replay_accept(&ctx, index);
+        if accepted.error_id != 0 {
+            printf("SRTP replay property failed to accept fresh packet\n");
+            return 22i32;
+        }
+        if srtp_replay_check(&ctx, index) {
+            printf("SRTP replay property allowed duplicate packet\n");
+            return 23i32;
+        }
+        index = index + 1u64;
+    }
+
+    if srtp_replay_check(&ctx, 0u64) {
+        printf("SRTP replay property allowed stale packet\n");
+        return 24i32;
+    }
+    if !srtp_replay_check(&ctx, 95u64 + 32u64) {
+        printf("SRTP replay property rejected future packet\n");
+        return 25i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_rollover_properties();
+    if result != 0i32 {
+        return result;
+    }
+    result = check_replay_window_properties();
+    if result != 0i32 {
+        return result;
+    }
+    printf("SRTP replay/rollover property tests passed\n");
+    return 0i32;
+}
