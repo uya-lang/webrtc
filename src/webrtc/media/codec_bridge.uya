@@ -9,11 +9,14 @@ export error CodecBridgeDisabled;
 export error CodecBridgeInvalidOpusPcm;
 export error CodecBridgeInvalidOpusPacket;
 export error CodecBridgeInvalidEncodedFrame;
+export error CodecBridgeInvalidVp8YuvFrame;
+export error CodecBridgeInvalidVp8Frame;
 
 export const CODEC_BRIDGE_FEATURE_DEFAULT_ENABLED: bool = false;
 export const CODEC_BRIDGE_OPUS_SAMPLE_RATE_HZ: u32 = 48000u32;
 export const CODEC_BRIDGE_OPUS_CHANNELS_MONO: u8 = 1u8;
 export const CODEC_BRIDGE_OPUS_CHANNELS_STEREO: u8 = 2u8;
+export const CODEC_BRIDGE_VP8_CLOCK_RATE_HZ: u32 = 90000u32;
 const CODEC_BRIDGE_MAX_USIZE: usize = ~(0 as usize);
 
 export struct CodecBridgeAdapterSlot {
@@ -53,6 +56,38 @@ export struct CodecBridgeOpusEncodeRequest {
 export struct CodecBridgeOpusDecodeRequest {
     packet: CodecBridgeOpusPacketView = CodecBridgeOpusPacketView{},
     output_pcm: &[i16] = [],
+}
+
+export struct CodecBridgeVp8Yuv420View {
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+    stride_y: usize = 0usize,
+    stride_u: usize = 0usize,
+    stride_v: usize = 0usize,
+    y_plane: &[byte] = [],
+    u_plane: &[byte] = [],
+    v_plane: &[byte] = [],
+}
+
+export struct CodecBridgeVp8FrameView {
+    frame: &[byte] = [],
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    sequence_id: u64 = 0u64,
+    is_keyframe: bool = false,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+}
+
+export struct CodecBridgeVp8EncodeRequest {
+    yuv: CodecBridgeVp8Yuv420View = CodecBridgeVp8Yuv420View{},
+    output_frame: &[byte] = [],
+}
+
+export struct CodecBridgeVp8DecodeRequest {
+    frame: CodecBridgeVp8FrameView = CodecBridgeVp8FrameView{},
+    output_y: &[byte] = [],
+    output_u: &[byte] = [],
+    output_v: &[byte] = [],
 }
 
 fn codec_bridge_slot_make() CodecBridgeAdapterSlot {
@@ -154,6 +189,118 @@ export fn codec_bridge_opus_encoded_frame_to_packet(frame: &EncodedFrame) !Codec
         timestamp: frame.timestamp,
         duration_us: frame.duration_us,
         sequence_id: frame.sequence_id,
+    };
+}
+
+fn codec_bridge_checked_plane_len(stride: usize, rows: usize) !usize {
+    if stride == 0usize || rows == 0usize {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+    if stride > CODEC_BRIDGE_MAX_USIZE / rows {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+    return stride * rows;
+}
+
+export fn codec_bridge_vp8_yuv420_view_make(
+    y_plane: &[byte],
+    u_plane: &[byte],
+    v_plane: &[byte],
+    width: u32,
+    height: u32,
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+) !CodecBridgeVp8Yuv420View {
+    if width == 0u32 || height == 0u32 {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+    if (width & 1u32) != 0u32 || (height & 1u32) != 0u32 {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+
+    const width_usize: usize = width as usize;
+    const height_usize: usize = height as usize;
+    const chroma_width: usize = width_usize / 2usize;
+    const chroma_height: usize = height_usize / 2usize;
+    if stride_y < width_usize || stride_u < chroma_width || stride_v < chroma_width {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+
+    const y_required: usize = try codec_bridge_checked_plane_len(stride_y, height_usize);
+    const u_required: usize = try codec_bridge_checked_plane_len(stride_u, chroma_height);
+    const v_required: usize = try codec_bridge_checked_plane_len(stride_v, chroma_height);
+    if y_required > y_plane.len || u_required > u_plane.len || v_required > v_plane.len {
+        return error.CodecBridgeInvalidVp8YuvFrame;
+    }
+
+    return CodecBridgeVp8Yuv420View{
+        width: width,
+        height: height,
+        stride_y: stride_y,
+        stride_u: stride_u,
+        stride_v: stride_v,
+        y_plane: y_plane[0:y_required],
+        u_plane: u_plane[0:u_required],
+        v_plane: v_plane[0:v_required],
+    };
+}
+
+export fn codec_bridge_vp8_frame_view_make(
+    frame: &[byte],
+    timestamp: u64,
+    duration_us: u32,
+    sequence_id: u64,
+    is_keyframe: bool,
+    temporal_id: i32,
+) !CodecBridgeVp8FrameView {
+    if frame.len == 0usize || duration_us == 0u32 {
+        return error.CodecBridgeInvalidVp8Frame;
+    }
+    return CodecBridgeVp8FrameView{
+        frame: frame,
+        timestamp: timestamp,
+        duration_us: duration_us,
+        sequence_id: sequence_id,
+        is_keyframe: is_keyframe,
+        temporal_id: temporal_id,
+    };
+}
+
+export fn codec_bridge_vp8_frame_to_encoded_frame(vp8_frame: &CodecBridgeVp8FrameView) !EncodedFrame {
+    if vp8_frame == null || vp8_frame.frame.len == 0usize || vp8_frame.duration_us == 0u32 {
+        return error.CodecBridgeInvalidVp8Frame;
+    }
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.timestamp = vp8_frame.timestamp;
+    frame.duration_us = vp8_frame.duration_us;
+    frame.sequence_id = vp8_frame.sequence_id;
+    frame.payload = vp8_frame.frame;
+    frame.is_keyframe = vp8_frame.is_keyframe;
+    frame.temporal_id = vp8_frame.temporal_id;
+    frame.marker = true;
+    return frame;
+}
+
+export fn codec_bridge_vp8_encoded_frame_to_frame(frame: &EncodedFrame) !CodecBridgeVp8FrameView {
+    if frame == null {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    if frame.codec_id != CODEC_ID_VP8 || frame.media_kind != MEDIA_KIND_VIDEO || frame.payload.len == 0usize {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    if frame.duration_us == 0u32 {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    return CodecBridgeVp8FrameView{
+        frame: frame.payload,
+        timestamp: frame.timestamp,
+        duration_us: frame.duration_us,
+        sequence_id: frame.sequence_id,
+        is_keyframe: frame.is_keyframe,
+        temporal_id: frame.temporal_id,
     };
 }
 

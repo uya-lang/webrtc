@@ -130,6 +130,100 @@ fn check_opus_pcm_and_error_boundaries() i32 {
     return 0i32;
 }
 
+fn check_vp8_frame_conversion() i32 {
+    var frame_bytes: [byte: 6] = [0x9du8, 0x01u8, 0x2au8, 0x00u8, 0x10u8, 0x00u8];
+    const vp8_result: !CodecBridgeVp8FrameView = codec_bridge_vp8_frame_view_make(
+        frame_bytes[0:6],
+        90000u64,
+        33333u32,
+        9u64,
+        true,
+        2i32,
+    );
+    if vp8_result.error_id != 0 {
+        return 50i32;
+    }
+
+    const encoded_result: !EncodedFrame = codec_bridge_vp8_frame_to_encoded_frame(&vp8_result.value);
+    if encoded_result.error_id != 0 {
+        return 51i32;
+    }
+    const encoded: EncodedFrame = encoded_result.value;
+    if encoded.codec_id != CODEC_ID_VP8 || encoded.media_kind != MEDIA_KIND_VIDEO {
+        return 52i32;
+    }
+    if encoded.timestamp != 90000u64 || encoded.duration_us != 33333u32 || encoded.sequence_id != 9u64 {
+        return 53i32;
+    }
+    if encoded.payload.len != 6usize || !encoded.is_keyframe || encoded.temporal_id != 2i32 || !encoded.marker {
+        return 54i32;
+    }
+
+    const roundtrip_result: !CodecBridgeVp8FrameView = codec_bridge_vp8_encoded_frame_to_frame(&encoded);
+    if roundtrip_result.error_id != 0 {
+        return 55i32;
+    }
+    if roundtrip_result.value.frame.len != 6usize || !roundtrip_result.value.is_keyframe || roundtrip_result.value.temporal_id != 2i32 {
+        return 56i32;
+    }
+    return 0i32;
+}
+
+fn check_vp8_yuv_and_error_boundaries() i32 {
+    var y: [byte: 16] = [
+        1u8, 2u8, 3u8, 4u8,
+        5u8, 6u8, 7u8, 8u8,
+        9u8, 10u8, 11u8, 12u8,
+        13u8, 14u8, 15u8, 16u8,
+    ];
+    var u: [byte: 4] = [21u8, 22u8, 23u8, 24u8];
+    var v: [byte: 4] = [31u8, 32u8, 33u8, 34u8];
+
+    const yuv_result: !CodecBridgeVp8Yuv420View = codec_bridge_vp8_yuv420_view_make(
+        y[0:16],
+        u[0:4],
+        v[0:4],
+        4u32,
+        4u32,
+        4usize,
+        2usize,
+        2usize,
+    );
+    if yuv_result.error_id != 0 {
+        return 60i32;
+    }
+    if yuv_result.value.width != 4u32 || yuv_result.value.height != 4u32 {
+        return 61i32;
+    }
+    if yuv_result.value.y_plane.len != 16usize || yuv_result.value.u_plane.len != 4usize || yuv_result.value.v_plane.len != 4usize {
+        return 62i32;
+    }
+
+    const odd_width: !CodecBridgeVp8Yuv420View = codec_bridge_vp8_yuv420_view_make(y[0:16], u[0:4], v[0:4], 3u32, 4u32, 4usize, 2usize, 2usize);
+    if odd_width.error_id != @error_id(error.CodecBridgeInvalidVp8YuvFrame) {
+        return 63i32;
+    }
+    const short_y: !CodecBridgeVp8Yuv420View = codec_bridge_vp8_yuv420_view_make(y[0:15], u[0:4], v[0:4], 4u32, 4u32, 4usize, 2usize, 2usize);
+    if short_y.error_id != @error_id(error.CodecBridgeInvalidVp8YuvFrame) {
+        return 64i32;
+    }
+    var empty_frame: [byte: 1] = [0u8];
+    const empty_vp8: !CodecBridgeVp8FrameView = codec_bridge_vp8_frame_view_make(empty_frame[0:0], 0u64, 33333u32, 0u64, false, ENCODED_FRAME_NO_TEMPORAL_ID);
+    if empty_vp8.error_id != @error_id(error.CodecBridgeInvalidVp8Frame) {
+        return 65i32;
+    }
+    var wrong_frame: EncodedFrame = encoded_frame_make();
+    wrong_frame.codec_id = CODEC_ID_OPUS;
+    wrong_frame.media_kind = MEDIA_KIND_AUDIO;
+    wrong_frame.payload = empty_frame[0:1];
+    wrong_frame.duration_us = 20000u32;
+    const wrong_frame_result: !CodecBridgeVp8FrameView = codec_bridge_vp8_encoded_frame_to_frame(&wrong_frame);
+    if wrong_frame_result.error_id != @error_id(error.CodecBridgeInvalidEncodedFrame) {
+        return 66i32;
+    }
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_default_boundary_is_disabled();
     if result != 0i32 {
@@ -152,6 +246,18 @@ fn main() i32 {
     result = check_opus_pcm_and_error_boundaries();
     if result != 0i32 {
         printf("opus bridge pcm/error tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_vp8_frame_conversion();
+    if result != 0i32 {
+        printf("vp8 bridge frame tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_vp8_yuv_and_error_boundaries();
+    if result != 0i32 {
+        printf("vp8 bridge yuv/error tests failed: %d\n", result);
         return 1i32;
     }
 
