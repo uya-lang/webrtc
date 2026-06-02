@@ -1,0 +1,365 @@
+use libc.printf;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+
+const NETWORK_SIM_PACKET_COUNT: usize = 8usize;
+const NETWORK_SIM_BASE_SEQUENCE: u16 = 2000u16;
+const NETWORK_SIM_SSRC: u32 = 0x55667788u32;
+const NETWORK_SIM_PAYLOAD_TYPE: u8 = 96u8;
+const NETWORK_SIM_PAYLOAD_BYTES: usize = 4usize;
+const NETWORK_SIM_PACKET_BYTES: usize = 32usize;
+const NETWORK_SIM_PLI_BYTES: usize = 16usize;
+
+fn make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = NETWORK_SIM_PAYLOAD_TYPE;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn drain_ready_packets(
+    buffer: &RtpJitterBuffer,
+    expected_sequence: &u16,
+    output_count: &usize,
+) !void {
+    while rtp_jitter_buffer_has_ready_packet(buffer) {
+        const ready_result: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(buffer);
+        if ready_result.error_id != 0 {
+            return error.RtpJitterBufferInvalidState;
+        }
+        if ready_result.value.header.sequence_number != *expected_sequence {
+            return error.RtpJitterBufferInvalidState;
+        }
+        *expected_sequence = *expected_sequence + 1u16;
+        *output_count = *output_count + 1usize;
+    }
+    return;
+}
+
+fn make_buffer() RtpJitterBuffer {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = 16usize;
+    buffer.config.max_missing = 16usize;
+    buffer.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    buffer.config.nack_initial_backoff_us = 2000u64;
+    buffer.config.nack_max_backoff_us = 16000u64;
+    buffer.config.frame_timeout_us = 3000u64;
+    return buffer;
+}
+
+fn check_reorder_preserves_order() i32 {
+    var buffer: RtpJitterBuffer = make_buffer();
+    var payload: [byte: NETWORK_SIM_PAYLOAD_BYTES] = [
+        0x11 as byte,
+        0x22 as byte,
+        0x33 as byte,
+        0x44 as byte,
+    ];
+    var packet_bytes: [byte: NETWORK_SIM_PACKET_BYTES] = [];
+
+    var expected_sequence: u16 = NETWORK_SIM_BASE_SEQUENCE;
+    var output_count: usize = 0usize;
+
+    const arrival_sequences: [u16: NETWORK_SIM_PACKET_COUNT] = [
+        2000u16,
+        2002u16,
+        2001u16,
+        2004u16,
+        2003u16,
+        2005u16,
+        2007u16,
+        2006u16,
+    ];
+    const arrival_times: [u64: NETWORK_SIM_PACKET_COUNT] = [
+        1000u64,
+        2000u64,
+        3000u64,
+        4000u64,
+        5000u64,
+        6000u64,
+        7000u64,
+        8000u64,
+    ];
+
+    var index: usize = 0usize;
+    while index < NETWORK_SIM_PACKET_COUNT {
+        const sequence_number: u16 = arrival_sequences[index];
+        const marker: bool = sequence_number == (NETWORK_SIM_BASE_SEQUENCE + (NETWORK_SIM_PACKET_COUNT as u16) - 1u16);
+        const packet_len_result: !usize = make_rtp_packet_bytes(
+            sequence_number,
+            9000u32,
+            NETWORK_SIM_SSRC,
+            marker,
+            payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+            packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+        );
+        if packet_len_result.error_id != 0 {
+            return 10i32;
+        }
+
+        const accepted_result: !bool = rtp_jitter_buffer_push_packet(
+            &buffer,
+            packet_bytes[0:packet_len_result.value],
+            arrival_times[index],
+        );
+        if accepted_result.error_id != 0 || !accepted_result.value {
+            return 11i32;
+        }
+
+        const drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+        if drain_result.error_id != 0 {
+            return 12i32;
+        }
+        index = index + 1usize;
+    }
+
+    const final_drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+    if final_drain_result.error_id != 0 {
+        return 13i32;
+    }
+
+    if output_count != NETWORK_SIM_PACKET_COUNT {
+        return 14i32;
+    }
+    if expected_sequence != (NETWORK_SIM_BASE_SEQUENCE + (NETWORK_SIM_PACKET_COUNT as u16)) {
+        return 15i32;
+    }
+    if buffer.duplicate_count != 0u64 || buffer.missing_count != 0usize {
+        return 16i32;
+    }
+    if !buffer.frame_complete {
+        return 17i32;
+    }
+
+    printf("reorder simulation passed\n");
+    return 0i32;
+}
+
+fn check_duplicate_rejection() i32 {
+    var buffer: RtpJitterBuffer = make_buffer();
+    var payload: [byte: NETWORK_SIM_PAYLOAD_BYTES] = [
+        0x55 as byte,
+        0x66 as byte,
+        0x77 as byte,
+        0x88 as byte,
+    ];
+    var packet_bytes: [byte: NETWORK_SIM_PACKET_BYTES] = [];
+
+    var expected_sequence: u16 = NETWORK_SIM_BASE_SEQUENCE;
+    var output_count: usize = 0usize;
+
+    const sequence_order: [u16: 5] = [
+        2000u16,
+        2001u16,
+        2001u16,
+        2002u16,
+        2003u16,
+    ];
+    const arrival_times: [u64: 5] = [
+        1000u64,
+        2000u64,
+        2100u64,
+        3000u64,
+        4000u64,
+    ];
+
+    var index: usize = 0usize;
+    while index < 5usize {
+        const sequence_number: u16 = sequence_order[index];
+        const marker: bool = sequence_number == (NETWORK_SIM_BASE_SEQUENCE + 3u16);
+        const packet_len_result: !usize = make_rtp_packet_bytes(
+            sequence_number,
+            18000u32,
+            NETWORK_SIM_SSRC,
+            marker,
+            payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+            packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+        );
+        if packet_len_result.error_id != 0 {
+            return 20i32;
+        }
+
+        const accepted_result: !bool = rtp_jitter_buffer_push_packet(
+            &buffer,
+            packet_bytes[0:packet_len_result.value],
+            arrival_times[index],
+        );
+        if accepted_result.error_id != 0 {
+            return 21i32;
+        }
+        if index == 2usize && accepted_result.value {
+            return 22i32;
+        }
+
+        const drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+        if drain_result.error_id != 0 {
+            return 23i32;
+        }
+        index = index + 1usize;
+    }
+
+    const final_drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+    if final_drain_result.error_id != 0 {
+        return 24i32;
+    }
+
+    if buffer.duplicate_count != 1u64 {
+        return 25i32;
+    }
+    if output_count != 4usize || expected_sequence != (NETWORK_SIM_BASE_SEQUENCE + 4u16) {
+        return 26i32;
+    }
+    if buffer.missing_count != 0usize || !buffer.frame_complete {
+        return 27i32;
+    }
+
+    printf("duplicate rejection simulation passed\n");
+    return 0i32;
+}
+
+fn check_jitter_timeout_and_pli() i32 {
+    var buffer: RtpJitterBuffer = make_buffer();
+    var payload: [byte: NETWORK_SIM_PAYLOAD_BYTES] = [
+        0x90 as byte,
+        0x91 as byte,
+        0x92 as byte,
+        0x93 as byte,
+    ];
+    var packet_bytes: [byte: NETWORK_SIM_PACKET_BYTES] = [];
+    var pli_bytes: [byte: NETWORK_SIM_PLI_BYTES] = [];
+
+    var expected_sequence: u16 = NETWORK_SIM_BASE_SEQUENCE;
+    var output_count: usize = 0usize;
+
+    const arrival_sequences: [u16: 4] = [
+        2000u16,
+        2001u16,
+        2002u16,
+        2003u16,
+    ];
+    const arrival_times: [u64: 4] = [
+        1000u64,
+        1500u64,
+        2000u64,
+        10000u64,
+    ];
+
+    var index: usize = 0usize;
+    while index < 3usize {
+        const packet_len_result: !usize = make_rtp_packet_bytes(
+            arrival_sequences[index],
+            24000u32,
+            NETWORK_SIM_SSRC,
+            false,
+            payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+            packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+        );
+        if packet_len_result.error_id != 0 {
+            return 30i32;
+        }
+
+        const accepted_result: !bool = rtp_jitter_buffer_push_packet(
+            &buffer,
+            packet_bytes[0:packet_len_result.value],
+            arrival_times[index],
+        );
+        if accepted_result.error_id != 0 || !accepted_result.value {
+            return 31i32;
+        }
+
+        const drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+        if drain_result.error_id != 0 {
+            return 32i32;
+        }
+        index = index + 1usize;
+    }
+
+    if rtp_jitter_buffer_should_send_pli(&buffer, 3500u64) {
+        return 33i32;
+    }
+    if !rtp_jitter_buffer_should_send_pli(&buffer, 5000u64) {
+        return 34i32;
+    }
+
+    const pli_fire_result: !bool = rtp_jitter_buffer_fire_pli(
+        &buffer,
+        0x01020304u32,
+        NETWORK_SIM_SSRC,
+        5000u64,
+        pli_bytes[0:NETWORK_SIM_PLI_BYTES],
+    );
+    if pli_fire_result.error_id != 0 || !pli_fire_result.value {
+        return 35i32;
+    }
+    if buffer.pli_count != 1u64 {
+        return 36i32;
+    }
+
+    const marker_packet_len: !usize = make_rtp_packet_bytes(
+        arrival_sequences[3usize],
+        24000u32,
+        NETWORK_SIM_SSRC,
+        true,
+        payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+        packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+    );
+    if marker_packet_len.error_id != 0 {
+        return 37i32;
+    }
+    const marker_push_result: !bool = rtp_jitter_buffer_push_packet(
+        &buffer,
+        packet_bytes[0:marker_packet_len.value],
+        arrival_times[3usize],
+    );
+    if marker_push_result.error_id != 0 || !marker_push_result.value {
+        return 38i32;
+    }
+
+    const final_drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+    if final_drain_result.error_id != 0 {
+        return 39i32;
+    }
+
+    if output_count != 4usize || expected_sequence != (NETWORK_SIM_BASE_SEQUENCE + 4u16) {
+        return 40i32;
+    }
+    if !buffer.frame_complete || buffer.missing_count != 0usize {
+        return 41i32;
+    }
+
+    printf("jitter timeout simulation passed\n");
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_reorder_preserves_order();
+    if result != 0i32 {
+        printf("reorder simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_duplicate_rejection();
+    if result != 0i32 {
+        printf("duplicate simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_jitter_timeout_and_pli();
+    if result != 0i32 {
+        printf("jitter simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("network reorder/duplicate/jitter simulation tests passed\n");
+    return 0i32;
+}
