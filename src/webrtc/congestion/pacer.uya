@@ -1,0 +1,392 @@
+// webrtc.congestion.pacer - Bounded pacer queue and delay sampling helpers
+// Module: src/webrtc/congestion/pacer.uya -> use webrtc.congestion.pacer;
+
+export const PACER_QUEUE_MAX_PACKETS: usize = 64usize;
+export const PACER_QUEUE_MAX_DELAY_SAMPLES: usize = 128usize;
+export const PACER_PRIORITY_LOW: u8 = 0u8;
+export const PACER_PRIORITY_VIDEO: u8 = 1u8;
+export const PACER_PRIORITY_HIGH: u8 = 2u8;
+
+export error PacerQueueInvalidState;
+export error PacerQueueFull;
+export error PacerQueueBackpressure;
+export error PacerQueueEmpty;
+export error PacerQueueNotReady;
+
+export struct PacerQueueConfig {
+    max_packets: usize = 16usize,
+    max_bytes: usize = 24000usize,
+    max_delay_samples: usize = PACER_QUEUE_MAX_DELAY_SAMPLES,
+}
+
+export struct PacerPacket {
+    size_bytes: usize = 0usize,
+    enqueue_time_us: u64 = 0u64,
+    ready_at_us: u64 = 0u64,
+    transport_sequence: u16 = 0u16,
+    has_transport_sequence: bool = false,
+    send_time_us: u64 = 0u64,
+    has_send_time: bool = false,
+    priority: u8 = PACER_PRIORITY_LOW,
+}
+
+export struct PacerQueueEntry {
+    present: bool = false,
+    packet: PacerPacket = PacerPacket{},
+}
+
+export struct PacerQueue {
+    config: PacerQueueConfig = PacerQueueConfig{},
+    head: usize = 0usize,
+    count: usize = 0usize,
+    bytes_in_queue: usize = 0usize,
+    high_watermark: usize = 0usize,
+    push_count: u64 = 0u64,
+    pop_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    backpressure_count: u64 = 0u64,
+    delay_sample_head: usize = 0usize,
+    delay_sample_count: usize = 0usize,
+    delay_samples: [u64: PACER_QUEUE_MAX_DELAY_SAMPLES] = [],
+    entries: [PacerQueueEntry: PACER_QUEUE_MAX_PACKETS] = [],
+}
+
+fn pacer_queue_make_default_packet() PacerPacket {
+    return PacerPacket{};
+}
+
+fn pacer_queue_clear_entry(entry: &PacerQueueEntry) void {
+    if entry == null {
+        return;
+    }
+    entry.present = false;
+    entry.packet = pacer_queue_make_default_packet();
+}
+
+fn pacer_queue_effective_max_packets(queue: &PacerQueue) usize {
+    if queue == null {
+        return 0usize;
+    }
+    if queue.config.max_packets == 0usize {
+        return 0usize;
+    }
+    if queue.config.max_packets > PACER_QUEUE_MAX_PACKETS {
+        return PACER_QUEUE_MAX_PACKETS;
+    }
+    return queue.config.max_packets;
+}
+
+fn pacer_queue_effective_max_delay_samples(queue: &PacerQueue) usize {
+    if queue == null {
+        return 0usize;
+    }
+    if queue.config.max_delay_samples == 0usize {
+        return 0usize;
+    }
+    if queue.config.max_delay_samples > PACER_QUEUE_MAX_DELAY_SAMPLES {
+        return PACER_QUEUE_MAX_DELAY_SAMPLES;
+    }
+    return queue.config.max_delay_samples;
+}
+
+fn pacer_queue_queue_slot(head: usize, count: usize) usize {
+    var slot: usize = head + count;
+    if slot >= PACER_QUEUE_MAX_PACKETS {
+        slot = slot - PACER_QUEUE_MAX_PACKETS;
+    }
+    return slot;
+}
+
+fn pacer_queue_record_delay(queue: &PacerQueue, delay_us: u64) void {
+    const max_samples: usize = pacer_queue_effective_max_delay_samples(queue);
+    if max_samples == 0usize {
+        return;
+    }
+
+    if max_samples > queue.delay_sample_count {
+        const slot: usize = pacer_queue_queue_slot(queue.delay_sample_head, queue.delay_sample_count);
+        if PACER_QUEUE_MAX_DELAY_SAMPLES > slot {
+            queue.delay_samples[slot] = delay_us;
+            queue.delay_sample_count = queue.delay_sample_count + 1usize;
+        }
+        return;
+    }
+
+    if queue.delay_sample_head >= PACER_QUEUE_MAX_DELAY_SAMPLES {
+        queue.delay_sample_head = 0usize;
+    }
+    queue.delay_samples[queue.delay_sample_head] = delay_us;
+    queue.delay_sample_head = queue.delay_sample_head + 1usize;
+    if queue.delay_sample_head >= max_samples {
+        queue.delay_sample_head = 0usize;
+    }
+}
+
+fn pacer_queue_copy_delay_samples(queue: &PacerQueue, samples: &[u64]) usize {
+    const count: usize = queue.delay_sample_count;
+    if count == 0usize {
+        return 0usize;
+    }
+
+    var copied: usize = 0usize;
+    var index: usize = 0usize;
+    while index < count {
+        if copied >= PACER_QUEUE_MAX_DELAY_SAMPLES {
+            break;
+        }
+        const slot: usize = queue.delay_sample_head + index;
+        var actual_slot: usize = slot;
+        const max_samples: usize = pacer_queue_effective_max_delay_samples(queue);
+        if max_samples == 0usize {
+            break;
+        }
+        if actual_slot >= max_samples {
+            actual_slot = actual_slot - max_samples;
+        }
+        if actual_slot < PACER_QUEUE_MAX_DELAY_SAMPLES {
+            samples[copied] = queue.delay_samples[actual_slot];
+            copied = copied + 1usize;
+        }
+        index = index + 1usize;
+    }
+    return copied;
+}
+
+fn pacer_queue_sort_samples(samples: &[u64], count: usize) void {
+    var i: usize = 1usize;
+    while i < count {
+        const value: u64 = samples[i];
+        var j: usize = i;
+        while j > 0usize && samples[j - 1usize] > value {
+            samples[j] = samples[j - 1usize];
+            j = j - 1usize;
+        }
+        samples[j] = value;
+        i = i + 1usize;
+    }
+}
+
+fn pacer_queue_percentile_delay_us(queue: &PacerQueue, percentile: u8) u64 {
+    if queue == null {
+        return 0u64;
+    }
+    if queue.delay_sample_count == 0usize {
+        return 0u64;
+    }
+
+    var samples: [u64: PACER_QUEUE_MAX_DELAY_SAMPLES] = [];
+    const copied: usize = pacer_queue_copy_delay_samples(queue, samples[0:PACER_QUEUE_MAX_DELAY_SAMPLES]);
+    if copied == 0usize {
+        return 0u64;
+    }
+
+    pacer_queue_sort_samples(samples[0:PACER_QUEUE_MAX_DELAY_SAMPLES], copied);
+
+    var effective_percentile: u32 = percentile as u32;
+    if effective_percentile > 100u32 {
+        effective_percentile = 100u32;
+    }
+    if effective_percentile == 0u32 {
+        return samples[0usize];
+    }
+
+    var rank: u64 = ((effective_percentile as u64) * (copied as u64) + 99u64) / 100u64;
+    if rank == 0u64 {
+        rank = 1u64;
+    }
+    if rank > (copied as u64) {
+        rank = copied as u64;
+    }
+    const percentile_index: usize = (rank - 1u64) as usize;
+    if percentile_index >= PACER_QUEUE_MAX_DELAY_SAMPLES {
+        return 0u64;
+    }
+    return samples[percentile_index];
+}
+
+/// Create the default pacer queue configuration.
+export fn pacer_queue_config_make() PacerQueueConfig {
+    return PacerQueueConfig{};
+}
+
+/// Create an empty bounded pacer queue.
+export fn pacer_queue_make() PacerQueue {
+    var queue: PacerQueue = PacerQueue{
+        config: pacer_queue_config_make(),
+    };
+    pacer_queue_reset(&queue);
+    return queue;
+}
+
+/// Reset queue contents and counters while preserving configuration.
+export fn pacer_queue_reset(queue: &PacerQueue) void {
+    if queue == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < PACER_QUEUE_MAX_PACKETS {
+        pacer_queue_clear_entry(&queue.entries[index]);
+        index = index + 1usize;
+    }
+
+    index = 0usize;
+    while index < PACER_QUEUE_MAX_DELAY_SAMPLES {
+        queue.delay_samples[index] = 0u64;
+        index = index + 1usize;
+    }
+
+    queue.head = 0usize;
+    queue.count = 0usize;
+    queue.bytes_in_queue = 0usize;
+    queue.high_watermark = 0usize;
+    queue.push_count = 0u64;
+    queue.pop_count = 0u64;
+    queue.drop_count = 0u64;
+    queue.backpressure_count = 0u64;
+    queue.delay_sample_head = 0usize;
+    queue.delay_sample_count = 0usize;
+}
+
+/// Enqueue a packet into the bounded pacer queue.
+export fn pacer_queue_push(queue: &PacerQueue, packet: &PacerPacket) !void {
+    if queue == null || packet == null {
+        return error.PacerQueueInvalidState;
+    }
+
+    const max_packets: usize = pacer_queue_effective_max_packets(queue);
+    const max_bytes: usize = queue.config.max_bytes;
+    const would_exceed_packets: bool = max_packets > 0usize && queue.count >= max_packets;
+    const would_exceed_bytes: bool = max_bytes > 0usize && (queue.bytes_in_queue + packet.size_bytes) > max_bytes;
+
+    if would_exceed_packets || would_exceed_bytes {
+        if packet.priority >= PACER_PRIORITY_HIGH {
+            queue.backpressure_count = queue.backpressure_count + 1u64;
+            return error.PacerQueueBackpressure;
+        }
+        queue.drop_count = queue.drop_count + 1u64;
+        return error.PacerQueueFull;
+    }
+
+    if queue.count >= PACER_QUEUE_MAX_PACKETS {
+        queue.drop_count = queue.drop_count + 1u64;
+        return error.PacerQueueFull;
+    }
+
+    const slot: usize = pacer_queue_queue_slot(queue.head, queue.count);
+    if slot >= PACER_QUEUE_MAX_PACKETS {
+        queue.drop_count = queue.drop_count + 1u64;
+        return error.PacerQueueFull;
+    }
+
+    queue.entries[slot].present = true;
+    queue.entries[slot].packet = *packet;
+    queue.count = queue.count + 1usize;
+    queue.bytes_in_queue = queue.bytes_in_queue + packet.size_bytes;
+    queue.push_count = queue.push_count + 1u64;
+    if queue.count > queue.high_watermark {
+        queue.high_watermark = queue.count;
+    }
+    return;
+}
+
+/// Return whether the queue has at least one packet ready to release.
+export fn pacer_queue_has_ready_packet(queue: &PacerQueue, now_us: u64) bool {
+    if queue == null || queue.count == 0usize {
+        return false;
+    }
+    const slot: usize = queue.head;
+    if slot >= PACER_QUEUE_MAX_PACKETS {
+        return false;
+    }
+    if !queue.entries[slot].present {
+        return false;
+    }
+    return queue.entries[slot].packet.ready_at_us <= now_us;
+}
+
+/// Pop the oldest ready packet and record the queueing delay.
+export fn pacer_queue_pop_ready_packet(queue: &PacerQueue, now_us: u64) !PacerPacket {
+    if queue == null {
+        return error.PacerQueueInvalidState;
+    }
+    if queue.count == 0usize {
+        return error.PacerQueueEmpty;
+    }
+    const slot: usize = queue.head;
+    if slot >= PACER_QUEUE_MAX_PACKETS {
+        return error.PacerQueueInvalidState;
+    }
+    if !queue.entries[slot].present {
+        return error.PacerQueueInvalidState;
+    }
+
+    const entry: PacerQueueEntry = queue.entries[slot];
+    if entry.packet.ready_at_us > now_us {
+        return error.PacerQueueNotReady;
+    }
+
+    const packet: PacerPacket = entry.packet;
+    pacer_queue_clear_entry(&queue.entries[slot]);
+    queue.head = slot + 1usize;
+    if queue.head >= PACER_QUEUE_MAX_PACKETS {
+        queue.head = 0usize;
+    }
+    queue.count = queue.count - 1usize;
+    if queue.bytes_in_queue >= packet.size_bytes {
+        queue.bytes_in_queue = queue.bytes_in_queue - packet.size_bytes;
+    } else {
+        queue.bytes_in_queue = 0usize;
+    }
+    queue.pop_count = queue.pop_count + 1u64;
+
+    if now_us >= packet.enqueue_time_us {
+        pacer_queue_record_delay(queue, now_us - packet.enqueue_time_us);
+    } else {
+        pacer_queue_record_delay(queue, 0u64);
+    }
+
+    return packet;
+}
+
+/// Return the number of queued packets.
+export fn pacer_queue_pending_count(queue: &PacerQueue) usize {
+    if queue == null {
+        return 0usize;
+    }
+    return queue.count;
+}
+
+/// Return the number of queued bytes.
+export fn pacer_queue_pending_bytes(queue: &PacerQueue) usize {
+    if queue == null {
+        return 0usize;
+    }
+    return queue.bytes_in_queue;
+}
+
+/// Return the queueing delay p95 from the recorded samples.
+export fn pacer_queue_p95_delay_us(queue: &PacerQueue) u64 {
+    return pacer_queue_percentile_delay_us(queue, 95u8);
+}
+
+/// Return the queueing delay p99 from the recorded samples.
+export fn pacer_queue_p99_delay_us(queue: &PacerQueue) u64 {
+    return pacer_queue_percentile_delay_us(queue, 99u8);
+}
+
+/// Return the number of packets dropped because the queue was full.
+export fn pacer_queue_drop_count(queue: &PacerQueue) u64 {
+    if queue == null {
+        return 0u64;
+    }
+    return queue.drop_count;
+}
+
+/// Return the number of packets rejected with backpressure.
+export fn pacer_queue_backpressure_count(queue: &PacerQueue) u64 {
+    if queue == null {
+        return 0u64;
+    }
+    return queue.backpressure_count;
+}
