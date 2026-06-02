@@ -1,0 +1,127 @@
+use libc.printf;
+use webrtc.congestion.pacer;
+
+fn check_queue_cap_drop_and_backpressure() i32 {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 4usize;
+    queue.config.max_bytes = 4096usize;
+
+    var index: usize = 0usize;
+    while index < 4usize {
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1000usize,
+            enqueue_time_us: 0u64,
+            ready_at_us: 1000u64,
+            priority: PACER_PRIORITY_LOW,
+        };
+        const accepted: !void = pacer_queue_push(&queue, &packet);
+        if accepted.error_id != 0 {
+            return 10i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    if queue.high_watermark != 4usize || queue.drop_count != 0u64 || queue.backpressure_count != 0u64 {
+        return 20i32;
+    }
+
+    var dropped: PacerPacket = PacerPacket{
+        size_bytes: 512usize,
+        enqueue_time_us: 0u64,
+        ready_at_us: 1000u64,
+        priority: PACER_PRIORITY_LOW,
+    };
+    const dropped_result: !void = pacer_queue_push(&queue, &dropped);
+    if dropped_result.error_id != @error_id(error.PacerQueueFull) {
+        return 21i32;
+    }
+    if queue.drop_count != 1u64 {
+        return 22i32;
+    }
+
+    var backpressure: PacerPacket = PacerPacket{
+        size_bytes: 512usize,
+        enqueue_time_us: 0u64,
+        ready_at_us: 1000u64,
+        priority: PACER_PRIORITY_HIGH,
+    };
+    const backpressure_result: !void = pacer_queue_push(&queue, &backpressure);
+    if backpressure_result.error_id != @error_id(error.PacerQueueBackpressure) {
+        return 23i32;
+    }
+    if queue.backpressure_count != 1u64 {
+        return 24i32;
+    }
+
+    return 0i32;
+}
+
+fn check_queue_delay_percentiles() i32 {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 16usize;
+    queue.config.max_bytes = 16384usize;
+
+    var index: usize = 0usize;
+    while index < 10usize {
+        const ready_at_us: u64 = ((index + 1usize) as u64) * 10u64;
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1200usize,
+            enqueue_time_us: 0u64,
+            ready_at_us: ready_at_us,
+            priority: PACER_PRIORITY_LOW,
+        };
+        const push_result: !void = pacer_queue_push(&queue, &packet);
+        if push_result.error_id != 0 {
+            return 30i32;
+        }
+        index = index + 1usize;
+    }
+
+    index = 0usize;
+    while index < 10usize {
+        const now_us: u64 = ((index + 1usize) as u64) * 10u64;
+        if !pacer_queue_has_ready_packet(&queue, now_us) {
+            return 31i32;
+        }
+        const packet: !PacerPacket = pacer_queue_pop_ready_packet(&queue, now_us);
+        if packet.error_id != 0 {
+            return 32i32;
+        }
+        if packet.value.ready_at_us != now_us {
+            return 33i32;
+        }
+        index = index + 1usize;
+    }
+
+    if queue.delay_sample_count != 10usize {
+        return 34i32;
+    }
+    if pacer_queue_p95_delay_us(&queue) != 100u64 {
+        return 35i32;
+    }
+    if pacer_queue_p99_delay_us(&queue) != 100u64 {
+        return 36i32;
+    }
+    if queue.pop_count != 10u64 {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_queue_cap_drop_and_backpressure();
+    if result != 0i32 {
+        printf("pacer queue cap/drop/backpressure tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_queue_delay_percentiles();
+    if result != 0i32 {
+        printf("pacer queue delay percentile tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("pacer queue tests passed\n");
+    return 0i32;
+}

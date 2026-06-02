@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+test -f src/webrtc/congestion/pacer.uya
+test -f src/webrtc_congestion_pacer_test_main.uya
+
+rg -q "export struct PacerQueueConfig" src/webrtc/congestion/pacer.uya
+rg -q "export struct PacerPacket" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_queue_make" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_queue_push" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_queue_pop_ready_packet" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_queue_p95_delay_us" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_queue_p99_delay_us" src/webrtc/congestion/pacer.uya
+
+../uya/bin/uya run src/webrtc_congestion_pacer_test_main.uya
+
+echo "Phase 15 pacer queue checks passed"
