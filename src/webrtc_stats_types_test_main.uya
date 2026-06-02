@@ -1,0 +1,125 @@
+use libc.printf;
+use webrtc.stats.types;
+
+fn check_stats_default_values() i32 {
+    var peer_connection: RtcPeerConnectionStats = rtc_peer_connection_stats_make();
+    if peer_connection.handle != 0u64 || peer_connection.timestamp_us != 0u64 {
+        return 10i32;
+    }
+    if peer_connection.bytes_sent != 0u64 || peer_connection.bytes_received != 0u64 {
+        return 11i32;
+    }
+    if peer_connection.transceiver_count != 0usize || peer_connection.data_channel_count != 0usize {
+        return 12i32;
+    }
+
+    var transport: RtcTransportStats = rtc_transport_stats_make();
+    if transport.handle != 0u64 || transport.timestamp_us != 0u64 {
+        return 20i32;
+    }
+    if transport.bytes_sent != 0u64 || transport.bytes_received != 0u64 {
+        return 21i32;
+    }
+    if transport.selected_candidate_pair_handle != 0u64 || transport.dtls_state != 0u8 || transport.ice_state != 0u8 {
+        return 22i32;
+    }
+
+    var candidate_pair: RtcIceCandidatePairStats = rtc_ice_candidate_pair_stats_make();
+    if candidate_pair.handle != 0u64 || candidate_pair.timestamp_us != 0u64 {
+        return 30i32;
+    }
+    if candidate_pair.bytes_sent != 0u64 || candidate_pair.bytes_received != 0u64 {
+        return 31i32;
+    }
+    if candidate_pair.round_trip_time_us != 0u64 || candidate_pair.available_outgoing_bitrate_bps != 0u64 {
+        return 32i32;
+    }
+
+    var inbound: RtcInboundRtpStreamStats = rtc_inbound_rtp_stream_stats_make();
+    if inbound.handle != 0u64 || inbound.timestamp_us != 0u64 {
+        return 40i32;
+    }
+    if inbound.packets_received != 0u64 || inbound.packets_lost != 0u64 || inbound.bytes_received != 0u64 {
+        return 41i32;
+    }
+
+    var outbound: RtcOutboundRtpStreamStats = rtc_outbound_rtp_stream_stats_make();
+    if outbound.handle != 0u64 || outbound.timestamp_us != 0u64 {
+        return 50i32;
+    }
+    if outbound.packets_sent != 0u64 || outbound.bytes_sent != 0u64 || outbound.target_bitrate_bps != 0u64 {
+        return 51i32;
+    }
+
+    var remote_inbound: RtcRemoteInboundRtpStreamStats = rtc_remote_inbound_rtp_stream_stats_make();
+    if remote_inbound.handle != 0u64 || remote_inbound.timestamp_us != 0u64 {
+        return 60i32;
+    }
+    if remote_inbound.packets_lost != 0u64 || remote_inbound.round_trip_time_us != 0u64 {
+        return 61i32;
+    }
+
+    var data_channel: RtcDataChannelStats = rtc_data_channel_stats_make();
+    if data_channel.handle != 0u64 || data_channel.timestamp_us != 0u64 {
+        return 70i32;
+    }
+    if data_channel.messages_sent != 0u64 || data_channel.bytes_sent != 0u64 || data_channel.drop_count != 0u64 {
+        return 71i32;
+    }
+
+    var codec: RtcCodecStats = rtc_codec_stats_make();
+    if codec.handle != 0u64 || codec.timestamp_us != 0u64 {
+        return 80i32;
+    }
+    if codec.payload_type != 0u8 || codec.clock_rate_hz != 0u32 || codec.channels != 0u8 {
+        return 81i32;
+    }
+
+    return 0i32;
+}
+
+fn check_stats_type_sizes() i32 {
+    if @size_of(RtcPeerConnectionStats) > 96usize {
+        return 100i32;
+    }
+    if @size_of(RtcTransportStats) > 96usize {
+        return 101i32;
+    }
+    if @size_of(RtcIceCandidatePairStats) > 128usize {
+        return 102i32;
+    }
+    if @size_of(RtcInboundRtpStreamStats) > 128usize {
+        return 103i32;
+    }
+    if @size_of(RtcOutboundRtpStreamStats) > 128usize {
+        return 104i32;
+    }
+    if @size_of(RtcRemoteInboundRtpStreamStats) > 96usize {
+        return 105i32;
+    }
+    if @size_of(RtcDataChannelStats) > 128usize {
+        return 106i32;
+    }
+    if @size_of(RtcCodecStats) > 96usize {
+        return 107i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_stats_default_values();
+    if result != 0i32 {
+        printf("stats default value tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_stats_type_sizes();
+    if result != 0i32 {
+        printf("stats type size tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("stats type tests passed\n");
+    return 0i32;
+}
