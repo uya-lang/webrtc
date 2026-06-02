@@ -1,0 +1,85 @@
+use libc.printf;
+use webrtc.dtls.handshake;
+use webrtc.dtls.model;
+use webrtc.dtls.record;
+
+fn expect_record_rejects(packet: &[byte], code: i32) i32 {
+    const parsed: !DtlsRecord = dtls_record_parse(packet);
+    if parsed.error_id == 0 {
+        printf("DTLS fuzz record unexpectedly parsed: %d\n", code);
+        return code;
+    }
+    return 0i32;
+}
+
+fn expect_fragment_rejects(packet: &[byte], code: i32) i32 {
+    const fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(packet[DTLS_RECORD_HEADER_BYTES:packet.len - DTLS_RECORD_HEADER_BYTES]);
+    if fragment.error_id == 0 {
+        printf("DTLS fuzz fragment unexpectedly parsed: %d\n", code);
+        return code;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var truncated_record_header: [byte: 12] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte,
+    ];
+    var result: i32 = expect_record_rejects(truncated_record_header[0:12], 10i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var record_epoch_sequence_edge: [byte: 13] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0xff as byte, 0xff as byte, 0xff as byte,
+        0xff as byte, 0xff as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+        0x00 as byte,
+    ];
+    result = expect_record_rejects(record_epoch_sequence_edge[0:13], 11i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var fragment_length_mismatch: [byte: 29] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+        0x14 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte, 0x10 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte,
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x00 as byte,
+    ];
+    result = expect_record_rejects(fragment_length_mismatch[0:29], 12i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var reassembly_overlap: [byte: 37] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x02 as byte, 0x00 as byte,
+        0x18 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte, 0x14 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x10 as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte,
+        0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte,
+    ];
+    result = expect_fragment_rejects(reassembly_overlap[0:37], 13i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var reassembly_gap: [byte: 33] = [
+        0x16 as byte, 0xfe as byte, 0xfd as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte, 0x00 as byte,
+        0x18 as byte, 0x01 as byte, 0x00 as byte, 0x00 as byte, 0x14 as byte, 0x00 as byte,
+        0x00 as byte, 0x00 as byte, 0x08 as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte,
+        0x0e as byte, 0x0f as byte, 0x00 as byte,
+    ];
+    result = expect_fragment_rejects(reassembly_gap[0:33], 14i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    printf("DTLS fuzz corpus smoke passed\n");
+    return 0i32;
+}
