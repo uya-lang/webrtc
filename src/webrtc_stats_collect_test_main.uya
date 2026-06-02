@@ -90,6 +90,48 @@ fn check_candidate_pair_stats_collect() i32 {
     return 0i32;
 }
 
+fn check_transport_stats_collect() i32 {
+    const stats_result: !RtcTransportStats = rtc_transport_stats_collect(
+        0xA1u64,
+        1111u64,
+        0xB2u64,
+        3u8,
+        4u8,
+        true,
+        5u64,
+        6u64,
+        7u64,
+        8u64,
+        9u64,
+        10u64,
+    );
+    if stats_result.error_id != 0 {
+        return 25i32;
+    }
+
+    const stats: RtcTransportStats = stats_result.value;
+    if stats.handle != 0xA1u64 || stats.timestamp_us != 1111u64 {
+        return 26i32;
+    }
+    if stats.selected_candidate_pair_handle != 0xB2u64 {
+        return 27i32;
+    }
+    if stats.ice_state != 3u8 || stats.dtls_state != 4u8 || !stats.is_paced {
+        return 28i32;
+    }
+    if stats.packets_sent != 5u64 || stats.packets_received != 6u64 {
+        return 29i32;
+    }
+    if stats.rtcp_packets_sent != 7u64 || stats.rtcp_packets_received != 8u64 {
+        return 30i32;
+    }
+    if stats.bytes_sent != 9u64 || stats.bytes_received != 10u64 {
+        return 31i32;
+    }
+
+    return 0i32;
+}
+
 fn check_remote_inbound_rtp_stats_collect() i32 {
     var report: RtcpReceiverReport = rtcp_receiver_report_make();
     report.sender_ssrc = 0x11223344u32;
@@ -222,6 +264,12 @@ fn main() i32 {
     var result: i32 = check_candidate_pair_stats_collect();
     if result != 0i32 {
         printf("candidate pair stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_transport_stats_collect();
+    if result != 0i32 {
+        printf("transport stats tests failed: %d\n", result);
         return 1i32;
     }
 
