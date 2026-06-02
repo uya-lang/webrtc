@@ -383,7 +383,7 @@
 - [x] 实现 track。
 - [x] 实现 DataChannel 事件。
 - [x] 实现 connection state 聚合。
-- [ ] 实现 graceful close。
+- [x] 实现 graceful close。
 - [ ] 增加 end-to-end loopback 示例。
 - [ ] 增加浏览器 DataChannel interop 测试。
 

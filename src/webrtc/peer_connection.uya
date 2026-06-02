@@ -662,6 +662,14 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
     return true;
 }
 
+/// Close the PeerConnection through the graceful shutdown path.
+export fn peer_connection_graceful_close(pc: &PeerConnection) bool {
+    if pc == null {
+        return false;
+    }
+    return peer_connection_close(pc);
+}
+
 /// Reset the PeerConnection back to its default closed shell.
 export fn peer_connection_reset(pc: &PeerConnection) void {
     if pc == null {
