@@ -531,7 +531,8 @@
 - [x] 建立 codec bridge feature gate，默认关闭。
 - [x] 定义 Opus bridge：PCM/Opus packet 与 WebRTC `EncodedFrame` 的转换 API。
 - [x] 定义 VP8 bridge：YUV/VP8 frame 与 WebRTC `EncodedFrame` 的转换 API。
-- [ ] 对齐 Opus RTP payload tests 与 `../opus` 的 `container/rtp_opus.uya` 计划。
+- [~] 对齐 Opus RTP payload tests 与 `../opus` 的 `container/rtp_opus.uya` 计划。
+  - blocked: `../opus` 的 Phase 19 RTP Opus 任务仍未实现，`../opus/src/opus/container/` 只有 `.gitkeep`，暂无 `container/rtp_opus.uya`、payload fixtures 或 sibling 测试可供本仓库真实对齐。
 - [ ] 对齐 VP8 RTP payload tests 与 `../vp8` 的 RTP payload descriptor / frame reassembly 计划。
 - [ ] 建立跨仓库 fixture manifest，记录样本来源、hash、授权和适用阶段。
 - [ ] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
