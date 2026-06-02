@@ -492,7 +492,7 @@
 - [x] SSRC/track/datachannel 上限测试。
 - [x] JitterBuffer/reassembly 内存上限测试。
 - [x] Secret logging audit。
-- [ ] constant-time audit。
+- [x] constant-time audit。
 
 验收标准：
 
