@@ -510,7 +510,8 @@
   - blocked: 当前运行环境是 Linux，`../uya/lib` 和本仓库没有 Win32 IOCP/OVERLAPPED FFI、Windows runner 或 MinGW cross compiler，无法在本机实现并验证真实 Windows IOCP backend 或 DataChannel echo。
 - [~] Android socket/thread/time 适配。
   - blocked: 当前运行环境是 Linux，未提供 Android NDK、`adb`、Android runner 或 Android 专用 socket/thread/time FFI，无法在本机实现并验证真实 Android socket/thread/time 适配。
-- [ ] iOS socket/thread/time 适配。
+- [~] iOS socket/thread/time 适配。
+  - blocked: 当前运行环境是 Linux，未提供 iOS SDK、`xcrun`、iOS runner、Darwin/iOS socket/thread/time FFI 或 kqueue 支撑，无法在本机实现并验证真实 iOS socket/thread/time 适配。
 - [ ] 平台 CI matrix。
 
 验收标准：
