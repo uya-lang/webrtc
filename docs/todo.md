@@ -512,7 +512,8 @@
   - blocked: 当前运行环境是 Linux，未提供 Android NDK、`adb`、Android runner 或 Android 专用 socket/thread/time FFI，无法在本机实现并验证真实 Android socket/thread/time 适配。
 - [~] iOS socket/thread/time 适配。
   - blocked: 当前运行环境是 Linux，未提供 iOS SDK、`xcrun`、iOS runner、Darwin/iOS socket/thread/time FFI 或 kqueue 支撑，无法在本机实现并验证真实 iOS socket/thread/time 适配。
-- [ ] 平台 CI matrix。
+- [~] 平台 CI matrix。
+  - blocked: 该任务验收要求 macOS/Windows 至少跑通 DataChannel echo，但 macOS kqueue 与 Windows IOCP 后端当前均缺少真实 FFI/runner 验证；在后端阻塞解除前只能建立不完整或 allow-failure 矩阵，不能作为完成提交。
 
 验收标准：
 
