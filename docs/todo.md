@@ -463,7 +463,7 @@
 - [x] 补齐遗漏的 STUN parser microbench。
 - [x] 补齐遗漏的 SRTP protect/unprotect microbench。
 - [x] 补齐遗漏的 UDP recvmmsg/sendmmsg benchmark。
-- [~] 补齐遗漏的 DataChannel throughput benchmark。
+- [x] 补齐遗漏的 DataChannel throughput benchmark。
 - [~] 补齐遗漏的 RTP loopback multi-peer benchmark。
 - [~] 补齐遗漏的 JitterBuffer benchmark。
 - [~] 补齐遗漏的 Pacer queue benchmark。
