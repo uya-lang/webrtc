@@ -136,14 +136,18 @@ bench: build
 	test -f benchmarks/bench_jitter.uya
 	test -f benchmarks/bench_congestion.uya
 	test -f benchmarks/bench_datachannel.uya
+	test -f benchmarks/bench_pacer.uya
 	test -f benchmarks/baselines/bench_jitter.jsonl
 	test -f benchmarks/baselines/bench_congestion.jsonl
 	test -f benchmarks/baselines/bench_datachannel.jsonl
+	test -f benchmarks/baselines/bench_pacer.jsonl
+	test -x tests/check_phase18_pacer_bench.sh
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
 	python3 tests/jitter_bench_baseline.py
 	python3 tests/rtp_loopback_bench_baseline.py
 	python3 tests/congestion_bench_baseline.py
+	python3 tests/pacer_bench_baseline.py
 	test -s $(BENCH_FILE)
 	rg -q '"name":"placeholder"' $(BENCH_FILE)
 	rg -q '"name":"bench_arena_ring"' $(BENCH_FILE)
@@ -160,6 +164,7 @@ bench: build
 	rg -q '"name":"bench_congestion_queue_delay"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_loss"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_jitter"' $(BENCH_FILE)
+	rg -q '"name":"bench_pacer"' $(BENCH_FILE)
 	rg -q '"name":"bench_retransmission_cache"' $(BENCH_FILE)
 
 clean:

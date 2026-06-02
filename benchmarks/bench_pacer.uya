@@ -1,0 +1,14 @@
+use webrtc.bench;
+
+// Phase 15 pacer queue benchmark baseline placeholder.
+export fn benchmark_main_emit_pacer_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: "bench_pacer" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}

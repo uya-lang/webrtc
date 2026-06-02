@@ -63,6 +63,12 @@ append_congestion_baseline_rows() {
 EOF
 }
 
+append_pacer_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_pacer","suite":"phase15","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 append_datachannel_baseline_rows() {
     cat >> "$out_file" <<'EOF'
 {"name":"bench_datachannel","suite":"phase13","unit":"ns/op","value":0,"allocations":0,"high_watermark":0,"vectorized":false}
@@ -89,4 +95,5 @@ append_rtp_rtcp_parser_baseline_rows
 append_jitter_baseline_rows
 append_rtp_loopback_baseline_rows
 append_congestion_baseline_rows
+append_pacer_baseline_rows
 append_datachannel_baseline_rows
