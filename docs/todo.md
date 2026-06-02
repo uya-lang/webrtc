@@ -385,7 +385,7 @@
 - [x] 实现 connection state 聚合。
 - [x] 实现 graceful close。
 - [x] 增加 end-to-end loopback 示例。
-- [ ] 增加浏览器 DataChannel interop 测试。
+- [x] 增加浏览器 DataChannel interop 测试。
 
 验收标准：
 
