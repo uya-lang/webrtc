@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "generated_for": "Phase 21 codec bridge cross-repo fixtures",
+  "entries": [
+    {
+      "id": "webrtc-sdp-chrome-offer",
+      "path": "tests/fixtures/sdp/chrome_offer.sdp",
+      "source": "WebRTC repository browser SDP fixture",
+      "sha256": "6ac42f4dd6032b4286cd5127181e728446319462c9dc6b5139dd36e695aacafd",
+      "license": "repository-local fixture; no explicit LICENSE file present",
+      "phase": "Phase 3 SDP / Phase 21 codec negotiation boundary"
+    },
+    {
+      "id": "webrtc-sdp-firefox-offer",
+      "path": "tests/fixtures/sdp/firefox_offer.sdp",
+      "source": "WebRTC repository browser SDP fixture",
+      "sha256": "d50ce1e84c1249b91ea80c417ca2a9bf1749bf437d1abe61a37ecf916f11436c",
+      "license": "repository-local fixture; no explicit LICENSE file present",
+      "phase": "Phase 3 SDP / Phase 21 codec negotiation boundary"
+    },
+    {
+      "id": "webrtc-rtp-test-vectors",
+      "path": "tests/fixtures/rtp/test_vectors.json",
+      "source": "WebRTC repository RTP parser vectors",
+      "sha256": "d64c88be14956dde8108045e95588b975652aa6a2f57f4650a832b9293a17ef6",
+      "license": "repository-local fixture; no explicit LICENSE file present",
+      "phase": "Phase 12 RTP / Phase 21 encoded-frame payload boundary"
+    },
+    {
+      "id": "webrtc-rtp-parser-cases",
+      "path": "tests/fixtures/rtp/parser_cases.json",
+      "source": "WebRTC repository RTP parser cases",
+      "sha256": "a99ff08bd737197060ed3bcec616403a5fd3ef03148153a8e0b676b94a53c4d2",
+      "license": "repository-local fixture; no explicit LICENSE file present",
+      "phase": "Phase 12 RTP / Phase 21 encoded-frame payload boundary"
+    },
+    {
+      "id": "opus-packet-toc-tests",
+      "path": "../opus/tests/packet_toc.uya",
+      "source": "Sibling ../opus packet TOC tests",
+      "sha256": "7c13bd2bd881f2d25c9a7f819f5cd1afac472def2581a3027305f3f4a9aac256",
+      "license": "sibling repository-local test; no explicit LICENSE file present",
+      "phase": "Phase 21 Opus packet bridge boundary"
+    },
+    {
+      "id": "vp8-raw-container",
+      "path": "../vp8/src/vp8/container/raw.uya",
+      "source": "Sibling ../vp8 raw VP8 frame container",
+      "sha256": "686f9bc1601779aecb82b06a89baeac52be037ebc91d0cbfabc886a4a79ad5c9",
+      "license": "sibling repository-local source; no explicit LICENSE file present",
+      "phase": "Phase 21 VP8 frame bridge boundary"
+    },
+    {
+      "id": "vp8-toolchain-hello",
+      "path": "../vp8/tests/toolchain_hello.uya",
+      "source": "Sibling ../vp8 test smoke fixture",
+      "sha256": "d0c701f8634c6be40de2022eb5a336a46ecb1b025b8e572cda1f45300e0ce6f5",
+      "license": "sibling repository-local test; no explicit LICENSE file present",
+      "phase": "Phase 21 VP8 sibling availability smoke"
+    }
+  ]
+}
