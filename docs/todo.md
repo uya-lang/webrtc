@@ -449,7 +449,7 @@
 - [ ] aiortc interop。
 - [ ] GStreamer webrtcbin interop。
 - [x] 网络模拟：1%/5%/10% loss。
-- [~] 网络模拟：reorder/duplicate/jitter。
+- [x] 网络模拟：reorder/duplicate/jitter。
 
 验收标准：
 
