@@ -1,0 +1,9 @@
+struct NestedByteArrayField {
+    values: [[byte: 32]: 2] = [],
+}
+
+fn main() i32 {
+    var field: NestedByteArrayField = NestedByteArrayField{};
+    field.values[0][0] = 1 as byte;
+    return field.values[0][0] as i32;
+}
