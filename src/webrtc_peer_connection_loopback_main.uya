@@ -1,0 +1,279 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.binary;
+use webrtc.ice.candidate;
+use webrtc.media.model;
+use webrtc.peer_connection;
+use webrtc.receiver;
+use webrtc.runtime;
+use webrtc.sender;
+use webrtc.track;
+use webrtc.transceiver;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn build_candidate(foundation: &[byte]) !IceCandidate {
+    var candidate: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&candidate);
+    try ice_candidate_set_foundation(&candidate, foundation);
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate.priority = 2122260223u32;
+    try ice_transport_address_set(
+        &candidate.address,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.40" as &[byte],
+        50200u16,
+    );
+    return candidate;
+}
+
+fn route_sender_to_track(sender_state: &Sender, track_state: &Track) !void {
+    while sender_has_pending_frame(sender_state) {
+        const pending: EncodedFrame = sender_pop_pending_frame(sender_state);
+        try track_write_encoded_frame(track_state, &pending);
+    }
+    return;
+}
+
+fn route_track_to_receiver(track_state: &Track, receiver_state: &Receiver) !void {
+    while track_has_pending_frame(track_state) {
+        const pending: EncodedFrame = track_pop_pending_frame(track_state);
+        try receiver_deliver_encoded_frame(receiver_state, &pending);
+    }
+    return;
+}
+
+fn route_data_channel_loopback(channel: &DataChannel, payload: &[byte]) !void {
+    const send_result: !void = data_channel_send(channel, payload);
+    if send_result.error_id != 0 {
+        return send_result.error_id;
+    }
+
+    if !data_channel_has_outgoing_message(channel) {
+        return error.SctpDataChannelInvalidState;
+    }
+    var outgoing: DataChannelMessage = data_channel_pop_outgoing_message(channel);
+    const deliver_result: !void = data_channel_deliver_message(channel, outgoing.payload[0:outgoing.payload_len]);
+    if deliver_result.error_id != 0 {
+        return deliver_result.error_id;
+    }
+    if !data_channel_has_received_message(channel) {
+        return error.SctpDataChannelInvalidState;
+    }
+    var incoming: DataChannelMessage = data_channel_pop_received_message(channel);
+    if !bytes_equal(incoming.payload[0:incoming.payload_len], payload) {
+        return error.SctpDataChannelInvalidState;
+    }
+    return;
+}
+
+fn main() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 1i32;
+
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        printf("loopback example failed: runtime init\n");
+        return 1i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        printf("loopback example failed: peer connection\n");
+        return 1i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    var transceiver_init: TransceiverInit = transceiver_init_make();
+    transceiver_init.direction = TRANSCEIVER_DIRECTION_SENDONLY;
+    const transceiver_result: !Transceiver = peer_connection_add_transceiver(&pc, MEDIA_KIND_VIDEO, &transceiver_init);
+    if transceiver_result.error_id != 0 {
+        printf("loopback example failed: transceiver\n");
+        return 1i32;
+    }
+
+    var offer: PeerConnectionDescription = PeerConnectionDescription{};
+    const offer_result: !void = peer_connection_create_offer(&pc, &offer);
+    if offer_result.error_id != 0 {
+        printf("loopback example failed: offer\n");
+        return 1i32;
+    }
+    const local_result: !void = peer_connection_set_local_description(&pc, offer.text[0:offer.text_len]);
+    if local_result.error_id != 0 {
+        printf("loopback example failed: local description\n");
+        return 1i32;
+    }
+
+    const remote_description: &[byte] = "v=0\no=- 1 2 IN IP4 127.0.0.1\ns=Loopback Remote\nt=0 0\na=group:BUNDLE data\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\nc=IN IP4 0.0.0.0\na=mid:data\na=sendrecv\na=ice-ufrag:loopback-remote\na=ice-pwd:loopback-remote-pwd\na=setup:actpass\na=rtcp-mux\na=sctp-port:5000\na=max-message-size:262144\n" as &[byte];
+    const remote_result: !void = peer_connection_set_remote_description(&pc, remote_description);
+    if remote_result.error_id != 0 {
+        printf("loopback example failed: remote description\n");
+        return 1i32;
+    }
+
+    const candidate_result: !IceCandidate = build_candidate("loopback-candidate" as &[byte]);
+    if candidate_result.error_id != 0 {
+        printf("loopback example failed: candidate\n");
+        return 1i32;
+    }
+    var candidate: IceCandidate = candidate_result.value;
+    const add_candidate_result: !void = peer_connection_add_ice_candidate(&pc, &candidate);
+    if add_candidate_result.error_id != 0 {
+        printf("loopback example failed: add candidate\n");
+        return 1i32;
+    }
+    if peer_connection_connection_state(&pc) != PEER_CONNECTION_CONNECTION_STATE_CONNECTED {
+        printf("loopback example failed: connection state\n");
+        return 1i32;
+    }
+
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.negotiated = true;
+    const channel_result: !DataChannel = peer_connection_create_data_channel(
+        &pc,
+        "loopback" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if channel_result.error_id != 0 {
+        printf("loopback example failed: data channel\n");
+        return 1i32;
+    }
+    var channel: DataChannel = channel_result.value;
+    if peer_connection_data_channel_event_count(&pc) != 1usize {
+        printf("loopback example failed: data channel event queue\n");
+        return 1i32;
+    }
+    const event_result: !PeerConnectionDataChannelEvent = peer_connection_pop_data_channel_event(&pc);
+    if event_result.error_id != 0 {
+        printf("loopback example failed: data channel event pop\n");
+        return 1i32;
+    }
+    if !data_channel_open(&channel) {
+        printf("loopback example failed: data channel open\n");
+        return 1i32;
+    }
+    const data_channel_loopback_result: !void = route_data_channel_loopback(&channel, "hello loopback" as &[byte]);
+    if data_channel_loopback_result.error_id != 0 {
+        printf("loopback example failed: data channel loopback\n");
+        return 1i32;
+    }
+
+    var sender_state: Sender = sender_make();
+    const sender_init_result: !void = sender_init(&sender_state, 1u64, MEDIA_KIND_VIDEO);
+    if sender_init_result.error_id != 0 {
+        printf("loopback example failed: sender init\n");
+        return 1i32;
+    }
+    if !sender_open(&sender_state) {
+        printf("loopback example failed: sender open\n");
+        return 1i32;
+    }
+
+    var track_state: Track = track_make();
+    const track_init_result: !void = track_init(&track_state, 2u64, MEDIA_KIND_VIDEO);
+    if track_init_result.error_id != 0 {
+        printf("loopback example failed: track init\n");
+        return 1i32;
+    }
+    if !track_open(&track_state) {
+        printf("loopback example failed: track open\n");
+        return 1i32;
+    }
+
+    var receiver_state: Receiver = receiver_make();
+    const receiver_init_result: !void = receiver_init(&receiver_state, 3u64, MEDIA_KIND_VIDEO);
+    if receiver_init_result.error_id != 0 {
+        printf("loopback example failed: receiver init\n");
+        return 1i32;
+    }
+    if !receiver_open(&receiver_state) {
+        printf("loopback example failed: receiver open\n");
+        return 1i32;
+    }
+
+    var frame_payload: [byte: 5] = ['l' as byte, 'o' as byte, 'o' as byte, 'p' as byte, '1' as byte];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.sequence_id = 42u64;
+    frame.timestamp = 90000u64;
+    frame.duration_us = 33333u32;
+    frame.payload = frame_payload[0:5];
+    const sender_write_result: !void = sender_send_encoded_frame(&sender_state, &frame);
+    if sender_write_result.error_id != 0 {
+        printf("loopback example failed: sender send\n");
+        return 1i32;
+    }
+    const sender_track_route_result: !void = route_sender_to_track(&sender_state, &track_state);
+    if sender_track_route_result.error_id != 0 {
+        printf("loopback example failed: sender->track route\n");
+        return 1i32;
+    }
+    const track_receiver_route_result: !void = route_track_to_receiver(&track_state, &receiver_state);
+    if track_receiver_route_result.error_id != 0 {
+        printf("loopback example failed: track->receiver route\n");
+        return 1i32;
+    }
+
+    var received: EncodedFrame = encoded_frame_make();
+    const first_read_result: !bool = receiver_read_encoded_frame(&receiver_state, &received);
+    if first_read_result.error_id != 0 || !first_read_result.value {
+        printf("loopback example failed: receiver read\n");
+        return 1i32;
+    }
+    if !bytes_equal(received.payload, frame_payload[0:5]) {
+        printf("loopback example failed: payload mismatch\n");
+        return 1i32;
+    }
+
+    const sender_echo_result: !void = sender_send_encoded_frame(&sender_state, &received);
+    if sender_echo_result.error_id != 0 {
+        printf("loopback example failed: sender echo\n");
+        return 1i32;
+    }
+    const sender_track_echo_result: !void = route_sender_to_track(&sender_state, &track_state);
+    if sender_track_echo_result.error_id != 0 {
+        printf("loopback example failed: echo sender->track route\n");
+        return 1i32;
+    }
+    const track_receiver_echo_result: !void = route_track_to_receiver(&track_state, &receiver_state);
+    if track_receiver_echo_result.error_id != 0 {
+        printf("loopback example failed: echo track->receiver route\n");
+        return 1i32;
+    }
+    const second_read_result: !bool = receiver_read_encoded_frame(&receiver_state, &received);
+    if second_read_result.error_id != 0 || !second_read_result.value {
+        printf("loopback example failed: echo receiver read\n");
+        return 1i32;
+    }
+
+    if !peer_connection_graceful_close(&pc) {
+        printf("loopback example failed: graceful close\n");
+        return 1i32;
+    }
+    if peer_connection_connection_state(&pc) != PEER_CONNECTION_CONNECTION_STATE_CLOSED {
+        printf("loopback example failed: closed state\n");
+        return 1i32;
+    }
+
+    printf("PeerConnection loopback example passed\n");
+    return 0i32;
+}
