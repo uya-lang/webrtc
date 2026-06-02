@@ -1,0 +1,57 @@
+use webrtc.bench;
+
+fn benchmark_emit_congestion_row(
+    dst: &[byte],
+    name: &[byte],
+    unit: &[byte],
+) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: name,
+        suite: "phase15" as &[byte],
+        unit: unit,
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export fn benchmark_main_emit_congestion_bandwidth_drop_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_congestion_row(
+        dst,
+        "bench_congestion_bandwidth_drop" as &[byte],
+        "ms" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_congestion_bandwidth_recovery_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_congestion_row(
+        dst,
+        "bench_congestion_bandwidth_recovery" as &[byte],
+        "ms" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_congestion_queue_delay_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_congestion_row(
+        dst,
+        "bench_congestion_queue_delay" as &[byte],
+        "ms" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_congestion_loss_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_congestion_row(
+        dst,
+        "bench_congestion_loss" as &[byte],
+        "pct" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_congestion_jitter_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_congestion_row(
+        dst,
+        "bench_congestion_jitter" as &[byte],
+        "ms" as &[byte],
+    );
+}

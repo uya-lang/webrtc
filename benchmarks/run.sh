@@ -47,6 +47,16 @@ append_jitter_baseline_rows() {
 EOF
 }
 
+append_congestion_baseline_rows() {
+    cat >> "$out_file" <<'EOF'
+{"name":"bench_congestion_bandwidth_drop","suite":"phase15","unit":"ms","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_congestion_bandwidth_recovery","suite":"phase15","unit":"ms","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_congestion_queue_delay","suite":"phase15","unit":"ms","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_congestion_loss","suite":"phase15","unit":"pct","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_congestion_jitter","suite":"phase15","unit":"ms","value":0,"allocations":0,"high_watermark":0}
+EOF
+}
+
 append_datachannel_baseline_rows() {
     cat >> "$out_file" <<'EOF'
 {"name":"bench_datachannel","suite":"phase13","unit":"ns/op","value":0,"allocations":0,"high_watermark":0,"vectorized":false}
@@ -71,4 +81,5 @@ fi
 append_srtp_baseline_rows
 append_rtp_rtcp_parser_baseline_rows
 append_jitter_baseline_rows
+append_congestion_baseline_rows
 append_datachannel_baseline_rows

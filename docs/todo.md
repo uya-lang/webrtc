@@ -396,7 +396,7 @@
 
 ## Phase 15：拥塞控制与 Pacer
 
-- [ ] 先增加虚拟网络 benchmark：带宽下降/恢复、queue delay、loss、jitter。
+- [x] 先增加虚拟网络 benchmark：带宽下降/恢复、queue delay、loss、jitter。
 - [ ] 先增加 pacer queue cap、drop/backpressure、P95/P99 delay failing tests。
 - [ ] 实现 pacer queue。
 - [ ] 实现 transport-wide seq 分配。
