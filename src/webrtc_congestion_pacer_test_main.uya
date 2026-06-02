@@ -193,6 +193,38 @@ fn check_transport_cc_feedback_parse() i32 {
     return 0i32;
 }
 
+fn check_delay_based_estimator() i32 {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    const initial_bitrate: u64 = estimator.current_bitrate_bps;
+    if initial_bitrate == 0u64 {
+        return 70i32;
+    }
+
+    var low_delay_feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    low_delay_feedback.delta_count = 2usize;
+    low_delay_feedback.recv_deltas[0usize] = -50i32;
+    low_delay_feedback.recv_deltas[1usize] = -25i32;
+    const increase_result: !u64 = pacer_delay_based_estimator_update(&estimator, &low_delay_feedback, 20000u64);
+    if increase_result.error_id != 0 || increase_result.value <= initial_bitrate {
+        return 71i32;
+    }
+
+    var high_delay_feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    high_delay_feedback.delta_count = 2usize;
+    high_delay_feedback.recv_deltas[0usize] = 200i32;
+    high_delay_feedback.recv_deltas[1usize] = 150i32;
+    const decrease_result: !u64 = pacer_delay_based_estimator_update(&estimator, &high_delay_feedback, 80000u64);
+    if decrease_result.error_id != 0 || decrease_result.value >= increase_result.value {
+        return 72i32;
+    }
+
+    if estimator.current_bitrate_bps != decrease_result.value {
+        return 73i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -221,6 +253,12 @@ fn main() i32 {
     result = check_transport_cc_feedback_parse();
     if result != 0i32 {
         printf("Transport-CC feedback parser tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_delay_based_estimator();
+    if result != 0i32 {
+        printf("delay-based estimator tests failed: %d\n", result);
         return 1i32;
     }
 

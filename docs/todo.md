@@ -402,7 +402,7 @@
 - [x] 实现 transport-wide seq 分配。
 - [x] 实现 send-time 记录。
 - [x] 实现 Transport-CC feedback parser。
-- [ ] 实现 delay-based estimator。
+- [x] 实现 delay-based estimator。
 - [ ] 实现 loss-based fallback。
 - [ ] 实现 probing。
 - [ ] 实现 bitrate allocator。

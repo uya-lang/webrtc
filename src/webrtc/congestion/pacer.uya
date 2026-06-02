@@ -15,6 +15,7 @@ export error PacerQueueBackpressure;
 export error PacerQueueEmpty;
 export error PacerQueueNotReady;
 export error PacerTransportWideSeqInvalidState;
+export error PacerDelayBasedEstimatorInvalidState;
 
 export struct PacerQueueConfig {
     max_packets: usize = 16usize,
@@ -73,6 +74,17 @@ export struct PacerTransportCcFeedback {
     recv_deltas: [i32: RTCP_MAX_TRANSPORT_CC_DELTAS] = [],
     received_count: usize = 0usize,
     missing_count: usize = 0usize,
+}
+
+export struct PacerDelayBasedEstimator {
+    initial_bitrate_bps: u64 = 1000000u64,
+    current_bitrate_bps: u64 = 1000000u64,
+    min_bitrate_bps: u64 = 150000u64,
+    max_bitrate_bps: u64 = 5000000u64,
+    queue_delay_threshold_us: u64 = 50000u64,
+    increase_step_bps: u64 = 150000u64,
+    decrease_percent: u8 = 85u8,
+    stable_update_count: u32 = 0u32,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -496,4 +508,73 @@ export fn pacer_transport_cc_feedback_parse(packet: &[byte]) !PacerTransportCcFe
     }
 
     return feedback;
+}
+
+fn pacer_delay_based_estimator_average_delta(feedback: &PacerTransportCcFeedback) i64 {
+    if feedback == null || feedback.delta_count == 0usize {
+        return 0i64;
+    }
+
+    var total: i64 = 0i64;
+    var index: usize = 0usize;
+    while index < feedback.delta_count {
+        total = total + (feedback.recv_deltas[index] as i64);
+        index = index + 1usize;
+    }
+    return total / (feedback.delta_count as i64);
+}
+
+/// Create the conservative delay-based bitrate estimator.
+export fn pacer_delay_based_estimator_make() PacerDelayBasedEstimator {
+    return PacerDelayBasedEstimator{};
+}
+
+/// Reset the estimator back to its initial bitrate.
+export fn pacer_delay_based_estimator_reset(state: &PacerDelayBasedEstimator) void {
+    if state == null {
+        return;
+    }
+
+    state.current_bitrate_bps = state.initial_bitrate_bps;
+    state.stable_update_count = 0u32;
+}
+
+/// Return the current target bitrate in bits per second.
+export fn pacer_delay_based_estimator_current_bitrate_bps(state: &PacerDelayBasedEstimator) u64 {
+    if state == null {
+        return 0u64;
+    }
+    return state.current_bitrate_bps;
+}
+
+/// Update the bitrate target using queue delay and Transport-CC delay trend.
+export fn pacer_delay_based_estimator_update(
+    state: &PacerDelayBasedEstimator,
+    feedback: &PacerTransportCcFeedback,
+    queue_delay_us: u64,
+) !u64 {
+    if state == null || feedback == null {
+        return error.PacerDelayBasedEstimatorInvalidState;
+    }
+
+    const average_delta: i64 = pacer_delay_based_estimator_average_delta(feedback);
+    const delay_signal: bool = queue_delay_us > state.queue_delay_threshold_us || average_delta > 0i64;
+
+    if delay_signal {
+        var reduced: u64 = (state.current_bitrate_bps * (state.decrease_percent as u64)) / 100u64;
+        if reduced < state.min_bitrate_bps {
+            reduced = state.min_bitrate_bps;
+        }
+        state.current_bitrate_bps = reduced;
+        state.stable_update_count = 0u32;
+        return state.current_bitrate_bps;
+    }
+
+    state.stable_update_count = state.stable_update_count + 1u32;
+    var increased: u64 = state.current_bitrate_bps + state.increase_step_bps;
+    if increased > state.max_bitrate_bps {
+        increased = state.max_bitrate_bps;
+    }
+    state.current_bitrate_bps = increased;
+    return state.current_bitrate_bps;
 }

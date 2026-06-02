@@ -21,6 +21,9 @@ rg -q "export fn pacer_transport_wide_seq_allocator_next" src/webrtc/congestion/
 rg -q "export fn pacer_packet_record_send_time" src/webrtc/congestion/pacer.uya
 rg -q "export struct PacerTransportCcFeedback" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_transport_cc_feedback_parse" src/webrtc/congestion/pacer.uya
+rg -q "export struct PacerDelayBasedEstimator" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_delay_based_estimator_make" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_delay_based_estimator_update" src/webrtc/congestion/pacer.uya
 
 ../uya/bin/uya run src/webrtc_congestion_pacer_test_main.uya
 
