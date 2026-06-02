@@ -16,6 +16,7 @@ export error PacerQueueEmpty;
 export error PacerQueueNotReady;
 export error PacerTransportWideSeqInvalidState;
 export error PacerDelayBasedEstimatorInvalidState;
+export error PacerLossBasedFallbackInvalidState;
 
 export struct PacerQueueConfig {
     max_packets: usize = 16usize,
@@ -85,6 +86,12 @@ export struct PacerDelayBasedEstimator {
     increase_step_bps: u64 = 150000u64,
     decrease_percent: u8 = 85u8,
     stable_update_count: u32 = 0u32,
+}
+
+export struct PacerLossBasedFallback {
+    loss_threshold_percent: u8 = 5u8,
+    decrease_percent: u8 = 80u8,
+    min_bitrate_bps: u64 = 150000u64,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -577,4 +584,36 @@ export fn pacer_delay_based_estimator_update(
     }
     state.current_bitrate_bps = increased;
     return state.current_bitrate_bps;
+}
+
+/// Create the loss-based fallback policy.
+export fn pacer_loss_based_fallback_make() PacerLossBasedFallback {
+    return PacerLossBasedFallback{};
+}
+
+/// Apply a loss-based fallback adjustment to the estimator.
+export fn pacer_loss_based_fallback_apply(
+    fallback: &PacerLossBasedFallback,
+    estimator: &PacerDelayBasedEstimator,
+    feedback: &PacerTransportCcFeedback,
+) !u64 {
+    if fallback == null || estimator == null || feedback == null {
+        return error.PacerLossBasedFallbackInvalidState;
+    }
+    if feedback.packet_status_count == 0usize {
+        return estimator.current_bitrate_bps;
+    }
+
+    const loss_percent: u64 = ((feedback.missing_count as u64) * 100u64) / (feedback.packet_status_count as u64);
+    if loss_percent < (fallback.loss_threshold_percent as u64) {
+        return estimator.current_bitrate_bps;
+    }
+
+    var reduced: u64 = (estimator.current_bitrate_bps * (fallback.decrease_percent as u64)) / 100u64;
+    if reduced < fallback.min_bitrate_bps {
+        reduced = fallback.min_bitrate_bps;
+    }
+    estimator.current_bitrate_bps = reduced;
+    estimator.stable_update_count = 0u32;
+    return reduced;
 }

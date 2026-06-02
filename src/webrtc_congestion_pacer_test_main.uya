@@ -225,6 +225,30 @@ fn check_delay_based_estimator() i32 {
     return 0i32;
 }
 
+fn check_loss_based_fallback() i32 {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 2000000u64;
+
+    var fallback: PacerLossBasedFallback = pacer_loss_based_fallback_make();
+    fallback.loss_threshold_percent = 5u8;
+    fallback.decrease_percent = 80u8;
+
+    var loss_feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    loss_feedback.packet_status_count = 20usize;
+    loss_feedback.missing_count = 2usize;
+    loss_feedback.received_count = 18usize;
+
+    const fallback_result: !u64 = pacer_loss_based_fallback_apply(&fallback, &estimator, &loss_feedback);
+    if fallback_result.error_id != 0 {
+        return 80i32;
+    }
+    if fallback_result.value >= 2000000u64 || fallback_result.value != estimator.current_bitrate_bps {
+        return 81i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -259,6 +283,12 @@ fn main() i32 {
     result = check_delay_based_estimator();
     if result != 0i32 {
         printf("delay-based estimator tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_loss_based_fallback();
+    if result != 0i32 {
+        printf("loss-based fallback tests failed: %d\n", result);
         return 1i32;
     }
 

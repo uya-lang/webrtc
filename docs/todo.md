@@ -403,7 +403,7 @@
 - [x] 实现 send-time 记录。
 - [x] 实现 Transport-CC feedback parser。
 - [x] 实现 delay-based estimator。
-- [ ] 实现 loss-based fallback。
+- [x] 实现 loss-based fallback。
 - [ ] 实现 probing。
 - [ ] 实现 bitrate allocator。
 - [ ] 实现 audio/video priority。
