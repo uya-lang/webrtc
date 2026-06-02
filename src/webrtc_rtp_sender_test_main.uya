@@ -1,4 +1,5 @@
 use libc.printf;
+use webrtc.congestion.pacer;
 use webrtc.rtp.rtp_sender;
 
 fn check_state_init() i32 {
@@ -72,6 +73,36 @@ fn check_timestamp_advance_by_duration() i32 {
     return 0i32;
 }
 
+fn check_paced_sender_integration() i32 {
+    var sender: RtpSenderState = rtp_sender_state_make();
+    const init_sender: !void = rtp_sender_state_init(&sender, 0xCAFEBABEu32, 7u16, 3000u32, 90000u32);
+    if init_sender.error_id != 0 {
+        return 40i32;
+    }
+
+    var allocator: PacerTransportWideSeqAllocator = pacer_transport_wide_seq_allocator_make();
+    const init_allocator: !void = pacer_transport_wide_seq_allocator_init(&allocator, 500u16);
+    if init_allocator.error_id != 0 {
+        return 41i32;
+    }
+
+    const paced: !RtpSenderPacedStamp = rtp_sender_stamp_paced_packet(&sender, &allocator, 3u32, 12345u64);
+    if paced.error_id != 0 {
+        return 42i32;
+    }
+    if paced.value.rtp_stamp.ssrc != 0xCAFEBABEu32 || paced.value.rtp_stamp.sequence_number != 7u16 {
+        return 43i32;
+    }
+    if paced.value.transport_sequence != 500u16 || paced.value.send_time_us != 12345u64 {
+        return 44i32;
+    }
+    if allocator.allocation_count != 1u64 || sender.next_sequence != 8u16 {
+        return 45i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_state_init();
     if result != 0i32 {
@@ -88,6 +119,12 @@ fn main() i32 {
     result = check_timestamp_advance_by_duration();
     if result != 0i32 {
         printf("RTP sender tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_paced_sender_integration();
+    if result != 0i32 {
+        printf("RTP sender pacer integration tests failed: %d\n", result);
         return 1i32;
     }
 

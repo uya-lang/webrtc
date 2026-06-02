@@ -1,8 +1,11 @@
 // webrtc.rtp.rtp_sender - RTP sender sequence/timestamp state
 // Module: src/webrtc/rtp/rtp_sender.uya -> use webrtc.rtp.rtp_sender;
 
+use webrtc.congestion.pacer;
+
 export error RtpSenderInvalidState;
 export error RtpSenderInvalidClockRate;
+export error RtpSenderPacerInvalidState;
 
 const RTP_TIMESTAMP_NANOS_PER_SECOND: u64 = 1000000000u64;
 
@@ -17,6 +20,12 @@ export struct RtpSenderStamp {
     ssrc: u32 = 0u32,
     sequence_number: u16 = 0u16,
     timestamp: u32 = 0u32,
+}
+
+export struct RtpSenderPacedStamp {
+    rtp_stamp: RtpSenderStamp = RtpSenderStamp{},
+    transport_sequence: u16 = 0u16,
+    send_time_us: u64 = 0u64,
 }
 
 fn rtp_sender_sequence_increment(sequence: u16) u16 {
@@ -84,4 +93,31 @@ export fn rtp_sender_advance_timestamp_by_duration_ns(
 
     state.next_timestamp = state.next_timestamp + (increment as u32);
     return state.next_timestamp;
+}
+
+/// Stamp an RTP packet and attach pacer metadata.
+export fn rtp_sender_stamp_paced_packet(
+    state: &RtpSenderState,
+    transport_sequence_allocator: &PacerTransportWideSeqAllocator,
+    timestamp_increment: u32,
+    send_time_us: u64,
+) !RtpSenderPacedStamp {
+    if state == null || transport_sequence_allocator == null {
+        return error.RtpSenderPacerInvalidState;
+    }
+
+    const rtp_stamp: RtpSenderStamp = try rtp_sender_stamp_packet(state, timestamp_increment);
+    const transport_sequence: u16 = try pacer_transport_wide_seq_allocator_next(transport_sequence_allocator);
+
+    var pacer_packet: PacerPacket = PacerPacket{
+        transport_sequence: transport_sequence,
+        has_transport_sequence: true,
+    };
+    try pacer_packet_record_send_time(&pacer_packet, send_time_us);
+
+    return RtpSenderPacedStamp{
+        rtp_stamp: rtp_stamp,
+        transport_sequence: pacer_packet.transport_sequence,
+        send_time_us: pacer_packet.send_time_us,
+    };
 }
