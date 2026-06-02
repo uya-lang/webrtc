@@ -253,7 +253,7 @@ class CDPClient:
                 return message.get("result", {})
 
 
-def make_datachannel_test_page() -> str:
+def make_datachannel_test_page(peer_config_json: str = '{"iceServers": []}') -> str:
     return textwrap.dedent(
         """
         <!doctype html>
@@ -261,6 +261,7 @@ def make_datachannel_test_page() -> str:
         <title>Phase 14 Browser DataChannel Interop</title>
         <script>
         window.__phase14Result = null;
+        const peerConfig = JSON.parse(__PEER_CONFIG_JSON__);
 
         function fail(message, error) {
           window.__phase14Result = {
@@ -323,9 +324,31 @@ def make_datachannel_test_page() -> str:
           };
         }
 
+        async function describeSelectedCandidateTypes(pc) {
+          const stats = await pc.getStats();
+          for (const stat of stats.values()) {
+            if (stat.type !== 'candidate-pair') {
+              continue;
+            }
+            if (stat.state !== 'succeeded' && !stat.selected && !stat.nominated) {
+              continue;
+            }
+            const localCandidate = stats.get(stat.localCandidateId);
+            const remoteCandidate = stats.get(stat.remoteCandidateId);
+            return {
+              localCandidateType: localCandidate && localCandidate.candidateType ? String(localCandidate.candidateType) : '',
+              remoteCandidateType: remoteCandidate && remoteCandidate.candidateType ? String(remoteCandidate.candidateType) : '',
+            };
+          }
+          return {
+            localCandidateType: '',
+            remoteCandidateType: '',
+          };
+        }
+
         async function run() {
-          const pc1 = new RTCPeerConnection({iceServers: []});
-          const pc2 = new RTCPeerConnection({iceServers: []});
+          const pc1 = new RTCPeerConnection(peerConfig);
+          const pc2 = new RTCPeerConnection(peerConfig);
           const relay12 = makeIceRelay(pc1, pc2, 'pc2');
           const relay21 = makeIceRelay(pc2, pc1, 'pc1');
           const messages = [];
@@ -386,6 +409,8 @@ def make_datachannel_test_page() -> str:
           ]);
           void complete;
 
+          const candidatePairTypes = await describeSelectedCandidateTypes(pc1);
+
           pc1.close();
           pc2.close();
           await delay(25);
@@ -399,6 +424,8 @@ def make_datachannel_test_page() -> str:
             pc2ConnectionState: pc2.connectionState,
             dc1ReadyState: dc1.readyState,
             dc2ReadyState: dc2.readyState,
+            selectedCandidatePairLocalType: candidatePairTypes.localCandidateType,
+            selectedCandidatePairRemoteType: candidatePairTypes.remoteCandidateType,
             offerSdp: pc1.localDescription ? pc1.localDescription.sdp : '',
             answerSdp: pc2.localDescription ? pc2.localDescription.sdp : '',
           };
@@ -407,7 +434,7 @@ def make_datachannel_test_page() -> str:
         run().catch(error => fail('phase14 browser datachannel test failed', error));
         </script>
         """
-    ).strip()
+    ).strip().replace("__PEER_CONFIG_JSON__", json.dumps(peer_config_json))
 
 
 def make_audio_test_page() -> str:
@@ -831,7 +858,7 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
     require(result.get("ok") is True, f"browser page reported failure: {result}")
     require(result.get("pc1ConnectionState") == "closed", "pc1 should be closed after cleanup")
     require(result.get("pc2ConnectionState") == "closed", "pc2 should be closed after cleanup")
-    if mode == "datachannel":
+    if mode == "datachannel" or mode == "turn":
         require(result.get("dc1ReadyState") == "closed", "dc1 should be closed after cleanup")
         require(result.get("dc2ReadyState") == "closed", "dc2 should be closed after cleanup")
 
@@ -842,12 +869,18 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
 
         offer_sdp = str(result.get("offerSdp", ""))
         answer_sdp = str(result.get("answerSdp", ""))
-        require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
+        if mode == "turn":
+            require("m=application" in offer_sdp and "UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
+        else:
+            require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in offer_sdp, "offer SDP missing DataChannel m-line")
         require("a=setup:actpass" in offer_sdp, "offer SDP missing actpass setup")
         require("a=sctp-port:5000" in offer_sdp, "offer SDP missing sctp-port")
         require("a=max-message-size:262144" in offer_sdp, "offer SDP missing max-message-size")
 
-        require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
+        if mode == "turn":
+            require("m=application" in answer_sdp and "UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
+        else:
+            require("m=application 9 UDP/DTLS/SCTP webrtc-datachannel" in answer_sdp, "answer SDP missing DataChannel m-line")
         require("a=setup:active" in answer_sdp, "answer SDP missing active setup")
 
         browser_case = load_browser_case()
@@ -858,6 +891,16 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
             "browser offer setup role mismatch",
         )
         require(expected_profiles, "browser fixture has no transport profiles")
+
+        if mode == "turn":
+            require(
+                result.get("selectedCandidatePairLocalType") == "relay",
+                "TURN relay should use a relay local candidate",
+            )
+            require(
+                result.get("selectedCandidatePairRemoteType") == "relay",
+                "TURN relay should use a relay remote candidate",
+            )
         return
 
     if mode == "audio":
@@ -892,7 +935,7 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
-def make_test_page(mode: str) -> str:
+def make_test_page(mode: str, peer_config_json: str = '{"iceServers": []}') -> str:
     if mode == "datachannel":
         return make_datachannel_test_page()
     if mode == "audio":
@@ -901,15 +944,18 @@ def make_test_page(mode: str) -> str:
         return make_video_test_page("vp8")
     if mode == "h264":
         return make_video_test_page("h264")
+    if mode == "turn":
+        return make_datachannel_test_page(peer_config_json)
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
 def run_browser_test(mode: str) -> dict[str, Any]:
     browser_exe = find_browser_executable()
+    peer_config_json = os.environ.get("WEBRTC_PEER_CONFIG_JSON", '{"iceServers": []}')
     with tempfile.TemporaryDirectory(prefix="webrtc-browser-datachannel-") as tempdir:
         tempdir_path = Path(tempdir)
         page_path = tempdir_path / "index.html"
-        page_path.write_text(make_test_page(mode), encoding="utf-8")
+        page_path.write_text(make_test_page(mode, peer_config_json), encoding="utf-8")
 
         server, thread, http_port = start_http_server(tempdir_path)
         browser_user_data_dir = tempdir_path / "profile"
@@ -1006,6 +1052,10 @@ def main() -> int:
             print("Browser audio interop checks passed")
             print(f"  Browser: {result.get('browser')}")
             print(f"  Packets received: {result.get('packetsReceived')}")
+        elif mode == "turn":
+            print("Browser TURN relay interop checks passed")
+            print(f"  Browser: {result.get('browser')}")
+            print(f"  Messages: {', '.join(result.get('messages', []))}")
         else:
             print(f"Browser {mode} interop checks passed")
         return 0
