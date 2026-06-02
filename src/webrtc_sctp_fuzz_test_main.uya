@@ -1,0 +1,71 @@
+use libc.printf;
+use webrtc.sctp.packet;
+
+fn expect_sctp(packet: &[byte], should_parse: bool, code: i32) i32 {
+    const parsed: !SctpPacket = sctp_packet_parse(packet);
+    if should_parse && parsed.error_id != 0 {
+        printf("SCTP fuzz seed unexpectedly failed: %d\n", code);
+        return code;
+    }
+    if !should_parse && parsed.error_id == 0 {
+        printf("SCTP fuzz seed unexpectedly parsed: %d\n", code);
+        return code;
+    }
+    if should_parse {
+        if parsed.value.chunk_count != 1usize || parsed.value.chunks[0].chunk_type != SCTP_CHUNK_TYPE_COOKIE_ACK {
+            printf("SCTP fuzz seed parsed wrong chunk: %d\n", code);
+            return code + 100i32;
+        }
+        const chunk_offset: usize = parsed.value.chunks[0].payload_offset - SCTP_CHUNK_HEADER_BYTES;
+        const cookie_ack: !SctpCookieAckChunk = sctp_cookie_ack_chunk_parse(packet[chunk_offset:parsed.value.chunks[0].length]);
+        if cookie_ack.error_id != 0 {
+            printf("SCTP fuzz cookie ack chunk parse failed: %d\n", code);
+            return code + 200i32;
+        }
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var minimal_cookie_ack: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x04 as byte,
+    ];
+    var result: i32 = expect_sctp(minimal_cookie_ack[0:16], true, 10i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var truncated_header: [byte: 10] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte,
+    ];
+    result = expect_sctp(truncated_header[0:10], false, 11i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var bad_chunk_length_too_small: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x03 as byte,
+    ];
+    result = expect_sctp(bad_chunk_length_too_small[0:16], false, 12i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    var bad_chunk_length_overflow: [byte: 16] = [
+        0x13 as byte, 0x88 as byte, 0x13 as byte, 0x89 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x0b as byte, 0x00 as byte, 0x00 as byte, 0x08 as byte,
+    ];
+    result = expect_sctp(bad_chunk_length_overflow[0:16], false, 13i32);
+    if result != 0i32 {
+        return result;
+    }
+
+    printf("SCTP fuzz corpus smoke passed\n");
+    return 0i32;
+}

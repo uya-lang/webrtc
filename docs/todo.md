@@ -486,7 +486,7 @@
 - [x] STUN fuzz。
 - [x] DTLS record/handshake fuzz。
 - [x] RTP/RTCP fuzz。
-- [ ] SCTP fuzz。
+- [x] SCTP fuzz。
 - [ ] SRTP replay/rollover property tests。
 - [ ] ICE candidate 上限测试。
 - [ ] SSRC/track/datachannel 上限测试。
