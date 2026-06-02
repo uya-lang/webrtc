@@ -1,0 +1,121 @@
+use libc.printf;
+use webrtc.media.model;
+use webrtc.track;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+
+    return true;
+}
+
+fn make_frame(codec_id: u16, media_kind: u8, sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = codec_id;
+    frame.media_kind = media_kind;
+    frame.sequence_id = sequence_id;
+    frame.timestamp = 9000u64 + sequence_id;
+    frame.duration_us = 20000u32;
+    frame.marker = true;
+    frame.payload = payload;
+    return frame;
+}
+
+fn check_track_queue_and_close() i32 {
+    var track_state: Track = track_make();
+    const init_result: !void = track_init(&track_state, 100u64, MEDIA_KIND_VIDEO);
+    if init_result.error_id != 0 {
+        return 10i32;
+    }
+    if !track_open(&track_state) {
+        return 11i32;
+    }
+    if !track_is_open(&track_state) {
+        return 12i32;
+    }
+
+    var payload_a: [byte: 3] = ['v' as byte, 'p' as byte, '8' as byte];
+    const frame_a: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 1u64, payload_a[0:3]);
+    const write_a: !void = track_write_encoded_frame(&track_state, &frame_a);
+    if write_a.error_id != 0 {
+        return 13i32;
+    }
+    if !track_has_pending_frame(&track_state) {
+        return 14i32;
+    }
+    if track_pending_count(&track_state) != 1usize {
+        return 15i32;
+    }
+
+    var out: EncodedFrame = encoded_frame_make();
+    const read_a: !bool = track_read_encoded_frame(&track_state, &out);
+    if read_a.error_id != 0 || !read_a.value {
+        return 16i32;
+    }
+    if out.sequence_id != 1u64 || out.codec_id != CODEC_ID_VP8 {
+        return 17i32;
+    }
+    if !bytes_equal(out.payload, payload_a[0:3]) {
+        return 18i32;
+    }
+    if track_pending_count(&track_state) != 0usize {
+        return 19i32;
+    }
+
+    var index: usize = 0usize;
+    while index < TRACK_MAX_PENDING_FRAMES {
+        var payload: [byte: 1] = [(index as byte) + 65u8];
+        var burst: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, (index + 2usize) as u64, payload[0:1]);
+        const queued: !void = track_write_encoded_frame(&track_state, &burst);
+        if queued.error_id != 0 {
+            return 20i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+    var overflow_payload: [byte: 1] = [0x7Fu8 as byte];
+    var overflow_frame: EncodedFrame = make_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 99u64, overflow_payload[0:1]);
+    const overflow: !void = track_write_encoded_frame(&track_state, &overflow_frame);
+    if overflow.error_id != @error_id(error.TrackQueueFull) {
+        return 32i32;
+    }
+    if track_drop_count(&track_state) == 0u64 {
+        return 33i32;
+    }
+    if track_high_watermark(&track_state) != TRACK_MAX_PENDING_FRAMES {
+        return 34i32;
+    }
+
+    if !track_close(&track_state) {
+        return 35i32;
+    }
+    if !track_is_closed(&track_state) {
+        return 36i32;
+    }
+
+    const write_after_close: !void = track_write_encoded_frame(&track_state, &frame_a);
+    if write_after_close.error_id != @error_id(error.TrackInvalidState) {
+        return 37i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    const result: i32 = check_track_queue_and_close();
+    if result != 0i32 {
+        printf("Track tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Track tests passed\n");
+    return 0i32;
+}

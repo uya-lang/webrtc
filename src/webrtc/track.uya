@@ -1,0 +1,278 @@
+// webrtc.track - encoded media track queue and lifecycle
+// Module: src/webrtc/track.uya -> use webrtc.track;
+
+use webrtc.media.model;
+
+export const TRACK_STATE_CONNECTING: u8 = 0u8;
+export const TRACK_STATE_OPEN: u8 = 1u8;
+export const TRACK_STATE_CLOSED: u8 = 2u8;
+
+export const TRACK_MAX_PENDING_FRAMES: usize = 8usize;
+export const TRACK_MAX_FRAME_BYTES: usize = 4096usize;
+
+export error TrackInvalidState;
+export error TrackQueueFull;
+export error TrackFrameTooLarge;
+
+export struct TrackQueuedFrame {
+    frame: EncodedFrame = EncodedFrame{},
+    payload: [byte: TRACK_MAX_FRAME_BYTES] = [],
+}
+
+export struct Track {
+    id: u64 = 0u64,
+    kind: u8 = MEDIA_KIND_UNKNOWN,
+    state: u8 = TRACK_STATE_CLOSED,
+    queue_head: usize = 0usize,
+    queue_count: usize = 0usize,
+    queued_frames: [TrackQueuedFrame: TRACK_MAX_PENDING_FRAMES] = [],
+    write_count: u64 = 0u64,
+    read_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: usize = 0usize,
+}
+
+fn track_make_default() Track {
+    return Track{};
+}
+
+fn track_queue_slot(head: usize, count: usize) usize {
+    var slot: usize = head + count;
+    if slot >= TRACK_MAX_PENDING_FRAMES {
+        slot = slot - TRACK_MAX_PENDING_FRAMES;
+    }
+    return slot;
+}
+
+fn track_reset_queued_frame(slot: &TrackQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+    var index: usize = 0usize;
+    while index < TRACK_MAX_FRAME_BYTES {
+        slot.payload[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn track_clear_queued_frame_metadata(slot: &TrackQueuedFrame) void {
+    if slot == null {
+        return;
+    }
+
+    slot.frame = EncodedFrame{};
+}
+
+fn track_copy_frame(slot: &TrackQueuedFrame, frame: &EncodedFrame) !void {
+    if slot == null || frame == null {
+        return error.TrackInvalidState;
+    }
+    if frame.payload.len > TRACK_MAX_FRAME_BYTES {
+        return error.TrackFrameTooLarge;
+    }
+
+    slot.frame = *frame;
+    var index: usize = 0usize;
+    while index < frame.payload.len {
+        slot.payload[index] = frame.payload[index];
+        index = index + 1usize;
+    }
+    slot.frame.payload = slot.payload[0:frame.payload.len];
+    return;
+}
+
+fn track_clear_queue(track: &Track) void {
+    if track == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < TRACK_MAX_PENDING_FRAMES {
+        track_reset_queued_frame(&track.queued_frames[index]);
+        index = index + 1usize;
+    }
+
+    track.queue_head = 0usize;
+    track.queue_count = 0usize;
+}
+
+/// Create a default track shell.
+export fn track_make() Track {
+    return track_make_default();
+}
+
+/// Initialize the track metadata and queue state.
+export fn track_init(track: &Track, id: u64, kind: u8) !void {
+    if track == null {
+        return error.TrackInvalidState;
+    }
+
+    track.id = id;
+    track.kind = kind;
+    track.state = TRACK_STATE_CONNECTING;
+    track.queue_head = 0usize;
+    track.queue_count = 0usize;
+    track.write_count = 0u64;
+    track.read_count = 0u64;
+    track.drop_count = 0u64;
+    track.high_watermark = 0usize;
+    track_clear_queue(track);
+    return;
+}
+
+/// Transition the track to open.
+export fn track_open(track: &Track) bool {
+    if track == null {
+        return false;
+    }
+    if track.state == TRACK_STATE_OPEN {
+        return true;
+    }
+    if track.state != TRACK_STATE_CONNECTING {
+        return false;
+    }
+
+    track.state = TRACK_STATE_OPEN;
+    return true;
+}
+
+/// Return whether the track is open.
+export fn track_is_open(track: &Track) bool {
+    if track == null {
+        return false;
+    }
+    return track.state == TRACK_STATE_OPEN;
+}
+
+/// Return whether the track is closed.
+export fn track_is_closed(track: &Track) bool {
+    if track == null {
+        return true;
+    }
+    return track.state == TRACK_STATE_CLOSED;
+}
+
+/// Transition the track to closed and clear queued frames.
+export fn track_close(track: &Track) bool {
+    if track == null {
+        return false;
+    }
+    if track.state == TRACK_STATE_CLOSED {
+        return true;
+    }
+
+    track_clear_queue(track);
+    track.state = TRACK_STATE_CLOSED;
+    return true;
+}
+
+/// Queue a frame for later reading.
+export fn track_write_encoded_frame(track: &Track, frame: &EncodedFrame) !void {
+    if track == null || frame == null || !track_is_open(track) {
+        return error.TrackInvalidState;
+    }
+    if track.queue_count >= TRACK_MAX_PENDING_FRAMES {
+        track.drop_count = track.drop_count + 1u64;
+        return error.TrackQueueFull;
+    }
+
+    const slot_index: usize = track_queue_slot(track.queue_head, track.queue_count);
+    if slot_index >= TRACK_MAX_PENDING_FRAMES {
+        track.drop_count = track.drop_count + 1u64;
+        return error.TrackQueueFull;
+    }
+
+    try track_copy_frame(&track.queued_frames[slot_index], frame);
+    track.queue_count = track.queue_count + 1usize;
+    track.write_count = track.write_count + 1u64;
+    if track.queue_count > track.high_watermark {
+        track.high_watermark = track.queue_count;
+    }
+    return;
+}
+
+/// Return whether there is a queued frame ready to pop.
+export fn track_has_pending_frame(track: &Track) bool {
+    if track == null {
+        return false;
+    }
+    return track.queue_count > 0usize;
+}
+
+/// Pop the next queued frame.
+export fn track_pop_pending_frame(track: &Track) EncodedFrame {
+    if track == null || track.queue_count == 0usize {
+        return EncodedFrame{};
+    }
+
+    const slot_index: usize = track.queue_head;
+    if slot_index >= TRACK_MAX_PENDING_FRAMES {
+        return EncodedFrame{};
+    }
+
+    const frame: EncodedFrame = track.queued_frames[slot_index].frame;
+    track_clear_queued_frame_metadata(&track.queued_frames[slot_index]);
+    track.queue_head = track.queue_head + 1usize;
+    if track.queue_head >= TRACK_MAX_PENDING_FRAMES {
+        track.queue_head = 0usize;
+    }
+    track.queue_count = track.queue_count - 1usize;
+    track.read_count = track.read_count + 1u64;
+    return frame;
+}
+
+/// Pop the next queued frame into `out`.
+export fn track_read_encoded_frame(track: &Track, out: &EncodedFrame) !bool {
+    if track == null || out == null {
+        return error.TrackInvalidState;
+    }
+    if track.queue_count == 0usize {
+        return false;
+    }
+
+    const frame: EncodedFrame = track_pop_pending_frame(track);
+    *out = frame;
+    return true;
+}
+
+/// Return the number of queued frames.
+export fn track_pending_count(track: &Track) usize {
+    if track == null {
+        return 0usize;
+    }
+    return track.queue_count;
+}
+
+/// Return the number of frames written successfully.
+export fn track_write_count(track: &Track) u64 {
+    if track == null {
+        return 0u64;
+    }
+    return track.write_count;
+}
+
+/// Return the number of frames read successfully.
+export fn track_read_count(track: &Track) u64 {
+    if track == null {
+        return 0u64;
+    }
+    return track.read_count;
+}
+
+/// Return the number of frames dropped because the queue was full.
+export fn track_drop_count(track: &Track) u64 {
+    if track == null {
+        return 0u64;
+    }
+    return track.drop_count;
+}
+
+/// Return the highest queue depth observed.
+export fn track_high_watermark(track: &Track) usize {
+    if track == null {
+        return 0usize;
+    }
+    return track.high_watermark;
+}

@@ -380,7 +380,7 @@
 - [x] 实现 `add_ice_candidate`。
 - [x] 实现 transceiver。
 - [x] 实现 sender/receiver。
-- [ ] 实现 track。
+- [x] 实现 track。
 - [ ] 实现 DataChannel 事件。
 - [ ] 实现 connection state 聚合。
 - [ ] 实现 graceful close。
