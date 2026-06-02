@@ -1,5 +1,6 @@
 use libc.printf;
 use webrtc.media.codec_bridge;
+use webrtc.media.model;
 
 fn check_default_boundary_is_disabled() i32 {
     if codec_bridge_feature_default_enabled() {
@@ -62,6 +63,73 @@ fn check_enable_and_require_paths() i32 {
     return 0i32;
 }
 
+fn check_opus_packet_frame_conversion() i32 {
+    var packet_bytes: [byte: 4] = [0xf8u8, 0xffu8, 0xfeu8, 0xfdu8];
+    const packet_result: !CodecBridgeOpusPacketView = codec_bridge_opus_packet_view_make(packet_bytes[0:4], 960u64, 20000u32, 77u64);
+    if packet_result.error_id != 0 {
+        return 30i32;
+    }
+
+    const frame_result: !EncodedFrame = codec_bridge_opus_packet_to_encoded_frame(&packet_result.value);
+    if frame_result.error_id != 0 {
+        return 31i32;
+    }
+    const frame: EncodedFrame = frame_result.value;
+    if frame.codec_id != CODEC_ID_OPUS || frame.media_kind != MEDIA_KIND_AUDIO {
+        return 32i32;
+    }
+    if frame.timestamp != 960u64 || frame.duration_us != 20000u32 || frame.sequence_id != 77u64 {
+        return 33i32;
+    }
+    if frame.payload.len != 4usize || frame.payload[0] != 0xf8u8 || !frame.marker {
+        return 34i32;
+    }
+
+    const roundtrip_result: !CodecBridgeOpusPacketView = codec_bridge_opus_encoded_frame_to_packet(&frame);
+    if roundtrip_result.error_id != 0 {
+        return 35i32;
+    }
+    if roundtrip_result.value.packet.len != 4usize || roundtrip_result.value.timestamp != 960u64 {
+        return 36i32;
+    }
+    return 0i32;
+}
+
+fn check_opus_pcm_and_error_boundaries() i32 {
+    var pcm: [i16: 8] = [1i16, -1i16, 2i16, -2i16, 3i16, -3i16, 4i16, -4i16];
+    const pcm_result: !CodecBridgeOpusPcmView = codec_bridge_opus_pcm_view_make(pcm[0:8], 48000u32, 2u8, 4usize);
+    if pcm_result.error_id != 0 {
+        return 40i32;
+    }
+    if pcm_result.value.channels != 2u8 || pcm_result.value.samples_per_channel != 4usize || pcm_result.value.pcm.len != 8usize {
+        return 41i32;
+    }
+
+    const bad_rate: !CodecBridgeOpusPcmView = codec_bridge_opus_pcm_view_make(pcm[0:8], 44100u32, 2u8, 4usize);
+    if bad_rate.error_id != @error_id(error.CodecBridgeInvalidOpusPcm) {
+        return 42i32;
+    }
+    const bad_channels: !CodecBridgeOpusPcmView = codec_bridge_opus_pcm_view_make(pcm[0:8], 48000u32, 3u8, 2usize);
+    if bad_channels.error_id != @error_id(error.CodecBridgeInvalidOpusPcm) {
+        return 43i32;
+    }
+    var empty_packet: [byte: 1] = [0u8];
+    const empty_packet_result: !CodecBridgeOpusPacketView = codec_bridge_opus_packet_view_make(empty_packet[0:0], 0u64, 20000u32, 0u64);
+    if empty_packet_result.error_id != @error_id(error.CodecBridgeInvalidOpusPacket) {
+        return 44i32;
+    }
+    var wrong_frame: EncodedFrame = encoded_frame_make();
+    wrong_frame.codec_id = CODEC_ID_VP8;
+    wrong_frame.media_kind = MEDIA_KIND_VIDEO;
+    wrong_frame.payload = empty_packet[0:1];
+    wrong_frame.duration_us = 20000u32;
+    const wrong_frame_result: !CodecBridgeOpusPacketView = codec_bridge_opus_encoded_frame_to_packet(&wrong_frame);
+    if wrong_frame_result.error_id != @error_id(error.CodecBridgeInvalidEncodedFrame) {
+        return 45i32;
+    }
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_default_boundary_is_disabled();
     if result != 0i32 {
@@ -72,6 +140,18 @@ fn main() i32 {
     result = check_enable_and_require_paths();
     if result != 0i32 {
         printf("codec bridge enable tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_opus_packet_frame_conversion();
+    if result != 0i32 {
+        printf("opus bridge packet/frame tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_opus_pcm_and_error_boundaries();
+    if result != 0i32 {
+        printf("opus bridge pcm/error tests failed: %d\n", result);
         return 1i32;
     }
 

@@ -3,9 +3,18 @@
 // This module intentionally keeps transport-side types independent from
 // any external decoder/encoder package dependency.
 
+use webrtc.media.model;
+
 export error CodecBridgeDisabled;
+export error CodecBridgeInvalidOpusPcm;
+export error CodecBridgeInvalidOpusPacket;
+export error CodecBridgeInvalidEncodedFrame;
 
 export const CODEC_BRIDGE_FEATURE_DEFAULT_ENABLED: bool = false;
+export const CODEC_BRIDGE_OPUS_SAMPLE_RATE_HZ: u32 = 48000u32;
+export const CODEC_BRIDGE_OPUS_CHANNELS_MONO: u8 = 1u8;
+export const CODEC_BRIDGE_OPUS_CHANNELS_STEREO: u8 = 2u8;
+const CODEC_BRIDGE_MAX_USIZE: usize = ~(0 as usize);
 
 export struct CodecBridgeAdapterSlot {
     enabled: bool = false,
@@ -20,6 +29,30 @@ export struct CodecBridgeBoundary {
     vp8_adapter_enabled: bool = false,
     opus_slot: CodecBridgeAdapterSlot = CodecBridgeAdapterSlot{},
     vp8_slot: CodecBridgeAdapterSlot = CodecBridgeAdapterSlot{},
+}
+
+export struct CodecBridgeOpusPcmView {
+    sample_rate_hz: u32 = CODEC_BRIDGE_OPUS_SAMPLE_RATE_HZ,
+    channels: u8 = CODEC_BRIDGE_OPUS_CHANNELS_MONO,
+    samples_per_channel: usize = 0usize,
+    pcm: &[i16] = [],
+}
+
+export struct CodecBridgeOpusPacketView {
+    packet: &[byte] = [],
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    sequence_id: u64 = 0u64,
+}
+
+export struct CodecBridgeOpusEncodeRequest {
+    pcm: CodecBridgeOpusPcmView = CodecBridgeOpusPcmView{},
+    output_packet: &[byte] = [],
+}
+
+export struct CodecBridgeOpusDecodeRequest {
+    packet: CodecBridgeOpusPacketView = CodecBridgeOpusPacketView{},
+    output_pcm: &[i16] = [],
 }
 
 fn codec_bridge_slot_make() CodecBridgeAdapterSlot {
@@ -41,6 +74,86 @@ export fn codec_bridge_boundary_make_with_feature(enabled: bool) CodecBridgeBoun
         vp8_adapter_enabled: false,
         opus_slot: codec_bridge_slot_make(),
         vp8_slot: codec_bridge_slot_make(),
+    };
+}
+
+export fn codec_bridge_opus_pcm_view_make(
+    pcm: &[i16],
+    sample_rate_hz: u32,
+    channels: u8,
+    samples_per_channel: usize,
+) !CodecBridgeOpusPcmView {
+    if sample_rate_hz != CODEC_BRIDGE_OPUS_SAMPLE_RATE_HZ {
+        return error.CodecBridgeInvalidOpusPcm;
+    }
+    if channels != CODEC_BRIDGE_OPUS_CHANNELS_MONO && channels != CODEC_BRIDGE_OPUS_CHANNELS_STEREO {
+        return error.CodecBridgeInvalidOpusPcm;
+    }
+    if samples_per_channel == 0usize {
+        return error.CodecBridgeInvalidOpusPcm;
+    }
+    if samples_per_channel > CODEC_BRIDGE_MAX_USIZE / (channels as usize) {
+        return error.CodecBridgeInvalidOpusPcm;
+    }
+    const required_samples: usize = samples_per_channel * (channels as usize);
+    if required_samples > pcm.len {
+        return error.CodecBridgeInvalidOpusPcm;
+    }
+    return CodecBridgeOpusPcmView{
+        sample_rate_hz: sample_rate_hz,
+        channels: channels,
+        samples_per_channel: samples_per_channel,
+        pcm: pcm[0:required_samples],
+    };
+}
+
+export fn codec_bridge_opus_packet_view_make(
+    packet: &[byte],
+    timestamp: u64,
+    duration_us: u32,
+    sequence_id: u64,
+) !CodecBridgeOpusPacketView {
+    if packet.len == 0usize || duration_us == 0u32 {
+        return error.CodecBridgeInvalidOpusPacket;
+    }
+    return CodecBridgeOpusPacketView{
+        packet: packet,
+        timestamp: timestamp,
+        duration_us: duration_us,
+        sequence_id: sequence_id,
+    };
+}
+
+export fn codec_bridge_opus_packet_to_encoded_frame(packet: &CodecBridgeOpusPacketView) !EncodedFrame {
+    if packet == null || packet.packet.len == 0usize || packet.duration_us == 0u32 {
+        return error.CodecBridgeInvalidOpusPacket;
+    }
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_OPUS;
+    frame.media_kind = MEDIA_KIND_AUDIO;
+    frame.timestamp = packet.timestamp;
+    frame.duration_us = packet.duration_us;
+    frame.sequence_id = packet.sequence_id;
+    frame.payload = packet.packet;
+    frame.marker = true;
+    return frame;
+}
+
+export fn codec_bridge_opus_encoded_frame_to_packet(frame: &EncodedFrame) !CodecBridgeOpusPacketView {
+    if frame == null {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    if frame.codec_id != CODEC_ID_OPUS || frame.media_kind != MEDIA_KIND_AUDIO || frame.payload.len == 0usize {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    if frame.duration_us == 0u32 {
+        return error.CodecBridgeInvalidEncodedFrame;
+    }
+    return CodecBridgeOpusPacketView{
+        packet: frame.payload,
+        timestamp: frame.timestamp,
+        duration_us: frame.duration_us,
+        sequence_id: frame.sequence_id,
     };
 }
 
