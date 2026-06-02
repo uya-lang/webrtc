@@ -447,7 +447,8 @@
 - [x] Firefox headless one-way audio/video。
 - [x] Pion WebRTC interop。
 - [x] aiortc interop。
-- [ ] GStreamer webrtcbin interop。
+- [~] GStreamer webrtcbin interop。
+  - blocked: 本机需通过 `/tmp` 解压 GStreamer tools/GIR 才能加载 `webrtcbin`；`GstWebRTC` 可 import 且 transceiver 可创建，但当前 GI runtime 下 `webrtcbin` request sink pad 返回空、`create-offer` 返回空 offer，尚不能形成真实 offer/answer 或连接验证。
 - [x] 网络模拟：1%/5%/10% loss。
 - [x] 网络模拟：reorder/duplicate/jitter。
 
