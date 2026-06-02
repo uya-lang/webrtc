@@ -1,6 +1,8 @@
 // webrtc.congestion.pacer - Bounded pacer queue and delay sampling helpers
 // Module: src/webrtc/congestion/pacer.uya -> use webrtc.congestion.pacer;
 
+use webrtc.rtcp.rtcp_packet;
+
 export const PACER_QUEUE_MAX_PACKETS: usize = 64usize;
 export const PACER_QUEUE_MAX_DELAY_SAMPLES: usize = 128usize;
 export const PACER_PRIORITY_LOW: u8 = 0u8;
@@ -57,6 +59,20 @@ export struct PacerTransportWideSeqAllocator {
     next_sequence: u16 = 0u16,
     last_sequence: u16 = 0u16,
     allocation_count: u64 = 0u64,
+}
+
+export struct PacerTransportCcFeedback {
+    sender_ssrc: u32 = 0u32,
+    media_ssrc: u32 = 0u32,
+    base_sequence_number: u16 = 0u16,
+    packet_status_count: usize = 0usize,
+    reference_time: u32 = 0u32,
+    feedback_packet_count: u8 = 0u8,
+    status_symbols: [u8: RTCP_MAX_TRANSPORT_CC_PACKET_STATUSES] = [],
+    delta_count: usize = 0usize,
+    recv_deltas: [i32: RTCP_MAX_TRANSPORT_CC_DELTAS] = [],
+    received_count: usize = 0usize,
+    missing_count: usize = 0usize,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -446,4 +462,38 @@ export fn pacer_packet_record_send_time(packet: &PacerPacket, send_time_us: u64)
     packet.send_time_us = send_time_us;
     packet.has_send_time = true;
     return;
+}
+
+/// Parse a Transport-CC RTCP feedback packet into congestion-control friendly state.
+export fn pacer_transport_cc_feedback_parse(packet: &[byte]) !PacerTransportCcFeedback {
+    const parsed: RtcpTransportCcPacket = try rtcp_transport_cc_parse(packet);
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.sender_ssrc = parsed.sender_ssrc;
+    feedback.media_ssrc = parsed.media_ssrc;
+    feedback.base_sequence_number = parsed.base_sequence_number;
+    feedback.packet_status_count = parsed.packet_status_count;
+    feedback.reference_time = parsed.reference_time;
+    feedback.feedback_packet_count = parsed.feedback_packet_count;
+    feedback.delta_count = parsed.delta_count;
+
+    var status_index: usize = 0usize;
+    while status_index < parsed.packet_status_count {
+        const symbol: u8 = parsed.status_symbols[status_index];
+        feedback.status_symbols[status_index] = symbol;
+        if symbol == RTCP_TRANSPORT_CC_STATUS_NOT_RECEIVED {
+            feedback.missing_count = feedback.missing_count + 1usize;
+        } else {
+            feedback.received_count = feedback.received_count + 1usize;
+        }
+        status_index = status_index + 1usize;
+    }
+
+    var delta_index: usize = 0usize;
+    while delta_index < parsed.delta_count {
+        feedback.recv_deltas[delta_index] = parsed.recv_deltas[delta_index];
+        delta_index = delta_index + 1usize;
+    }
+
+    return feedback;
 }

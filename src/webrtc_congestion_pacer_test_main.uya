@@ -162,6 +162,37 @@ fn check_send_time_recording() i32 {
     return 0i32;
 }
 
+fn check_transport_cc_feedback_parse() i32 {
+    var transport_cc_packet: [byte: 24] = [
+        0x8F as byte, 0xCD as byte, 0x00 as byte, 0x05 as byte,
+        0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte,
+        0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+        0x03 as byte, 0xE8 as byte, 0x00 as byte, 0x04 as byte,
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x09 as byte,
+        0xC8 as byte, 0xC0 as byte,
+        0xFF as byte, 0x06 as byte,
+    ];
+
+    const parsed: !PacerTransportCcFeedback = pacer_transport_cc_feedback_parse(transport_cc_packet[0:24]);
+    if parsed.error_id != 0 {
+        return 60i32;
+    }
+    if parsed.value.base_sequence_number != 1000u16 || parsed.value.packet_status_count != 4usize {
+        return 61i32;
+    }
+    if parsed.value.received_count != 2usize || parsed.value.missing_count != 2usize {
+        return 62i32;
+    }
+    if parsed.value.delta_count != 1usize || parsed.value.recv_deltas[0] != -250i32 {
+        return 63i32;
+    }
+    if parsed.value.feedback_packet_count != 9u8 {
+        return 64i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -184,6 +215,12 @@ fn main() i32 {
     result = check_send_time_recording();
     if result != 0i32 {
         printf("send-time recording tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_transport_cc_feedback_parse();
+    if result != 0i32 {
+        printf("Transport-CC feedback parser tests failed: %d\n", result);
         return 1i32;
     }
 
