@@ -1,0 +1,94 @@
+use libc.printf;
+use webrtc.stats.trace;
+
+fn check_trace_event_defaults() i32 {
+    const event: RtcTraceEvent = rtc_trace_event_make();
+    if event.timestamp_us != 0u64 || event.subsystem != 0u8 || event.event_code != 0u16 {
+        return 10i32;
+    }
+    if event.subject_handle != 0u64 || event.value_u64 != 0u64 || event.extra_u64 != 0u64 {
+        return 11i32;
+    }
+    return 0i32;
+}
+
+fn check_trace_ring_wraparound() i32 {
+    var ring: RtcTraceRing = rtc_trace_ring_make();
+    const init_result: !void = rtc_trace_ring_init(&ring, 3usize);
+    if init_result.error_id != 0 {
+        return 20i32;
+    }
+
+    var event: RtcTraceEvent = RtcTraceEvent{};
+    event.subsystem = RTC_TRACE_SUBSYSTEM_ICE;
+    event.event_code = 1u16;
+    event.timestamp_us = 100u64;
+    const push_1: !void = rtc_trace_ring_push(&ring, &event);
+    if push_1.error_id != 0 {
+        return 21i32;
+    }
+
+    event.event_code = 2u16;
+    event.timestamp_us = 200u64;
+    const push_2: !void = rtc_trace_ring_push(&ring, &event);
+    if push_2.error_id != 0 {
+        return 22i32;
+    }
+
+    event.event_code = 3u16;
+    event.timestamp_us = 300u64;
+    const push_3: !void = rtc_trace_ring_push(&ring, &event);
+    if push_3.error_id != 0 {
+        return 23i32;
+    }
+
+    event.event_code = 4u16;
+    event.timestamp_us = 400u64;
+    const push_4: !void = rtc_trace_ring_push(&ring, &event);
+    if push_4.error_id != 0 {
+        return 24i32;
+    }
+    if ring.drop_count != 1u64 || ring.high_watermark != 3u64 || rtc_trace_ring_len(&ring) != 3usize {
+        return 25i32;
+    }
+
+    const first: !RtcTraceEvent = rtc_trace_ring_pop(&ring);
+    if first.error_id != 0 || first.value.event_code != 2u16 || first.value.timestamp_us != 200u64 {
+        return 26i32;
+    }
+    const second: !RtcTraceEvent = rtc_trace_ring_pop(&ring);
+    if second.error_id != 0 || second.value.event_code != 3u16 || second.value.timestamp_us != 300u64 {
+        return 27i32;
+    }
+    const third: !RtcTraceEvent = rtc_trace_ring_pop(&ring);
+    if third.error_id != 0 || third.value.event_code != 4u16 || third.value.timestamp_us != 400u64 {
+        return 28i32;
+    }
+    if rtc_trace_ring_has_event(&ring) {
+        return 29i32;
+    }
+
+    rtc_trace_ring_reset(&ring);
+    if rtc_trace_ring_len(&ring) != 0usize || ring.drop_count != 0u64 {
+        return 30i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_trace_event_defaults();
+    if result != 0i32 {
+        printf("trace event default tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_trace_ring_wraparound();
+    if result != 0i32 {
+        printf("trace ring wraparound tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("trace ring tests passed\n");
+    return 0i32;
+}

@@ -418,14 +418,14 @@
 ## Phase 16：Stats、Trace 与诊断
 
 - [x] 定义 stats 类型。
-- [ ] 实现 transport stats。
+- [~] 实现 transport stats。
 - [ ] 实现 ICE candidate pair stats。
 - [ ] 实现 inbound RTP stats。
 - [ ] 实现 outbound RTP stats。
 - [ ] 实现 remote inbound RTP stats。
 - [ ] 实现 data channel stats。
 - [ ] 实现 codec stats。
-- [ ] 实现 trace ring。
+- [x] 实现 trace ring。
 - [ ] 实现 `get_stats` API。
 - [ ] 实现 CLI `dump-stats` 示例。
 

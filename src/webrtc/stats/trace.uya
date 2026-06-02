@@ -1,0 +1,175 @@
+// webrtc.stats.trace - bounded trace ring for key state transitions
+// Module: src/webrtc/stats/trace.uya -> use webrtc.stats.trace;
+
+export const RTC_TRACE_SUBSYSTEM_UNKNOWN: u8 = 0u8;
+export const RTC_TRACE_SUBSYSTEM_ICE: u8 = 1u8;
+export const RTC_TRACE_SUBSYSTEM_DTLS: u8 = 2u8;
+export const RTC_TRACE_SUBSYSTEM_SRTP: u8 = 3u8;
+export const RTC_TRACE_SUBSYSTEM_RTP: u8 = 4u8;
+export const RTC_TRACE_SUBSYSTEM_CONGESTION: u8 = 5u8;
+export const RTC_TRACE_SUBSYSTEM_DATA_CHANNEL: u8 = 6u8;
+export const RTC_TRACE_SUBSYSTEM_PEER_CONNECTION: u8 = 7u8;
+
+export const RTC_TRACE_RING_MAX_CAPACITY: usize = 256usize;
+
+export error RtcTraceRingInvalidState;
+export error RtcTraceRingConfigInvalid;
+export error RtcTraceRingEmpty;
+
+export struct RtcTraceEvent {
+    timestamp_us: u64 = 0u64,
+    subsystem: u8 = RTC_TRACE_SUBSYSTEM_UNKNOWN,
+    event_code: u16 = 0u16,
+    subject_handle: u64 = 0u64,
+    value_u64: u64 = 0u64,
+    extra_u64: u64 = 0u64,
+}
+
+export struct RtcTraceRing {
+    events: [RtcTraceEvent: RTC_TRACE_RING_MAX_CAPACITY] = [],
+    capacity: usize = 0usize,
+    head: usize = 0usize,
+    count: usize = 0usize,
+    push_count: u64 = 0u64,
+    pop_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+fn rtc_trace_ring_validate(ring: &RtcTraceRing) !void {
+    if ring == null {
+        return error.RtcTraceRingInvalidState;
+    }
+    if ring.capacity == 0usize || ring.capacity > RTC_TRACE_RING_MAX_CAPACITY {
+        return error.RtcTraceRingConfigInvalid;
+    }
+    if ring.head >= ring.capacity {
+        return error.RtcTraceRingConfigInvalid;
+    }
+    if ring.count > ring.capacity {
+        return error.RtcTraceRingConfigInvalid;
+    }
+    return;
+}
+
+fn rtc_trace_ring_next_index(ring: &RtcTraceRing, index: usize) usize {
+    const next: usize = index + 1usize;
+    if next >= ring.capacity {
+        return 0usize;
+    }
+    return next;
+}
+
+fn rtc_trace_ring_clear_event(event: &RtcTraceEvent) void {
+    if event == null {
+        return;
+    }
+    event.timestamp_us = 0u64;
+    event.subsystem = RTC_TRACE_SUBSYSTEM_UNKNOWN;
+    event.event_code = 0u16;
+    event.subject_handle = 0u64;
+    event.value_u64 = 0u64;
+    event.extra_u64 = 0u64;
+}
+
+export fn rtc_trace_event_make() RtcTraceEvent {
+    return RtcTraceEvent{};
+}
+
+export fn rtc_trace_ring_make() RtcTraceRing {
+    return RtcTraceRing{};
+}
+
+export fn rtc_trace_ring_init(ring: &RtcTraceRing, capacity: usize) !void {
+    if ring == null {
+        return error.RtcTraceRingInvalidState;
+    }
+    if capacity == 0usize || capacity > RTC_TRACE_RING_MAX_CAPACITY {
+        return error.RtcTraceRingConfigInvalid;
+    }
+
+    ring.capacity = capacity;
+    rtc_trace_ring_reset(ring);
+}
+
+export fn rtc_trace_ring_reset(ring: &RtcTraceRing) void {
+    if ring == null {
+        return;
+    }
+
+    var index: usize = 0usize;
+    while index < RTC_TRACE_RING_MAX_CAPACITY {
+        rtc_trace_ring_clear_event(&ring.events[index]);
+        index = index + 1usize;
+    }
+
+    ring.head = 0usize;
+    ring.count = 0usize;
+    ring.push_count = 0u64;
+    ring.pop_count = 0u64;
+    ring.drop_count = 0u64;
+    ring.high_watermark = 0u64;
+}
+
+export fn rtc_trace_ring_len(ring: &RtcTraceRing) usize {
+    if ring == null {
+        return 0usize;
+    }
+    return ring.count;
+}
+
+export fn rtc_trace_ring_has_event(ring: &RtcTraceRing) bool {
+    if ring == null {
+        return false;
+    }
+    return ring.count > 0usize;
+}
+
+export fn rtc_trace_ring_push(ring: &RtcTraceRing, event: &RtcTraceEvent) !void {
+    try rtc_trace_ring_validate(ring);
+    if event == null {
+        return error.RtcTraceRingInvalidState;
+    }
+
+    if ring.count == ring.capacity {
+        ring.head = rtc_trace_ring_next_index(ring, ring.head);
+        ring.count = ring.count - 1usize;
+        ring.drop_count = ring.drop_count + 1u64;
+    }
+
+    const tail: usize = ring.head + ring.count;
+    var slot: usize = tail;
+    if slot >= ring.capacity {
+        slot = slot - ring.capacity;
+    }
+    if slot >= RTC_TRACE_RING_MAX_CAPACITY {
+        return error.RtcTraceRingConfigInvalid;
+    }
+
+    ring.events[slot] = *event;
+    ring.count = ring.count + 1usize;
+    ring.push_count = ring.push_count + 1u64;
+    if (ring.count as u64) > ring.high_watermark {
+        ring.high_watermark = ring.count as u64;
+    }
+    return;
+}
+
+export fn rtc_trace_ring_pop(ring: &RtcTraceRing) !RtcTraceEvent {
+    try rtc_trace_ring_validate(ring);
+    if ring.count == 0usize {
+        return error.RtcTraceRingEmpty;
+    }
+
+    const slot: usize = ring.head;
+    if slot >= RTC_TRACE_RING_MAX_CAPACITY {
+        return error.RtcTraceRingConfigInvalid;
+    }
+
+    const event: RtcTraceEvent = ring.events[slot];
+    rtc_trace_ring_clear_event(&ring.events[slot]);
+    ring.head = rtc_trace_ring_next_index(ring, slot);
+    ring.count = ring.count - 1usize;
+    ring.pop_count = ring.pop_count + 1u64;
+    return event;
+}
