@@ -541,7 +541,7 @@
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
 - [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
   - blocked: 现有 Phase 17 video interop 使用浏览器 canvas/内部 VP8 发送，不能作为本仓库直接发送 encoded VP8 或通过 VP8 bridge 编码的示例；`../vp8` encoder、library API 与 RTP reassembly 仍未实现，暂无真实 bridge encode 路径可验证。
-- [ ] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
+- [x] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
 - [ ] AV1 仅保留 OBU/RTP 工具，编解码另行评估。
 
 验收标准：
