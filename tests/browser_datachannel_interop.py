@@ -581,6 +581,189 @@ def make_audio_test_page() -> str:
     ).strip()
 
 
+def make_video_test_page() -> str:
+    return textwrap.dedent(
+        """
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>Phase 17 Browser Video Interop</title>
+        <script>
+        window.__phase14Result = null;
+
+        function fail(message, error) {
+          window.__phase14Result = {
+            ok: false,
+            error: message,
+            detail: error && error.stack ? String(error.stack) : (error ? String(error) : "")
+          };
+        }
+
+        function delay(ms) {
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function waitForEvent(target, name, predicate) {
+          return new Promise((resolve, reject) => {
+            const handler = event => {
+              try {
+                if (!predicate || predicate(event)) {
+                  target.removeEventListener(name, handler);
+                  resolve(event);
+                }
+              } catch (error) {
+                target.removeEventListener(name, handler);
+                reject(error);
+              }
+            };
+            target.addEventListener(name, handler);
+          });
+        }
+
+        function waitForState(target, name, predicate) {
+          if (predicate()) {
+            return Promise.resolve();
+          }
+          return waitForEvent(target, name, () => predicate());
+        }
+
+        function makeIceRelay(source, sink, sinkName) {
+          const queue = [];
+          let ready = false;
+          source.addEventListener('icecandidate', event => {
+            if (!event.candidate) {
+              return;
+            }
+            if (ready) {
+              void sink.addIceCandidate(event.candidate).catch(error => {
+                fail(sinkName + ' addIceCandidate failed', error);
+              });
+              return;
+            }
+            queue.push(event.candidate);
+          });
+          return {
+            async enable() {
+              ready = true;
+              for (const candidate of queue.splice(0)) {
+                await sink.addIceCandidate(candidate);
+              }
+            }
+          };
+        }
+
+        async function waitForInboundVideoPackets(receiver) {
+          const deadline = Date.now() + 5000;
+          while (Date.now() < deadline) {
+            const stats = await receiver.getStats();
+            for (const stat of stats.values()) {
+              if (stat.type === 'inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
+                const packets = stat.packetsReceived || 0;
+                if (packets > 0) {
+                  return packets;
+                }
+              }
+            }
+            await delay(100);
+          }
+          return 0;
+        }
+
+        async function run() {
+          const pc1 = new RTCPeerConnection({iceServers: []});
+          const pc2 = new RTCPeerConnection({iceServers: []});
+          const relay12 = makeIceRelay(pc1, pc2, 'pc2');
+          const relay21 = makeIceRelay(pc2, pc1, 'pc1');
+          const tracks = [];
+
+          pc2.addEventListener('track', event => {
+            tracks.push(event.track.kind);
+          });
+
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 180;
+          document.documentElement.appendChild(canvas);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            throw new Error('2d canvas context unavailable');
+          }
+
+          let frameIndex = 0;
+          function drawFrame() {
+            const hue = (frameIndex * 17) % 360;
+            ctx.fillStyle = 'hsl(' + hue + ' 80% 50%)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(12, 12, 180, 44);
+            ctx.fillStyle = 'white';
+            ctx.font = '24px sans-serif';
+            ctx.fillText('phase17 video ' + frameIndex, 20, 42);
+            frameIndex = frameIndex + 1;
+          }
+
+          drawFrame();
+          const intervalId = setInterval(drawFrame, 33);
+          const stream = canvas.captureStream(30);
+          const sourceTrack = stream.getVideoTracks()[0];
+          pc1.addTrack(sourceTrack, stream);
+
+          const trackPromise = waitForEvent(pc2, 'track');
+
+          const offer = await pc1.createOffer();
+          await pc1.setLocalDescription(offer);
+          await pc2.setRemoteDescription(pc1.localDescription);
+          await relay12.enable();
+
+          const answer = await pc2.createAnswer();
+          await pc2.setLocalDescription(answer);
+          await pc1.setRemoteDescription(pc2.localDescription);
+          await relay21.enable();
+
+          const trackEvent = await trackPromise;
+          const receivedTrack = trackEvent.track;
+          const receiver = pc2.getReceivers().find(r => r.track === receivedTrack) || pc2.getReceivers()[0];
+          if (!receiver) {
+            throw new Error('receiver not found for video track');
+          }
+
+          await Promise.all([
+            waitForState(pc1, 'connectionstatechange', () => pc1.connectionState === 'connected'),
+            waitForState(pc2, 'connectionstatechange', () => pc2.connectionState === 'connected'),
+          ]);
+
+          const packetsReceived = await waitForInboundVideoPackets(receiver);
+          if (packetsReceived <= 0) {
+            throw new Error('video packets were not received');
+          }
+
+          const receivedTrackKind = receivedTrack.kind;
+          const receivedTrackReadyState = receivedTrack.readyState;
+
+          clearInterval(intervalId);
+          sourceTrack.stop();
+
+          pc1.close();
+          pc2.close();
+          await delay(25);
+
+          window.__phase14Result = {
+            ok: true,
+            browser: navigator.userAgent,
+            tracks,
+            receivedTrackKind,
+            receivedTrackReadyState,
+            packetsReceived,
+            pc1ConnectionState: pc1.connectionState,
+            pc2ConnectionState: pc2.connectionState,
+          };
+        }
+
+        run().catch(error => fail('phase17 browser video test failed', error));
+        </script>
+        """
+    ).strip()
+
+
 def start_http_server(directory: Path) -> tuple[ThreadingHTTPServer, threading.Thread, int]:
     port = find_free_port()
     handler = partial(SimpleHTTPRequestHandler, directory=str(directory))
@@ -661,6 +844,15 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
         require(isinstance(tracks, list) and "audio" in tracks, "browser did not surface an audio track event")
         return
 
+    if mode == "video":
+        require(result.get("receivedTrackKind") == "video", "browser did not receive a video track")
+        require(result.get("receivedTrackReadyState") == "live", "video track should be live before cleanup")
+        packets_received = result.get("packetsReceived")
+        require(isinstance(packets_received, int) and packets_received > 0, "video packets were not received")
+        tracks = result.get("tracks")
+        require(isinstance(tracks, list) and "video" in tracks, "browser did not surface a video track event")
+        return
+
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
@@ -669,6 +861,8 @@ def make_test_page(mode: str) -> str:
         return make_datachannel_test_page()
     if mode == "audio":
         return make_audio_test_page()
+    if mode == "video":
+        return make_video_test_page()
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
