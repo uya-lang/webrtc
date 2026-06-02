@@ -44,6 +44,8 @@ export struct DataChannel {
     incoming_budget: SctpDataChannelReassemblyBudget = SctpDataChannelReassemblyBudget{},
     send_count: u64 = 0u64,
     receive_count: u64 = 0u64,
+    bytes_sent: u64 = 0u64,
+    bytes_received: u64 = 0u64,
     drop_count: u64 = 0u64,
     open_count: u64 = 0u64,
     close_count: u64 = 0u64,
@@ -396,6 +398,7 @@ export fn data_channel_send(channel: &DataChannel, payload: &[byte]) !void {
         return error.SctpDataChannelQueueFull;
     }
     channel.send_count = channel.send_count + 1u64;
+    channel.bytes_sent = channel.bytes_sent + (payload.len as u64);
     return;
 }
 
@@ -428,6 +431,7 @@ export fn data_channel_deliver_message(channel: &DataChannel, payload: &[byte]) 
         try sctp_data_channel_reassembly_budget_release(&channel.incoming_budget, message.payload_len);
         return error.SctpDataChannelQueueFull;
     }
+    channel.bytes_received = channel.bytes_received + (message.payload_len as u64);
     return;
 }
 

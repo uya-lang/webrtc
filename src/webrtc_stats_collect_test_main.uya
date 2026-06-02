@@ -1,4 +1,5 @@
 use libc.printf;
+use webrtc.api;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
@@ -128,6 +129,63 @@ fn check_remote_inbound_rtp_stats_collect() i32 {
     return 0i32;
 }
 
+fn check_data_channel_stats_collect() i32 {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.negotiated = true;
+    init.ordered = false;
+
+    const channel_result: !DataChannel = data_channel_make(
+        "telemetry" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if channel_result.error_id != 0 {
+        return 40i32;
+    }
+    var channel: DataChannel = channel_result.value;
+
+    if !data_channel_open(&channel) {
+        return 41i32;
+    }
+    if data_channel_send(&channel, "hello" as &[byte]).error_id != 0 {
+        return 42i32;
+    }
+    if data_channel_send(&channel, "world!" as &[byte]).error_id != 0 {
+        return 43i32;
+    }
+    if data_channel_deliver_message(&channel, "reply" as &[byte]).error_id != 0 {
+        return 44i32;
+    }
+    _ = data_channel_pop_received_message(&channel);
+
+    const stats_result: !RtcDataChannelStats = rtc_data_channel_stats_collect(&channel, 0xDDu64, 4444u64);
+    if stats_result.error_id != 0 {
+        return 45i32;
+    }
+
+    const stats: RtcDataChannelStats = stats_result.value;
+    if stats.handle != 0xDDu64 || stats.timestamp_us != 4444u64 {
+        return 46i32;
+    }
+    if stats.state != DATA_CHANNEL_STATE_OPEN {
+        return 47i32;
+    }
+    if stats.messages_sent != 2u64 || stats.messages_received != 1u64 {
+        return 48i32;
+    }
+    if stats.bytes_sent != 11u64 || stats.bytes_received != 5u64 {
+        return 49i32;
+    }
+    if stats.buffered_amount != 11usize || stats.buffered_amount_high_watermark != 11usize {
+        return 50i32;
+    }
+    if stats.drop_count != 0u64 || stats.label_handle == 0u64 || stats.protocol_handle == 0u64 {
+        return 51i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_candidate_pair_stats_collect();
     if result != 0i32 {
@@ -138,6 +196,12 @@ fn main() i32 {
     result = check_remote_inbound_rtp_stats_collect();
     if result != 0i32 {
         printf("remote inbound rtp stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_data_channel_stats_collect();
+    if result != 0i32 {
+        printf("data channel stats tests failed: %d\n", result);
         return 1i32;
     }
 

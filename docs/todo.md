@@ -423,7 +423,7 @@
 - [~] 实现 inbound RTP stats。
 - [ ] 实现 outbound RTP stats。
 - [x] 实现 remote inbound RTP stats。
-- [ ] 实现 data channel stats。
+- [x] 实现 data channel stats。
 - [ ] 实现 codec stats。
 - [x] 实现 trace ring。
 - [ ] 实现 `get_stats` API。

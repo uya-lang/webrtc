@@ -1,6 +1,7 @@
 // webrtc.stats.collect - stats snapshot helpers for live runtime objects
 // Module: src/webrtc/stats/collect.uya -> use webrtc.stats.collect;
 
+use webrtc.api;
 use webrtc.ice.agent;
 use webrtc.ice.candidate;
 use webrtc.ice.checklist;
@@ -11,6 +12,8 @@ const RTC_STATS_HANDLE_SCOPE_ICE_LOCAL_CANDIDATE: u8 = 1u8;
 const RTC_STATS_HANDLE_SCOPE_ICE_REMOTE_CANDIDATE: u8 = 2u8;
 const RTC_STATS_HANDLE_SCOPE_ICE_CANDIDATE_PAIR: u8 = 3u8;
 const RTC_COMPACT_NTP_SCALE: u64 = 65536u64;
+const RTC_STATS_FNV_OFFSET_BASIS: u64 = 14695981039346656037u64;
+const RTC_STATS_FNV_PRIME: u64 = 1099511628211u64;
 
 fn rtc_stats_handle_make(generation: u32, scope: u8, slot: usize) u64 {
     return ((generation as u64) << 32i32)
@@ -124,6 +127,20 @@ fn rtc_remote_inbound_round_trip_time_us(
     return ((rtt_ticks as u64) * 1000000u64) / RTC_COMPACT_NTP_SCALE;
 }
 
+fn rtc_stats_bytes_handle(bytes: &[byte]) u64 {
+    var hash: u64 = RTC_STATS_FNV_OFFSET_BASIS;
+    var index: usize = 0usize;
+    while index < bytes.len {
+        hash = hash ^ (bytes[index] as u64);
+        hash = hash * RTC_STATS_FNV_PRIME;
+        index = index + 1usize;
+    }
+    if hash == 0u64 {
+        return 1u64;
+    }
+    return hash;
+}
+
 /// Snapshot one ICE candidate pair from the live checklist.
 export fn rtc_ice_candidate_pair_stats_collect(
     agent: &IceAgent,
@@ -168,5 +185,31 @@ export fn rtc_remote_inbound_rtp_stream_stats_collect(
         block.lsr,
         block.dlsr,
     );
+    return stats;
+}
+
+/// Snapshot one DataChannel.
+export fn rtc_data_channel_stats_collect(
+    channel: &DataChannel,
+    handle: u64,
+    timestamp_us: u64,
+) !RtcDataChannelStats {
+    if channel == null {
+        return error.SctpDataChannelInvalidState;
+    }
+
+    var stats: RtcDataChannelStats = rtc_data_channel_stats_make();
+    stats.handle = handle;
+    stats.timestamp_us = timestamp_us;
+    stats.state = data_channel_ready_state(channel);
+    stats.label_handle = rtc_stats_bytes_handle(data_channel_label(channel));
+    stats.protocol_handle = rtc_stats_bytes_handle(data_channel_protocol(channel));
+    stats.messages_sent = channel.send_count;
+    stats.messages_received = channel.receive_count;
+    stats.bytes_sent = channel.bytes_sent;
+    stats.bytes_received = channel.bytes_received;
+    stats.buffered_amount = channel.buffered_amount;
+    stats.buffered_amount_high_watermark = channel.buffered_amount_high_watermark;
+    stats.drop_count = channel.drop_count;
     return stats;
 }
