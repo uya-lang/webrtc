@@ -12,6 +12,7 @@ export error PacerQueueFull;
 export error PacerQueueBackpressure;
 export error PacerQueueEmpty;
 export error PacerQueueNotReady;
+export error PacerTransportWideSeqInvalidState;
 
 export struct PacerQueueConfig {
     max_packets: usize = 16usize,
@@ -49,6 +50,13 @@ export struct PacerQueue {
     delay_sample_count: usize = 0usize,
     delay_samples: [u64: PACER_QUEUE_MAX_DELAY_SAMPLES] = [],
     entries: [PacerQueueEntry: PACER_QUEUE_MAX_PACKETS] = [],
+}
+
+export struct PacerTransportWideSeqAllocator {
+    has_sequence: bool = false,
+    next_sequence: u16 = 0u16,
+    last_sequence: u16 = 0u16,
+    allocation_count: u64 = 0u64,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -389,4 +397,42 @@ export fn pacer_queue_backpressure_count(queue: &PacerQueue) u64 {
         return 0u64;
     }
     return queue.backpressure_count;
+}
+
+/// Create a default transport-wide sequence allocator.
+export fn pacer_transport_wide_seq_allocator_make() PacerTransportWideSeqAllocator {
+    return PacerTransportWideSeqAllocator{};
+}
+
+/// Initialize the transport-wide sequence allocator with a starting sequence.
+export fn pacer_transport_wide_seq_allocator_init(
+    state: &PacerTransportWideSeqAllocator,
+    initial_sequence: u16,
+) !void {
+    if state == null {
+        return error.PacerTransportWideSeqInvalidState;
+    }
+
+    state.has_sequence = true;
+    state.next_sequence = initial_sequence;
+    state.last_sequence = initial_sequence;
+    state.allocation_count = 0u64;
+    return;
+}
+
+/// Allocate the next transport-wide sequence number.
+export fn pacer_transport_wide_seq_allocator_next(state: &PacerTransportWideSeqAllocator) !u16 {
+    if state == null || !state.has_sequence {
+        return error.PacerTransportWideSeqInvalidState;
+    }
+
+    const sequence: u16 = state.next_sequence;
+    if sequence == 0xFFFFu16 {
+        state.next_sequence = 0u16;
+    } else {
+        state.next_sequence = sequence + 1u16;
+    }
+    state.last_sequence = sequence;
+    state.allocation_count = state.allocation_count + 1u64;
+    return sequence;
 }

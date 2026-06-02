@@ -109,6 +109,35 @@ fn check_queue_delay_percentiles() i32 {
     return 0i32;
 }
 
+fn check_transport_wide_sequence_allocation() i32 {
+    var allocator: PacerTransportWideSeqAllocator = pacer_transport_wide_seq_allocator_make();
+    const init_result: !void = pacer_transport_wide_seq_allocator_init(&allocator, 65534u16);
+    if init_result.error_id != 0 {
+        return 40i32;
+    }
+
+    const first: !u16 = pacer_transport_wide_seq_allocator_next(&allocator);
+    if first.error_id != 0 || first.value != 65534u16 {
+        return 41i32;
+    }
+
+    const second: !u16 = pacer_transport_wide_seq_allocator_next(&allocator);
+    if second.error_id != 0 || second.value != 65535u16 {
+        return 42i32;
+    }
+
+    const third: !u16 = pacer_transport_wide_seq_allocator_next(&allocator);
+    if third.error_id != 0 || third.value != 0u16 {
+        return 43i32;
+    }
+
+    if allocator.allocation_count != 3u64 {
+        return 44i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -119,6 +148,12 @@ fn main() i32 {
     result = check_queue_delay_percentiles();
     if result != 0i32 {
         printf("pacer queue delay percentile tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_transport_wide_sequence_allocation();
+    if result != 0i32 {
+        printf("transport-wide sequence allocation tests failed: %d\n", result);
         return 1i32;
     }
 
