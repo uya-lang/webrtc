@@ -448,7 +448,7 @@
 - [ ] Pion WebRTC interop。
 - [ ] aiortc interop。
 - [ ] GStreamer webrtcbin interop。
-- [ ] 网络模拟：1%/5%/10% loss。
+- [x] 网络模拟：1%/5%/10% loss。
 - [ ] 网络模拟：reorder/duplicate/jitter。
 
 验收标准：

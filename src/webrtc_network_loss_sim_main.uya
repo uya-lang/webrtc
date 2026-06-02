@@ -1,0 +1,344 @@
+use libc.printf;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+
+const NETWORK_SIM_PACKET_COUNT: usize = 100usize;
+const NETWORK_SIM_BASE_SEQUENCE: u16 = 1000u16;
+const NETWORK_SIM_SSRC: u32 = 0x11223344u32;
+const NETWORK_SIM_PAYLOAD_TYPE: u8 = 96u8;
+const NETWORK_SIM_PAYLOAD_BYTES: usize = 4usize;
+const NETWORK_SIM_PACKET_BYTES: usize = 32usize;
+const NETWORK_SIM_NACK_BYTES: usize = 64usize;
+
+fn make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = NETWORK_SIM_PAYLOAD_TYPE;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn sequence_is_lost(sequence_number: u16, lost_sequences: &[u16], lost_count: usize) bool {
+    var index: usize = 0usize;
+    while index < lost_count {
+        if lost_sequences[index] == sequence_number {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+fn sequence_distance_forward(sequence_number: u16, base_sequence: u16) u32 {
+    if sequence_number >= base_sequence {
+        return (sequence_number as u32) - (base_sequence as u32);
+    }
+    return 65536u32 - ((base_sequence as u32) - (sequence_number as u32));
+}
+
+fn nack_entry_has_sequence(entry: &RtcpNackEntry, sequence_number: u16) bool {
+    if entry == null {
+        return false;
+    }
+    if entry.pid == sequence_number {
+        return true;
+    }
+
+    const distance: u32 = sequence_distance_forward(sequence_number, entry.pid);
+    if distance == 0u32 || distance > 16u32 {
+        return false;
+    }
+    return ((entry.blp >> ((distance - 1u32) as i32)) & 0x01u16) != 0u16;
+}
+
+fn drain_ready_packets(
+    buffer: &RtpJitterBuffer,
+    expected_sequence: &u16,
+    output_count: &usize,
+) !void {
+    while rtp_jitter_buffer_has_ready_packet(buffer) {
+        const ready_result: !RtpPacket = rtp_jitter_buffer_pop_ready_packet(buffer);
+        if ready_result.error_id != 0 {
+            return error.RtpJitterBufferInvalidState;
+        }
+        if ready_result.value.header.sequence_number != *expected_sequence {
+            return error.RtpJitterBufferInvalidState;
+        }
+        *expected_sequence = *expected_sequence + 1u16;
+        *output_count = *output_count + 1usize;
+    }
+    return;
+}
+
+fn validate_nack_entries(
+    nack: &RtcpNackPacket,
+    lost_sequences: &[u16],
+    lost_count: usize,
+    exact_entry_count: usize,
+) i32 {
+    if exact_entry_count != 0usize && nack.entry_count != exact_entry_count {
+        return 20i32;
+    }
+
+    if lost_count == 0usize {
+        return 0i32;
+    }
+
+    var missing_index: usize = 0usize;
+    while missing_index < lost_count {
+        const sequence: u16 = lost_sequences[missing_index];
+        var found: bool = false;
+        var entry_index: usize = 0usize;
+        while entry_index < nack.entry_count {
+            const entry: RtcpNackEntry = nack.entries[entry_index];
+            if nack_entry_has_sequence(&entry, sequence) {
+                found = true;
+                break;
+            }
+            entry_index = entry_index + 1usize;
+        }
+        if !found {
+            return 21i32;
+        }
+        missing_index = missing_index + 1usize;
+    }
+
+    return 0i32;
+}
+
+fn run_loss_profile(
+    loss_label: &[byte],
+    lost_sequences: &[u16],
+    lost_count: usize,
+    exact_entry_count: usize,
+) i32 {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = 128usize;
+    buffer.config.max_missing = 128usize;
+    buffer.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    buffer.config.nack_initial_backoff_us = 2000u64;
+    buffer.config.nack_max_backoff_us = 16000u64;
+    buffer.config.frame_timeout_us = 20000u64;
+
+    var payload: [byte: NETWORK_SIM_PAYLOAD_BYTES] = [
+        0xA0 as byte,
+        0xB1 as byte,
+        0xC2 as byte,
+        0xD3 as byte,
+    ];
+    var packet_bytes: [byte: NETWORK_SIM_PACKET_BYTES] = [];
+    var nack_bytes: [byte: NETWORK_SIM_NACK_BYTES] = [];
+
+    var output_count: usize = 0usize;
+    var expected_sequence: u16 = NETWORK_SIM_BASE_SEQUENCE;
+
+    var index: usize = 0usize;
+    while index < NETWORK_SIM_PACKET_COUNT {
+        const sequence_number: u16 = NETWORK_SIM_BASE_SEQUENCE + (index as u16);
+        if sequence_is_lost(sequence_number, lost_sequences, lost_count) {
+            index = index + 1usize;
+            continue;
+        }
+
+        const marker: bool = index + 1usize == NETWORK_SIM_PACKET_COUNT;
+        const packet_len_result: !usize = make_rtp_packet_bytes(
+            sequence_number,
+            9000u32,
+            NETWORK_SIM_SSRC,
+            marker,
+            payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+            packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+        );
+        if packet_len_result.error_id != 0 {
+            return 30i32;
+        }
+
+        const accepted_result: !bool = rtp_jitter_buffer_push_packet(
+            &buffer,
+            packet_bytes[0:packet_len_result.value],
+            (index as u64) * 1000u64,
+        );
+        if accepted_result.error_id != 0 || !accepted_result.value {
+            return 31i32;
+        }
+
+        const drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+        if drain_result.error_id != 0 {
+            return 32i32;
+        }
+        index = index + 1usize;
+    }
+
+    if buffer.missing_count != lost_count {
+        return 33i32;
+    }
+    if !rtp_jitter_buffer_should_send_nack(&buffer, 100000u64) {
+        return 34i32;
+    }
+
+    const nack_fire_result: !bool = rtp_jitter_buffer_fire_nack(
+        &buffer,
+        0x01020304u32,
+        NETWORK_SIM_SSRC,
+        100000u64,
+        nack_bytes[0:NETWORK_SIM_NACK_BYTES],
+    );
+    if nack_fire_result.error_id != 0 || !nack_fire_result.value {
+        return 35i32;
+    }
+    if buffer.nack_count != 1u64 {
+        return 36i32;
+    }
+
+    const nack_result: !RtcpNackPacket = rtp_jitter_buffer_build_nack(&buffer, 0x01020304u32, NETWORK_SIM_SSRC);
+    if nack_result.error_id != 0 {
+        return 37i32;
+    }
+    const nack_written: !usize = rtcp_nack_write(&nack_result.value, nack_bytes[0:NETWORK_SIM_NACK_BYTES]);
+    if nack_written.error_id != 0 {
+        return 38i32;
+    }
+    const nack_parse_result: !RtcpNackPacket = rtcp_nack_parse(nack_bytes[0:nack_written.value]);
+    if nack_parse_result.error_id != 0 {
+        return 39i32;
+    }
+    const nack: RtcpNackPacket = nack_parse_result.value;
+    const nack_validate_result: i32 = validate_nack_entries(&nack, lost_sequences, lost_count, exact_entry_count);
+    if nack_validate_result != 0i32 {
+        return nack_validate_result;
+    }
+
+    var retransmit_index: usize = 0usize;
+    while retransmit_index < lost_count {
+        const retransmit_sequence: u16 = lost_sequences[retransmit_index];
+        const retransmit_marker: bool = retransmit_sequence == (NETWORK_SIM_BASE_SEQUENCE + (NETWORK_SIM_PACKET_COUNT as u16) - 1u16);
+        const retransmit_packet_len: !usize = make_rtp_packet_bytes(
+            retransmit_sequence,
+            9000u32,
+            NETWORK_SIM_SSRC,
+            retransmit_marker,
+            payload[0:NETWORK_SIM_PAYLOAD_BYTES],
+            packet_bytes[0:NETWORK_SIM_PACKET_BYTES],
+        );
+        if retransmit_packet_len.error_id != 0 {
+            return 40i32;
+        }
+
+        const retransmit_result: !bool = rtp_jitter_buffer_push_packet(
+            &buffer,
+            packet_bytes[0:retransmit_packet_len.value],
+            200000u64 + ((retransmit_index as u64) * 1000u64),
+        );
+        if retransmit_result.error_id != 0 || !retransmit_result.value {
+            return 41i32;
+        }
+
+        const retrain_drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+        if retrain_drain_result.error_id != 0 {
+            return 42i32;
+        }
+        retransmit_index = retransmit_index + 1usize;
+    }
+
+    const final_drain_result: !void = drain_ready_packets(&buffer, &expected_sequence, &output_count);
+    if final_drain_result.error_id != 0 {
+        return 43i32;
+    }
+
+    if output_count != NETWORK_SIM_PACKET_COUNT {
+        return 44i32;
+    }
+    if expected_sequence != (NETWORK_SIM_BASE_SEQUENCE + (NETWORK_SIM_PACKET_COUNT as u16)) {
+        return 45i32;
+    }
+    if buffer.missing_count != 0usize || buffer.nack_count == 0u64 {
+        return 46i32;
+    }
+    if !buffer.frame_complete {
+        return 47i32;
+    }
+
+    printf("%s network loss profile passed\n", loss_label);
+    return 0i32;
+}
+
+fn check_loss_1_percent() i32 {
+    var lost_sequences: [u16: 10] = [
+        1017u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+    ];
+    return run_loss_profile("1%" as &[byte], lost_sequences[0:10], 1usize, 1usize);
+}
+
+fn check_loss_5_percent() i32 {
+    var lost_sequences: [u16: 10] = [
+        1010u16,
+        1030u16,
+        1050u16,
+        1070u16,
+        1090u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+        0u16,
+    ];
+    return run_loss_profile("5%" as &[byte], lost_sequences[0:10], 5usize, 5usize);
+}
+
+fn check_loss_10_percent() i32 {
+    var lost_sequences: [u16: 10] = [
+        1005u16,
+        1015u16,
+        1025u16,
+        1035u16,
+        1045u16,
+        1055u16,
+        1065u16,
+        1075u16,
+        1085u16,
+        1095u16,
+    ];
+    return run_loss_profile("10%" as &[byte], lost_sequences[0:10], 10usize, 0usize);
+}
+
+fn main() i32 {
+    var result: i32 = check_loss_1_percent();
+    if result != 0i32 {
+        printf("1%% network loss simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_loss_5_percent();
+    if result != 0i32 {
+        printf("5%% network loss simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_loss_10_percent();
+    if result != 0i32 {
+        printf("10%% network loss simulation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("network loss simulation tests passed\n");
+    return 0i32;
+}
