@@ -17,6 +17,7 @@ export error PacerQueueNotReady;
 export error PacerTransportWideSeqInvalidState;
 export error PacerDelayBasedEstimatorInvalidState;
 export error PacerLossBasedFallbackInvalidState;
+export error PacerProbeControllerInvalidState;
 
 export struct PacerQueueConfig {
     max_packets: usize = 16usize,
@@ -92,6 +93,14 @@ export struct PacerLossBasedFallback {
     loss_threshold_percent: u8 = 5u8,
     decrease_percent: u8 = 80u8,
     min_bitrate_bps: u64 = 150000u64,
+}
+
+export struct PacerProbeController {
+    has_last_probe_at_us: bool = false,
+    last_probe_at_us: u64 = 0u64,
+    probe_interval_us: u64 = 1000000u64,
+    probe_multiplier_percent: u8 = 120u8,
+    probe_count: u64 = 0u64,
 }
 
 fn pacer_queue_make_default_packet() PacerPacket {
@@ -616,4 +625,50 @@ export fn pacer_loss_based_fallback_apply(
     estimator.current_bitrate_bps = reduced;
     estimator.stable_update_count = 0u32;
     return reduced;
+}
+
+/// Create the default probing controller.
+export fn pacer_probe_controller_make() PacerProbeController {
+    return PacerProbeController{};
+}
+
+/// Return whether the controller should schedule a probe at the given time.
+export fn pacer_probe_controller_should_probe(controller: &PacerProbeController, now_us: u64) bool {
+    if controller == null {
+        return false;
+    }
+    if !controller.has_last_probe_at_us {
+        return true;
+    }
+    if now_us < controller.last_probe_at_us {
+        return false;
+    }
+    return (now_us - controller.last_probe_at_us) >= controller.probe_interval_us;
+}
+
+/// Record that a probe was sent at the given time.
+export fn pacer_probe_controller_note_probe(controller: &PacerProbeController, now_us: u64) void {
+    if controller == null {
+        return;
+    }
+
+    controller.has_last_probe_at_us = true;
+    controller.last_probe_at_us = now_us;
+    controller.probe_count = controller.probe_count + 1u64;
+}
+
+/// Compute the probe bitrate from the current target bitrate.
+export fn pacer_probe_controller_next_probe_bitrate_bps(
+    controller: &PacerProbeController,
+    target_bitrate_bps: u64,
+) u64 {
+    if controller == null {
+        return 0u64;
+    }
+
+    var probe_bitrate_bps: u64 = (target_bitrate_bps * (controller.probe_multiplier_percent as u64)) / 100u64;
+    if probe_bitrate_bps < target_bitrate_bps {
+        probe_bitrate_bps = target_bitrate_bps;
+    }
+    return probe_bitrate_bps;
 }

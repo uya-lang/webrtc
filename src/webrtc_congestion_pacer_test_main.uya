@@ -249,6 +249,33 @@ fn check_loss_based_fallback() i32 {
     return 0i32;
 }
 
+fn check_probing_controller() i32 {
+    var controller: PacerProbeController = pacer_probe_controller_make();
+    controller.probe_interval_us = 1000u64;
+    controller.probe_multiplier_percent = 120u8;
+
+    if !pacer_probe_controller_should_probe(&controller, 0u64) {
+        return 90i32;
+    }
+
+    pacer_probe_controller_note_probe(&controller, 0u64);
+    if pacer_probe_controller_should_probe(&controller, 500u64) {
+        return 91i32;
+    }
+    if !pacer_probe_controller_should_probe(&controller, 1000u64) {
+        return 92i32;
+    }
+
+    if pacer_probe_controller_next_probe_bitrate_bps(&controller, 1000000u64) != 1200000u64 {
+        return 93i32;
+    }
+    if controller.probe_count != 1u64 {
+        return 94i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -289,6 +316,12 @@ fn main() i32 {
     result = check_loss_based_fallback();
     if result != 0i32 {
         printf("loss-based fallback tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_probing_controller();
+    if result != 0i32 {
+        printf("probing tests failed: %d\n", result);
         return 1i32;
     }
 
