@@ -1,0 +1,93 @@
+// webrtc.stats.collect - stats snapshot helpers for live runtime objects
+// Module: src/webrtc/stats/collect.uya -> use webrtc.stats.collect;
+
+use webrtc.ice.agent;
+use webrtc.ice.candidate;
+use webrtc.ice.checklist;
+use webrtc.stats.types;
+
+const RTC_STATS_HANDLE_SCOPE_ICE_LOCAL_CANDIDATE: u8 = 1u8;
+const RTC_STATS_HANDLE_SCOPE_ICE_REMOTE_CANDIDATE: u8 = 2u8;
+const RTC_STATS_HANDLE_SCOPE_ICE_CANDIDATE_PAIR: u8 = 3u8;
+
+fn rtc_stats_handle_make(generation: u32, scope: u8, slot: usize) u64 {
+    return ((generation as u64) << 32i32)
+        | ((scope as u64) << 24i32)
+        | ((slot as u64) + 1u64);
+}
+
+fn rtc_stats_candidate_handle(agent: &IceAgent, scope: u8, slot: usize) u64 {
+    if agent == null {
+        return 0u64;
+    }
+    return rtc_stats_handle_make(agent.generation, scope, slot);
+}
+
+fn rtc_stats_candidate_pair_snapshot(
+    agent: &IceAgent,
+    pair_slot: usize,
+    timestamp_us: u64,
+) !RtcIceCandidatePairStats {
+    if agent == null {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= ICE_MAX_CANDIDATE_PAIRS {
+        return error.InvalidPacket;
+    }
+    if pair_slot >= agent.checklist_count {
+        return error.InvalidPacket;
+    }
+
+    const pair: &CandidatePair = &agent.checklist[pair_slot];
+    if pair.local_candidate_index == ICE_CANDIDATE_INDEX_NONE
+        || pair.remote_candidate_index == ICE_CANDIDATE_INDEX_NONE {
+        return error.InvalidPacket;
+    }
+
+    const local_slot: usize = pair.local_candidate_index as usize;
+    const remote_slot: usize = pair.remote_candidate_index as usize;
+    if local_slot >= agent.local_candidate_count || local_slot >= ICE_MAX_LOCAL_CANDIDATES {
+        return error.InvalidPacket;
+    }
+    if remote_slot >= agent.remote_candidate_count || remote_slot >= ICE_MAX_REMOTE_CANDIDATES {
+        return error.InvalidPacket;
+    }
+
+    var stats: RtcIceCandidatePairStats = rtc_ice_candidate_pair_stats_make();
+    stats.handle = rtc_stats_handle_make(agent.generation, RTC_STATS_HANDLE_SCOPE_ICE_CANDIDATE_PAIR, pair_slot);
+    stats.timestamp_us = timestamp_us;
+    stats.local_candidate_handle = rtc_stats_candidate_handle(
+        agent,
+        RTC_STATS_HANDLE_SCOPE_ICE_LOCAL_CANDIDATE,
+        local_slot,
+    );
+    stats.remote_candidate_handle = rtc_stats_candidate_handle(
+        agent,
+        RTC_STATS_HANDLE_SCOPE_ICE_REMOTE_CANDIDATE,
+        remote_slot,
+    );
+    stats.state = pair.state;
+    stats.nominated = pair.nominated;
+    stats.writable = pair.valid;
+    stats.packets_sent = pair.request_count as u64;
+    stats.packets_received = pair.response_count as u64;
+    stats.bytes_sent = 0u64;
+    stats.bytes_received = 0u64;
+    stats.requests_sent = pair.request_count as u64;
+    stats.responses_received = pair.response_count as u64;
+    if pair.selected && pair.valid {
+        stats.consent_requests_sent = pair.request_count as u64;
+    }
+    stats.round_trip_time_us = pair.last_rtt_us as u64;
+    stats.available_outgoing_bitrate_bps = 0u64;
+    return stats;
+}
+
+/// Snapshot one ICE candidate pair from the live checklist.
+export fn rtc_ice_candidate_pair_stats_collect(
+    agent: &IceAgent,
+    pair_index: u16,
+    timestamp_us: u64,
+) !RtcIceCandidatePairStats {
+    return rtc_stats_candidate_pair_snapshot(agent, pair_index as usize, timestamp_us);
+}
