@@ -528,7 +528,7 @@
 - [x] 确认 `../opus` 已有 `docs/design.md` 和 `docs/todo.md`。
 - [x] 确认 `../vp8` 已有 `docs/design.md` 和 `docs/todo.md`。
 - [x] 在 WebRTC 设计文档中同步 `../opus` / `../vp8` 的职责边界。
-- [ ] 建立 codec bridge feature gate，默认关闭。
+- [x] 建立 codec bridge feature gate，默认关闭。
 - [ ] 定义 Opus bridge：PCM/Opus packet 与 WebRTC `EncodedFrame` 的转换 API。
 - [ ] 定义 VP8 bridge：YUV/VP8 frame 与 WebRTC `EncodedFrame` 的转换 API。
 - [ ] 对齐 Opus RTP payload tests 与 `../opus` 的 `container/rtp_opus.uya` 计划。

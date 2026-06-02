@@ -5,6 +5,8 @@
 
 export error CodecBridgeDisabled;
 
+export const CODEC_BRIDGE_FEATURE_DEFAULT_ENABLED: bool = false;
+
 export struct CodecBridgeAdapterSlot {
     enabled: bool = false,
     encode_entry: usize = 0usize,
@@ -26,6 +28,20 @@ fn codec_bridge_slot_make() CodecBridgeAdapterSlot {
 
 export fn codec_bridge_boundary_make() CodecBridgeBoundary {
     return CodecBridgeBoundary{};
+}
+
+export fn codec_bridge_feature_default_enabled() bool {
+    return CODEC_BRIDGE_FEATURE_DEFAULT_ENABLED;
+}
+
+export fn codec_bridge_boundary_make_with_feature(enabled: bool) CodecBridgeBoundary {
+    return CodecBridgeBoundary{
+        enabled: enabled,
+        opus_adapter_enabled: false,
+        vp8_adapter_enabled: false,
+        opus_slot: codec_bridge_slot_make(),
+        vp8_slot: codec_bridge_slot_make(),
+    };
 }
 
 fn codec_bridge_slot_register(
