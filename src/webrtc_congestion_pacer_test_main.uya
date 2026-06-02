@@ -138,6 +138,30 @@ fn check_transport_wide_sequence_allocation() i32 {
     return 0i32;
 }
 
+fn check_send_time_recording() i32 {
+    var packet: PacerPacket = PacerPacket{
+        size_bytes: 1200usize,
+        enqueue_time_us: 100u64,
+        ready_at_us: 200u64,
+        transport_sequence: 77u16,
+        has_transport_sequence: true,
+        priority: PACER_PRIORITY_VIDEO,
+    };
+
+    const record_result: !void = pacer_packet_record_send_time(&packet, 555u64);
+    if record_result.error_id != 0 {
+        return 50i32;
+    }
+    if !packet.has_send_time || packet.send_time_us != 555u64 {
+        return 51i32;
+    }
+    if !packet.has_transport_sequence || packet.transport_sequence != 77u16 {
+        return 52i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_queue_cap_drop_and_backpressure();
     if result != 0i32 {
@@ -154,6 +178,12 @@ fn main() i32 {
     result = check_transport_wide_sequence_allocation();
     if result != 0i32 {
         printf("transport-wide sequence allocation tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_send_time_recording();
+    if result != 0i32 {
+        printf("send-time recording tests failed: %d\n", result);
         return 1i32;
     }
 

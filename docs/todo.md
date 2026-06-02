@@ -400,7 +400,7 @@
 - [x] 先增加 pacer queue cap、drop/backpressure、P95/P99 delay failing tests。
 - [x] 实现 pacer queue。
 - [x] 实现 transport-wide seq 分配。
-- [ ] 实现 send-time 记录。
+- [x] 实现 send-time 记录。
 - [ ] 实现 Transport-CC feedback parser。
 - [ ] 实现 delay-based estimator。
 - [ ] 实现 loss-based fallback。

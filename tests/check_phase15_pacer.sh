@@ -18,6 +18,7 @@ rg -q "export struct PacerTransportWideSeqAllocator" src/webrtc/congestion/pacer
 rg -q "export fn pacer_transport_wide_seq_allocator_make" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_transport_wide_seq_allocator_init" src/webrtc/congestion/pacer.uya
 rg -q "export fn pacer_transport_wide_seq_allocator_next" src/webrtc/congestion/pacer.uya
+rg -q "export fn pacer_packet_record_send_time" src/webrtc/congestion/pacer.uya
 
 ../uya/bin/uya run src/webrtc_congestion_pacer_test_main.uya
 

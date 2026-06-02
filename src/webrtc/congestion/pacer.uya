@@ -436,3 +436,14 @@ export fn pacer_transport_wide_seq_allocator_next(state: &PacerTransportWideSeqA
     state.allocation_count = state.allocation_count + 1u64;
     return sequence;
 }
+
+/// Record the send timestamp for a packet that has just been released by the pacer.
+export fn pacer_packet_record_send_time(packet: &PacerPacket, send_time_us: u64) !void {
+    if packet == null {
+        return error.PacerQueueInvalidState;
+    }
+
+    packet.send_time_us = send_time_us;
+    packet.has_send_time = true;
+    return;
+}
