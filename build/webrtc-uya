@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"; repo_root="$(cd "$script_dir/.." && pwd)"
 case "${1:-}" in
   ""|--help|-h)
-    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"
+    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"
     ;;
   version)
     printf "%s\n" "webrtc-uya 0.0.0-placeholder"
+    ;;
+  dump-stats)
+    exec "${repo_root}/../uya/bin/uya" run "${repo_root}/src/webrtc_dump_stats_main.uya"
     ;;
   *)
     printf "unknown command: %s\n" "${1:-}" >&2

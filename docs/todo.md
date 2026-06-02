@@ -427,7 +427,7 @@
 - [x] 实现 codec stats。
 - [x] 实现 trace ring。
 - [x] 实现 `get_stats` API。
-- [ ] 实现 CLI `dump-stats` 示例。
+- [x] 实现 CLI `dump-stats` 示例。
 
 验收标准：
 

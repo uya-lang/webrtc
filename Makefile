@@ -19,12 +19,16 @@ $(BIN): Makefile src/main.uya src/webrtc/time.uya
 		printf '%s\n' '#!/usr/bin/env bash'; \
 		printf '%s\n' 'set -euo pipefail'; \
 		printf '%s\n' ''; \
+		printf '%s\n' 'script_dir="$$(cd "$$(dirname "$$0")" && pwd)"; repo_root="$$(cd "$$script_dir/.." && pwd)"'; \
 		printf '%s\n' 'case "$${1:-}" in'; \
 		printf '%s\n' '  ""|--help|-h)'; \
-		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version"'; \
+		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  version)'; \
 		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
+		printf '%s\n' '    ;;'; \
+		printf '%s\n' '  dump-stats)'; \
+		printf '%s\n' '    exec "$${repo_root}/../uya/bin/uya" run "$${repo_root}/src/webrtc_dump_stats_main.uya"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  *)'; \
 		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
@@ -64,6 +68,7 @@ test: build
 	test -x tests/check_phase16_stats_types.sh
 	test -x tests/check_phase16_stats_collect.sh
 	test -x tests/check_phase16_get_stats.sh
+	test -x tests/check_phase16_dump_stats.sh
 	test -x tests/check_phase16_trace_ring.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
@@ -111,6 +116,7 @@ test: build
 	bash tests/check_phase16_stats_types.sh
 	bash tests/check_phase16_stats_collect.sh
 	bash tests/check_phase16_get_stats.sh
+	bash tests/check_phase16_dump_stats.sh
 	bash tests/check_phase16_trace_ring.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null

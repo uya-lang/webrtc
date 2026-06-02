@@ -1,0 +1,201 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.ice.candidate;
+use webrtc.media.model;
+use webrtc.peer_connection;
+use webrtc.runtime;
+use webrtc.stats.collect;
+use webrtc.stats.types;
+use webrtc.transceiver;
+
+fn build_candidate(foundation: &[byte]) !IceCandidate {
+    var candidate: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&candidate);
+    try ice_candidate_set_foundation(&candidate, foundation);
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate.priority = 2122260223u32;
+    try ice_transport_address_set(
+        &candidate.address,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.120" as &[byte],
+        51000u16,
+    );
+    return candidate;
+}
+
+fn print_peer_connection_stats(stats: &RtcPeerConnectionStats) void {
+    printf(
+        "peer_connection handle=%d timestamp_us=%d state=%d ice=%d data_channels=%d transceivers=%d senders=%d receivers=%d packets_sent=%d packets_received=%d bytes_sent=%d bytes_received=%d\n",
+        stats.handle as i32,
+        stats.timestamp_us as i32,
+        stats.connection_state as i32,
+        stats.ice_state as i32,
+        stats.data_channel_count as i32,
+        stats.transceiver_count as i32,
+        stats.sender_count as i32,
+        stats.receiver_count as i32,
+        stats.packets_sent as i32,
+        stats.packets_received as i32,
+        stats.bytes_sent as i32,
+        stats.bytes_received as i32,
+    );
+}
+
+fn print_data_channel_stats(stats: &RtcDataChannelStats) void {
+    printf(
+        "data_channel handle=%d timestamp_us=%d state=%d messages_sent=%d messages_received=%d bytes_sent=%d bytes_received=%d buffered_amount=%d high_watermark=%d drops=%d\n",
+        stats.handle as i32,
+        stats.timestamp_us as i32,
+        stats.state as i32,
+        stats.messages_sent as i32,
+        stats.messages_received as i32,
+        stats.bytes_sent as i32,
+        stats.bytes_received as i32,
+        stats.buffered_amount as i32,
+        stats.buffered_amount_high_watermark as i32,
+        stats.drop_count as i32,
+    );
+}
+
+fn print_codec_stats(stats: &RtcCodecStats) void {
+    printf(
+        "codec handle=%d timestamp_us=%d payload_type=%d media_kind=%d clock_rate_hz=%d channels=%d bitrate_bps=%d\n",
+        stats.handle as i32,
+        stats.timestamp_us as i32,
+        stats.payload_type as i32,
+        stats.media_kind as i32,
+        stats.clock_rate_hz as i32,
+        stats.channels as i32,
+        stats.bitrate_bps as i32,
+    );
+}
+
+fn main() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 1i32;
+
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        printf("dump-stats failed: runtime init\n");
+        return 1i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        printf("dump-stats failed: peer connection\n");
+        return 1i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    var audio_init: TransceiverInit = transceiver_init_make();
+    audio_init.direction = TRANSCEIVER_DIRECTION_SENDONLY;
+    if peer_connection_add_transceiver(&pc, MEDIA_KIND_AUDIO, &audio_init).error_id != 0 {
+        printf("dump-stats failed: audio transceiver\n");
+        return 1i32;
+    }
+
+    var video_init: TransceiverInit = transceiver_init_make();
+    video_init.direction = TRANSCEIVER_DIRECTION_RECVONLY;
+    if peer_connection_add_transceiver(&pc, MEDIA_KIND_VIDEO, &video_init).error_id != 0 {
+        printf("dump-stats failed: video transceiver\n");
+        return 1i32;
+    }
+
+    var offer: PeerConnectionDescription = PeerConnectionDescription{};
+    if peer_connection_create_offer(&pc, &offer).error_id != 0 {
+        printf("dump-stats failed: offer\n");
+        return 1i32;
+    }
+    if peer_connection_set_local_description(&pc, offer.text[0:offer.text_len]).error_id != 0 {
+        printf("dump-stats failed: local description\n");
+        return 1i32;
+    }
+
+    const remote_description: &[byte] = "v=0\no=- 1 2 IN IP4 127.0.0.1\ns=Dump Stats Remote\nt=0 0\na=group:BUNDLE data\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\nc=IN IP4 0.0.0.0\na=mid:data\na=sendrecv\na=ice-ufrag:dump-stats-remote\na=ice-pwd:dump-stats-remote-pwd\na=setup:actpass\na=rtcp-mux\na=sctp-port:5000\na=max-message-size:262144\n" as &[byte];
+    if peer_connection_set_remote_description(&pc, remote_description).error_id != 0 {
+        printf("dump-stats failed: remote description\n");
+        return 1i32;
+    }
+
+    const candidate_result: !IceCandidate = build_candidate("dump-stats-candidate" as &[byte]);
+    if candidate_result.error_id != 0 {
+        printf("dump-stats failed: candidate\n");
+        return 1i32;
+    }
+    var candidate: IceCandidate = candidate_result.value;
+    if peer_connection_add_ice_candidate(&pc, &candidate).error_id != 0 {
+        printf("dump-stats failed: add candidate\n");
+        return 1i32;
+    }
+
+    var channel_init: SctpDataChannelInit = data_channel_init_make();
+    channel_init.negotiated = true;
+    const channel_result: !DataChannel = peer_connection_create_data_channel(
+        &pc,
+        "dump-stats" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &channel_init,
+    );
+    if channel_result.error_id != 0 {
+        printf("dump-stats failed: data channel\n");
+        return 1i32;
+    }
+    var channel: DataChannel = channel_result.value;
+    if !data_channel_open(&channel) {
+        printf("dump-stats failed: open data channel\n");
+        return 1i32;
+    }
+    if data_channel_send(&channel, "stats" as &[byte]).error_id != 0 {
+        printf("dump-stats failed: send data channel\n");
+        return 1i32;
+    }
+    if !data_channel_has_outgoing_message(&channel) {
+        printf("dump-stats failed: outgoing queue\n");
+        return 1i32;
+    }
+    var outgoing: DataChannelMessage = data_channel_pop_outgoing_message(&channel);
+    if data_channel_deliver_message(&channel, outgoing.payload[0:outgoing.payload_len]).error_id != 0 {
+        printf("dump-stats failed: deliver data channel\n");
+        return 1i32;
+    }
+    _ = data_channel_pop_received_message(&channel);
+
+    var pc_stats: RtcPeerConnectionStats = rtc_peer_connection_stats_make();
+    if peer_connection_get_stats(&pc, &pc_stats).error_id != 0 {
+        printf("dump-stats failed: peer_connection_get_stats\n");
+        return 1i32;
+    }
+
+    const channel_stats_result: !RtcDataChannelStats = rtc_data_channel_stats_collect(
+        &channel,
+        0xD0u64,
+        4242u64,
+    );
+    if channel_stats_result.error_id != 0 {
+        printf("dump-stats failed: data channel stats\n");
+        return 1i32;
+    }
+    const channel_stats: RtcDataChannelStats = channel_stats_result.value;
+
+    var codec: CodecNegotiatedCodec = CodecNegotiatedCodec{
+        codec_id: CODEC_ID_OPUS,
+        media_kind: MEDIA_KIND_AUDIO,
+        payload_type: 111u8,
+        clock_rate_hz: 48000u32,
+        channels: 2u8,
+    };
+    const codec_stats_result: !RtcCodecStats = rtc_codec_stats_collect(&codec, 5151u64, 128000u64);
+    if codec_stats_result.error_id != 0 {
+        printf("dump-stats failed: codec stats\n");
+        return 1i32;
+    }
+    const codec_stats: RtcCodecStats = codec_stats_result.value;
+
+    print_peer_connection_stats(&pc_stats);
+    print_data_channel_stats(&channel_stats);
+    print_codec_stats(&codec_stats);
+    return 0i32;
+}
