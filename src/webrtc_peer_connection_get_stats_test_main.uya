@@ -1,0 +1,135 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.ice.candidate;
+use webrtc.media.model;
+use webrtc.peer_connection;
+use webrtc.runtime;
+use webrtc.stats.types;
+use webrtc.transceiver;
+
+fn build_candidate(foundation: &[byte]) !IceCandidate {
+    var candidate: IceCandidate = ice_candidate_make();
+    ice_candidate_init(&candidate);
+    try ice_candidate_set_foundation(&candidate, foundation);
+    candidate.component_id = ICE_COMPONENT_RTP;
+    candidate.transport = ICE_CANDIDATE_TRANSPORT_UDP;
+    candidate.candidate_type = ICE_CANDIDATE_TYPE_HOST;
+    candidate.priority = 2122260223u32;
+    try ice_transport_address_set(
+        &candidate.address,
+        ICE_ADDRESS_FAMILY_IPV4,
+        "192.0.2.90" as &[byte],
+        50900u16,
+    );
+    return candidate;
+}
+
+fn check_peer_connection_get_stats() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    config.worker_count = 1i32;
+
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 10i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 11i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    var audio_init: TransceiverInit = transceiver_init_make();
+    audio_init.direction = TRANSCEIVER_DIRECTION_SENDONLY;
+    const audio_transceiver: !Transceiver = peer_connection_add_transceiver(&pc, MEDIA_KIND_AUDIO, &audio_init);
+    if audio_transceiver.error_id != 0 {
+        return 12i32;
+    }
+
+    var video_init: TransceiverInit = transceiver_init_make();
+    video_init.direction = TRANSCEIVER_DIRECTION_RECVONLY;
+    const video_transceiver: !Transceiver = peer_connection_add_transceiver(&pc, MEDIA_KIND_VIDEO, &video_init);
+    if video_transceiver.error_id != 0 {
+        return 13i32;
+    }
+
+    var offer: PeerConnectionDescription = PeerConnectionDescription{};
+    const offer_result: !void = peer_connection_create_offer(&pc, &offer);
+    if offer_result.error_id != 0 {
+        return 14i32;
+    }
+    const local_description_result: !void = peer_connection_set_local_description(&pc, offer.text[0:offer.text_len]);
+    if local_description_result.error_id != 0 {
+        return 15i32;
+    }
+
+    const remote_description: &[byte] = "v=0\no=- 1 2 IN IP4 127.0.0.1\ns=Stats Remote\nt=0 0\na=group:BUNDLE data\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\nc=IN IP4 0.0.0.0\na=mid:data\na=sendrecv\na=ice-ufrag:stats-remote\na=ice-pwd:stats-remote-pwd\na=setup:actpass\na=rtcp-mux\na=sctp-port:5000\na=max-message-size:262144\n" as &[byte];
+    const remote_description_result: !void = peer_connection_set_remote_description(&pc, remote_description);
+    if remote_description_result.error_id != 0 {
+        return 16i32;
+    }
+
+    const candidate_result: !IceCandidate = build_candidate("stats-candidate" as &[byte]);
+    if candidate_result.error_id != 0 {
+        return 17i32;
+    }
+    var candidate: IceCandidate = candidate_result.value;
+    const add_candidate_result: !void = peer_connection_add_ice_candidate(&pc, &candidate);
+    if add_candidate_result.error_id != 0 {
+        return 18i32;
+    }
+
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.negotiated = true;
+    const channel_result: !DataChannel = peer_connection_create_data_channel(
+        &pc,
+        "stats" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if channel_result.error_id != 0 {
+        return 19i32;
+    }
+
+    var stats: RtcPeerConnectionStats = rtc_peer_connection_stats_make();
+    const stats_result: !void = peer_connection_get_stats(&pc, &stats);
+    if stats_result.error_id != 0 {
+        return 20i32;
+    }
+
+    if stats.handle != peer_connection_id(&pc) {
+        return 21i32;
+    }
+    if stats.connection_state != PEER_CONNECTION_CONNECTION_STATE_CONNECTED {
+        return 22i32;
+    }
+    if stats.data_channel_count != 1usize || stats.transceiver_count != 2usize {
+        return 23i32;
+    }
+    if stats.sender_count != 1usize || stats.receiver_count != 1usize {
+        return 24i32;
+    }
+    if stats.packets_sent != 0u64 || stats.packets_received != 0u64 {
+        return 25i32;
+    }
+    if stats.bytes_sent != 0u64 || stats.bytes_received != 0u64 {
+        return 26i32;
+    }
+    if stats.ice_state == 0u8 {
+        return 27i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    const result: i32 = check_peer_connection_get_stats();
+    if result != 0i32 {
+        printf("peer connection get_stats tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("peer connection get_stats tests passed\n");
+    return 0i32;
+}

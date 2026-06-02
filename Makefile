@@ -63,6 +63,7 @@ test: build
 	test -x tests/check_phase15_rtp_sender_pacer.sh
 	test -x tests/check_phase16_stats_types.sh
 	test -x tests/check_phase16_stats_collect.sh
+	test -x tests/check_phase16_get_stats.sh
 	test -x tests/check_phase16_trace_ring.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
@@ -109,6 +110,7 @@ test: build
 	bash tests/check_phase15_rtp_sender_pacer.sh
 	bash tests/check_phase16_stats_types.sh
 	bash tests/check_phase16_stats_collect.sh
+	bash tests/check_phase16_get_stats.sh
 	bash tests/check_phase16_trace_ring.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null

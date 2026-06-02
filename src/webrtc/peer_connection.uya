@@ -6,6 +6,8 @@ use webrtc.errors;
 use webrtc.ice.candidate;
 use webrtc.media.model;
 use webrtc.runtime;
+use webrtc.stats.collect;
+use webrtc.stats.types;
 use webrtc.transceiver;
 
 export const PEER_CONNECTION_STATE_NEW: u8 = 0u8;
@@ -80,6 +82,7 @@ export struct PeerConnection {
     data_channel_event_head: usize = 0usize,
     data_channel_event_count: usize = 0usize,
     data_channel_event_drop_count: u64 = 0u64,
+    data_channel_count: usize = 0usize,
     data_channel_events: [PeerConnectionDataChannelEvent: PEER_CONNECTION_MAX_DATA_CHANNEL_EVENTS] = [],
     local_description: PeerConnectionDescription = PeerConnectionDescription{},
     remote_description: PeerConnectionDescription = PeerConnectionDescription{},
@@ -154,6 +157,22 @@ fn peer_connection_transceiver_clear_slot(transceiver: &Transceiver) void {
     transceiver_reset(transceiver);
 }
 
+fn peer_connection_transceiver_is_sender(transceiver: &Transceiver) bool {
+    if transceiver == null || transceiver_is_stopped(transceiver) {
+        return false;
+    }
+    return transceiver.direction == TRANSCEIVER_DIRECTION_SENDRECV
+        || transceiver.direction == TRANSCEIVER_DIRECTION_SENDONLY;
+}
+
+fn peer_connection_transceiver_is_receiver(transceiver: &Transceiver) bool {
+    if transceiver == null || transceiver_is_stopped(transceiver) {
+        return false;
+    }
+    return transceiver.direction == TRANSCEIVER_DIRECTION_SENDRECV
+        || transceiver.direction == TRANSCEIVER_DIRECTION_RECVONLY;
+}
+
 fn peer_connection_transceivers_reset(pc: &PeerConnection) void {
     if pc == null {
         return;
@@ -206,6 +225,38 @@ fn peer_connection_data_channel_events_reset(pc: &PeerConnection) void {
     pc.data_channel_event_head = 0usize;
     pc.data_channel_event_count = 0usize;
     pc.data_channel_event_drop_count = 0u64;
+}
+
+fn peer_connection_sender_count(pc: &PeerConnection) usize {
+    if pc == null {
+        return 0usize;
+    }
+
+    var count: usize = 0usize;
+    var index: usize = 0usize;
+    while index < pc.transceiver_count {
+        if peer_connection_transceiver_is_sender(&pc.transceivers[index]) {
+            count = count + 1usize;
+        }
+        index = index + 1usize;
+    }
+    return count;
+}
+
+fn peer_connection_receiver_count(pc: &PeerConnection) usize {
+    if pc == null {
+        return 0usize;
+    }
+
+    var count: usize = 0usize;
+    var index: usize = 0usize;
+    while index < pc.transceiver_count {
+        if peer_connection_transceiver_is_receiver(&pc.transceivers[index]) {
+            count = count + 1usize;
+        }
+        index = index + 1usize;
+    }
+    return count;
 }
 
 fn peer_connection_ice_store_remote_candidate(pc: &PeerConnection, candidate: &IceCandidate) !void {
@@ -340,6 +391,7 @@ export fn peer_connection_init(pc: &PeerConnection, runtime: &RtcRuntime, config
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
+    pc.data_channel_count = 0usize;
     peer_connection_clear_descriptions(pc);
     peer_connection_sync_connection_state(pc);
     return;
@@ -370,6 +422,7 @@ export fn peer_connection_new(runtime: &RtcRuntime, config: &RtcConfiguration) !
     peer_connection_ice_reset(&pc);
     peer_connection_transceivers_reset(&pc);
     peer_connection_data_channel_events_reset(&pc);
+    pc.data_channel_count = 0usize;
     peer_connection_clear_descriptions(&pc);
     peer_connection_sync_connection_state(&pc);
     return pc;
@@ -564,6 +617,7 @@ export fn peer_connection_create_data_channel(
 
     var channel: DataChannel = channel_result.value;
     try peer_connection_queue_data_channel_event(pc, &channel);
+    pc.data_channel_count = pc.data_channel_count + 1usize;
     peer_connection_sync_connection_state(pc);
     return channel;
 }
@@ -640,6 +694,34 @@ export fn peer_connection_transceiver_count(pc: &PeerConnection) usize {
     return pc.transceiver_count;
 }
 
+/// Snapshot the PeerConnection stats.
+export fn peer_connection_get_stats(pc: &PeerConnection, out: &RtcPeerConnectionStats) !void {
+    if pc == null || out == null {
+        return error.PeerConnectionInvalidState;
+    }
+
+    const stats_result: !RtcPeerConnectionStats = rtc_peer_connection_stats_collect(
+        pc.id,
+        0u64,
+        pc.connection_state,
+        pc.ice_state,
+        pc.data_channel_count,
+        pc.transceiver_count,
+        peer_connection_sender_count(pc),
+        peer_connection_receiver_count(pc),
+        0u64,
+        0u64,
+        0u64,
+        0u64,
+    );
+    if stats_result.error_id != 0 {
+        return stats_result.error_id;
+    }
+
+    *out = stats_result.value;
+    return;
+}
+
 /// Close the PeerConnection and unregister it from the runtime.
 export fn peer_connection_close(pc: &PeerConnection) bool {
     if pc == null {
@@ -658,6 +740,7 @@ export fn peer_connection_close(pc: &PeerConnection) bool {
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
+    pc.data_channel_count = 0usize;
     peer_connection_clear_descriptions(pc);
     return true;
 }
@@ -688,5 +771,6 @@ export fn peer_connection_reset(pc: &PeerConnection) void {
     peer_connection_ice_reset(pc);
     peer_connection_transceivers_reset(pc);
     peer_connection_data_channel_events_reset(pc);
+    pc.data_channel_count = 0usize;
     peer_connection_clear_descriptions(pc);
 }

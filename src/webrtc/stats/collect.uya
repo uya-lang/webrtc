@@ -228,6 +228,37 @@ export fn rtc_data_channel_stats_collect(
     return stats;
 }
 
+/// Snapshot the top-level PeerConnection state.
+export fn rtc_peer_connection_stats_collect(
+    handle: u64,
+    timestamp_us: u64,
+    connection_state: u8,
+    ice_state: u8,
+    data_channel_count: usize,
+    transceiver_count: usize,
+    sender_count: usize,
+    receiver_count: usize,
+    packets_sent: u64,
+    packets_received: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+) !RtcPeerConnectionStats {
+    var stats: RtcPeerConnectionStats = rtc_peer_connection_stats_make();
+    stats.handle = handle;
+    stats.timestamp_us = timestamp_us;
+    stats.connection_state = connection_state;
+    stats.ice_state = ice_state;
+    stats.data_channel_count = data_channel_count;
+    stats.transceiver_count = transceiver_count;
+    stats.sender_count = sender_count;
+    stats.receiver_count = receiver_count;
+    stats.packets_sent = packets_sent;
+    stats.packets_received = packets_received;
+    stats.bytes_sent = bytes_sent;
+    stats.bytes_received = bytes_received;
+    return stats;
+}
+
 /// Snapshot one negotiated codec.
 export fn rtc_codec_stats_collect(
     codec: &CodecNegotiatedCodec,
