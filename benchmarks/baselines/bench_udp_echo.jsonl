@@ -1,1 +1,1 @@
-{"name":"bench_udp_echo","suite":"phase2","unit":"qps","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_udp_echo","suite":"phase2","unit":"qps","value":149676,"throughput_mb_s":6,"packets_per_s":149676,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0,"vectorized":false}

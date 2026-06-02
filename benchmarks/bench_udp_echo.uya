@@ -1,14 +1,131 @@
+use std.http.server.fill_sockaddr_loopback_16;
 use webrtc.bench;
+use webrtc.net.udp;
+use webrtc.time;
 
-// Phase 2 UDP echo bench 基线占位：后续接到真实 recvmmsg/sendmmsg 与 fallback 路径。
-export fn benchmark_main_emit_udp_echo_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
-        name: "bench_udp_echo",
-        suite: "phase2",
-        unit: "qps",
-        value: 0u64,
+const BENCH_UDP_ECHO_ITERATIONS: u64 = 512u64;
+const BENCH_UDP_ECHO_PAYLOAD_BYTES: usize = 64usize;
+
+fn udp_copy_sockaddr(dst: &[byte], src: &[byte]) void {
+    var index: usize = 0usize;
+    while index < UDP_SOCKADDR_BYTES {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn udp_fill_payload(dst: &[byte]) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = ((0x30usize + index) & 0xffusize) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn benchmark_udp_echo_sample() !BenchmarkSample {
+    var server_config: UdpSocketConfig = UdpSocketConfig{
+        bind_port: 0u16,
+        connect_port: 0u16,
+        nonblocking: false,
+        reuse_port: false,
+    };
+    var client_config: UdpSocketConfig = UdpSocketConfig{
+        bind_port: 0u16,
+        connect_port: 0u16,
+        nonblocking: false,
+        reuse_port: false,
+    };
+
+    var server: UdpSocket = try udp_socket_open(server_config);
+    var client: UdpSocket = try udp_socket_open(client_config);
+
+    var payload: [byte: BENCH_UDP_ECHO_PAYLOAD_BYTES] = [];
+    udp_fill_payload(payload[0:BENCH_UDP_ECHO_PAYLOAD_BYTES]);
+
+    var server_addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    var client_addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    fill_sockaddr_loopback_16(server.local_port, &server_addr[0] as &byte);
+    fill_sockaddr_loopback_16(client.local_port, &client_addr[0] as &byte);
+
+    var to_server: UdpSendSlot = UdpSendSlot{
+        payload: payload[0:BENCH_UDP_ECHO_PAYLOAD_BYTES],
+        payload_len: BENCH_UDP_ECHO_PAYLOAD_BYTES,
+    };
+    udp_copy_sockaddr(to_server.addr[0:UDP_SOCKADDR_BYTES], server_addr[0:UDP_SOCKADDR_BYTES]);
+
+    var to_client: UdpSendSlot = UdpSendSlot{};
+    udp_copy_sockaddr(to_client.addr[0:UDP_SOCKADDR_BYTES], client_addr[0:UDP_SOCKADDR_BYTES]);
+
+    var server_recv: UdpRecvSlot = UdpRecvSlot{};
+    var client_recv: UdpRecvSlot = UdpRecvSlot{};
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_UDP_ECHO_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        to_server.payload_len = BENCH_UDP_ECHO_PAYLOAD_BYTES;
+
+        const client_written: usize = try udp_socket_send_fallback(&client, &to_server);
+        if client_written != BENCH_UDP_ECHO_PAYLOAD_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const server_read: usize = try udp_socket_recv_fallback(&server, &server_recv);
+        if server_read != BENCH_UDP_ECHO_PAYLOAD_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        to_client.payload = server_recv.payload[0:server_read];
+        to_client.payload_len = server_read;
+        const server_written: usize = try udp_socket_send_fallback(&server, &to_client);
+        if server_written != server_read {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const client_read: usize = try udp_socket_recv_fallback(&client, &client_recv);
+        if client_read != server_read {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        if client_recv.payload[0usize] != payload[0usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+
+    udp_socket_close(&client);
+    udp_socket_close(&server);
+
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+    return BenchmarkSample{
+        name: "bench_udp_echo" as &[byte],
+        suite: "phase2" as &[byte],
+        unit: "qps" as &[byte],
+        value: benchmark_packets_per_s(BENCH_UDP_ECHO_ITERATIONS, elapsed_ns),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_UDP_ECHO_PAYLOAD_BYTES as u64) * BENCH_UDP_ECHO_ITERATIONS * 2u64,
+            elapsed_ns,
+        ),
         allocations: 0u64,
         high_watermark: 0u64,
     };
+}
+
+export fn benchmark_main_emit_udp_echo_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_udp_echo_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_udp_echo_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

@@ -22,6 +22,7 @@ test -f src/webrtc/stun/write.uya
 test -f benchmarks/bench_stun_parse.uya
 test -f benchmarks/baselines/bench_stun_parse.jsonl
 test -x tests/stun_vectors.py
+test -x tests/stun_bench_baseline.py
 
 rg -Fq 'test "stun fixtures cover RFC 5769 request and binding responses"' src/webrtc_stun_test.uya
 rg -Fq 'test "stun header parser rejects truncated header and invalid message length"' src/webrtc_stun_test.uya
@@ -79,3 +80,4 @@ rg -Fq "benchmark_main_emit_stun_parse_jsonl" benchmarks/bench_stun_parse.uya
 rg -Fq '"name":"bench_stun_parse"' benchmarks/baselines/bench_stun_parse.jsonl
 
 python3 tests/stun_vectors.py
+python3 tests/stun_bench_baseline.py

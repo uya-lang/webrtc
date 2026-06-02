@@ -121,6 +121,8 @@ test: build
 	bash tests/check_phase16_dump_stats.sh
 	bash tests/check_phase16_trace_ring.sh
 	bash tests/check_phase18_rtp_rtcp_bench.sh
+	bash tests/check_phase18_pacer_bench.sh
+	bash tests/check_phase18_rtp_loopback_bench.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null
@@ -133,30 +135,59 @@ bench: build
 	test -f benchmarks/bench_sdp_parse.uya
 	test -f benchmarks/bench_stun_parse.uya
 	test -f benchmarks/bench_crypto_phase7.uya
+	test -f benchmarks/bench_srtp.uya
+	test -f benchmarks/bench_rtp_rtcp_parse.uya
 	test -f benchmarks/bench_jitter.uya
 	test -f benchmarks/bench_congestion.uya
 	test -f benchmarks/bench_datachannel.uya
 	test -f benchmarks/bench_pacer.uya
+	test -f benchmarks/bench_rtp_loopback.uya
+	test -f benchmarks/baselines/bench_arena_ring.jsonl
+	test -f benchmarks/baselines/bench_udp_echo.jsonl
+	test -f benchmarks/baselines/bench_sdp_parse.jsonl
+	test -f benchmarks/baselines/bench_stun_parse.jsonl
+	test -f benchmarks/baselines/bench_srtp.jsonl
+	test -f benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 	test -f benchmarks/baselines/bench_jitter.jsonl
 	test -f benchmarks/baselines/bench_congestion.jsonl
 	test -f benchmarks/baselines/bench_datachannel.jsonl
 	test -f benchmarks/baselines/bench_pacer.jsonl
+	test -f benchmarks/baselines/bench_rtp_loopback.jsonl
+	test -x tests/arena_ring_bench_baseline.py
+	test -x tests/udp_bench_baseline.py
+	test -x tests/sdp_bench_baseline.py
+	test -x tests/stun_bench_baseline.py
+	test -x tests/srtp_bench_baseline.py
+	test -x tests/rtp_bench_baseline.py
 	test -x tests/check_phase18_pacer_bench.sh
 	test -x $(BENCH_RUNNER)
 	./$(BENCH_RUNNER) $(BENCH_FILE)
+	python3 tests/arena_ring_bench_baseline.py
+	python3 tests/udp_bench_baseline.py
+	python3 tests/sdp_bench_baseline.py
+	python3 tests/stun_bench_baseline.py
+	python3 tests/srtp_bench_baseline.py
+	python3 tests/rtp_bench_baseline.py
 	python3 tests/jitter_bench_baseline.py
 	python3 tests/rtp_loopback_bench_baseline.py
 	python3 tests/congestion_bench_baseline.py
+	python3 tests/datachannel_bench_baseline.py
 	python3 tests/pacer_bench_baseline.py
 	test -s $(BENCH_FILE)
-	rg -q '"name":"placeholder"' $(BENCH_FILE)
 	rg -q '"name":"bench_arena_ring"' $(BENCH_FILE)
+	rg -q '"name":"bench_udp_echo"' $(BENCH_FILE)
 	rg -q '"name":"bench_sdp_parse"' $(BENCH_FILE)
 	rg -q '"name":"bench_stun_parse"' $(BENCH_FILE)
 	rg -q '"name":"bench_hmac_sha1"' $(BENCH_FILE)
 	rg -q '"name":"bench_hmac_sha256"' $(BENCH_FILE)
 	rg -q '"name":"bench_aes_ctr"' $(BENCH_FILE)
 	rg -q '"name":"bench_ghash"' $(BENCH_FILE)
+	rg -q '"name":"bench_srtp_protect"' $(BENCH_FILE)
+	rg -q '"name":"bench_srtp_unprotect"' $(BENCH_FILE)
+	rg -q '"name":"bench_srtp_replay_check"' $(BENCH_FILE)
+	rg -q '"name":"bench_rtp_parse"' $(BENCH_FILE)
+	rg -q '"name":"bench_rtp_extension_parse"' $(BENCH_FILE)
+	rg -q '"name":"bench_rtcp_parse"' $(BENCH_FILE)
 	rg -q '"name":"bench_jitter"' $(BENCH_FILE)
 	rg -q '"name":"bench_rtp_loopback"' $(BENCH_FILE)
 	rg -q '"name":"bench_congestion_bandwidth_drop"' $(BENCH_FILE)
@@ -166,6 +197,7 @@ bench: build
 	rg -q '"name":"bench_congestion_jitter"' $(BENCH_FILE)
 	rg -q '"name":"bench_pacer"' $(BENCH_FILE)
 	rg -q '"name":"bench_retransmission_cache"' $(BENCH_FILE)
+	rg -q '"name":"bench_datachannel"' $(BENCH_FILE)
 
 clean:
 	rm -rf $(BUILD_DIR)

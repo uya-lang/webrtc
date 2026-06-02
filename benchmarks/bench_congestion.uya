@@ -1,57 +1,219 @@
 use webrtc.bench;
+use webrtc.congestion.pacer;
 
-fn benchmark_emit_congestion_row(
-    dst: &[byte],
-    name: &[byte],
-    unit: &[byte],
-) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
-        name: name,
+fn benchmark_congestion_bandwidth_drop_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 2000000u64;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 3usize;
+    feedback.recv_deltas[0usize] = 250i32;
+    feedback.recv_deltas[1usize] = 180i32;
+    feedback.recv_deltas[2usize] = 200i32;
+
+    var elapsed_ms: u64 = 0u64;
+    while estimator.current_bitrate_bps >= 1500000u64 {
+        _ = try pacer_delay_based_estimator_update(&estimator, &feedback, 80000u64);
+        elapsed_ms = elapsed_ms + 20u64;
+        if elapsed_ms > 1000u64 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_bandwidth_drop" as &[byte],
         suite: "phase15" as &[byte],
-        unit: unit,
-        value: 0u64,
+        unit: "ms" as &[byte],
+        value: elapsed_ms,
         allocations: 0u64,
         high_watermark: 0u64,
     };
-    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+fn benchmark_congestion_bandwidth_recovery_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 600000u64;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 3usize;
+    feedback.recv_deltas[0usize] = -50i32;
+    feedback.recv_deltas[1usize] = -25i32;
+    feedback.recv_deltas[2usize] = -10i32;
+
+    var elapsed_ms: u64 = 0u64;
+    while estimator.current_bitrate_bps < 1000000u64 {
+        _ = try pacer_delay_based_estimator_update(&estimator, &feedback, 20000u64);
+        elapsed_ms = elapsed_ms + 20u64;
+        if elapsed_ms > 2000u64 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_bandwidth_recovery" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: elapsed_ms,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_congestion_queue_delay_sample() !BenchmarkSample {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 16usize;
+    queue.config.max_bytes = 64000usize;
+
+    var index: usize = 0usize;
+    while index < 8usize {
+        const send_at_us: u64 = ((index as u64) + 1u64) * 5000u64;
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1200usize,
+            enqueue_time_us: 0u64,
+            ready_at_us: send_at_us,
+            priority: PACER_PRIORITY_VIDEO,
+        };
+        try pacer_queue_push(&queue, &packet);
+        _ = try pacer_queue_pop_ready_packet(&queue, send_at_us);
+        index = index + 1usize;
+    }
+
+    const p95_us: u64 = pacer_queue_p95_delay_us(&queue);
+    return BenchmarkSample{
+        name: "bench_congestion_queue_delay" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: if p95_us == 0u64 { 1u64 } else { p95_us / 1000u64 },
+        allocations: 0u64,
+        high_watermark: queue.high_watermark,
+    };
+}
+
+fn benchmark_congestion_loss_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 2000000u64;
+
+    var fallback: PacerLossBasedFallback = pacer_loss_based_fallback_make();
+    fallback.loss_threshold_percent = 5u8;
+    fallback.decrease_percent = 80u8;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.packet_status_count = 20usize;
+    feedback.missing_count = 3usize;
+    feedback.received_count = 17usize;
+
+    _ = try pacer_loss_based_fallback_apply(&fallback, &estimator, &feedback);
+
+    return BenchmarkSample{
+        name: "bench_congestion_loss" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "pct" as &[byte],
+        value: ((feedback.missing_count as u64) * 100u64) / (feedback.packet_status_count as u64),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_congestion_jitter_sample() !BenchmarkSample {
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 5usize;
+    feedback.recv_deltas[0usize] = 1000i32;
+    feedback.recv_deltas[1usize] = 2000i32;
+    feedback.recv_deltas[2usize] = 1500i32;
+    feedback.recv_deltas[3usize] = 2800i32;
+    feedback.recv_deltas[4usize] = 1900i32;
+
+    var min_delta: i32 = feedback.recv_deltas[0usize];
+    var max_delta: i32 = feedback.recv_deltas[0usize];
+    var index: usize = 1usize;
+    while index < feedback.delta_count {
+        const delta: i32 = feedback.recv_deltas[index];
+        if delta < min_delta {
+            min_delta = delta;
+        }
+        if delta > max_delta {
+            max_delta = delta;
+        }
+        index = index + 1usize;
+    }
+
+    var jitter_us: u64 = (max_delta - min_delta) as u64;
+    if jitter_us == 0u64 {
+        jitter_us = 1000u64;
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_jitter" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: jitter_us / 1000u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
 }
 
 export fn benchmark_main_emit_congestion_bandwidth_drop_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_congestion_row(
-        dst,
-        "bench_congestion_bandwidth_drop" as &[byte],
-        "ms" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_congestion_bandwidth_drop_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_congestion_bandwidth_recovery_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_congestion_row(
-        dst,
-        "bench_congestion_bandwidth_recovery" as &[byte],
-        "ms" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_congestion_bandwidth_recovery_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_congestion_queue_delay_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_congestion_row(
-        dst,
-        "bench_congestion_queue_delay" as &[byte],
-        "ms" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_congestion_queue_delay_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_congestion_loss_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_congestion_row(
-        dst,
-        "bench_congestion_loss" as &[byte],
-        "pct" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_congestion_loss_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_congestion_jitter_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_congestion_row(
-        dst,
-        "bench_congestion_jitter" as &[byte],
-        "ms" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_congestion_jitter_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var sample: BenchmarkSample = benchmark_congestion_bandwidth_drop_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_bandwidth_recovery_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_queue_delay_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_loss_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_jitter_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

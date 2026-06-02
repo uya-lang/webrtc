@@ -1,14 +1,59 @@
 use webrtc.bench;
+use webrtc.congestion.pacer;
+use webrtc.time;
 
-// Phase 15 pacer queue benchmark baseline placeholder.
-export fn benchmark_main_emit_pacer_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
+const BENCH_PACER_ITERATIONS: u64 = 4096u64;
+
+fn benchmark_pacer_sample() !BenchmarkSample {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 16usize;
+    queue.config.max_bytes = 64000usize;
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_PACER_ITERATIONS {
+        const send_at_us: u64 = iteration * 100u64;
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1200usize,
+            enqueue_time_us: send_at_us,
+            ready_at_us: send_at_us,
+            priority: PACER_PRIORITY_VIDEO,
+        };
+        try pacer_queue_push(&queue, &packet);
+        const popped: PacerPacket = try pacer_queue_pop_ready_packet(&queue, send_at_us);
+        if popped.size_bytes != 1200usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
         name: "bench_pacer" as &[byte],
         suite: "phase15" as &[byte],
         unit: "ns/op" as &[byte],
-        value: 0u64,
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_PACER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_PACER_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: queue.high_watermark,
     };
+}
+
+export fn benchmark_main_emit_pacer_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_pacer_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_pacer_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

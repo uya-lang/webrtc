@@ -9,6 +9,8 @@ test -f src/webrtc_net_worker_test.uya
 test -f src/webrtc/net/udp.uya
 test -f src/webrtc/net/worker.uya
 test -x tests/udp_loopback_echo.py
+test -f benchmarks/baselines/bench_udp_echo.jsonl
+test -x tests/udp_bench_baseline.py
 
 rg -q 'test "udp socket config enables bind connect optional and nonblocking"' src/webrtc_net_udp_test.uya
 rg -q 'test "udp batch io exposes recvmmsg sendmmsg and fallback entrypoints"' src/webrtc_net_udp_test.uya
@@ -49,3 +51,4 @@ rg -q "transport_worker_run_once" src/webrtc/net/worker.uya
 rg -q "RingQueue" src/webrtc/net/worker.uya
 
 python3 tests/udp_loopback_echo.py
+python3 tests/udp_bench_baseline.py

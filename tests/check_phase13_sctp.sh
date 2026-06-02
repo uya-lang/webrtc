@@ -27,6 +27,9 @@ test -f src/webrtc_sctp_stream_test_main.uya
 test -f src/webrtc/api.uya
 test -f src/webrtc_sctp_api_test_main.uya
 test -f src/webrtc_sctp_loopback_test_main.uya
+test -f benchmarks/bench_datachannel.uya
+test -f benchmarks/baselines/bench_datachannel.jsonl
+test -x tests/datachannel_bench_baseline.py
 
 rg -q "export struct SctpPacket" src/webrtc/sctp/packet.uya
 rg -q "export fn sctp_packet_parse" src/webrtc/sctp/packet.uya
@@ -147,5 +150,6 @@ PY
 ../uya/bin/uya run src/webrtc_sctp_stream_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_api_test_main.uya
 ../uya/bin/uya run src/webrtc_sctp_loopback_test_main.uya
+python3 tests/datachannel_bench_baseline.py
 
 echo "Phase 13 SCTP parser checks passed"

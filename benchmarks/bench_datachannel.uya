@@ -1,14 +1,93 @@
+use webrtc.api;
 use webrtc.bench;
+use webrtc.time;
 
-// Phase 13 DataChannel benchmark baseline placeholder.
-export fn benchmark_main_emit_datachannel_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
+const BENCH_DATACHANNEL_ITERATIONS: u64 = 2048u64;
+const BENCH_DATACHANNEL_MESSAGE_BYTES: usize = 1024usize;
+
+fn bench_fill_datachannel_payload(dst: &[byte]) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = ((0x40usize + index) & 0xffusize) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn benchmark_datachannel_sample() !BenchmarkSample {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.negotiated = true;
+
+    var channel: DataChannel = try data_channel_make(
+        "bench" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if !data_channel_open(&channel) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var payload: [byte: BENCH_DATACHANNEL_MESSAGE_BYTES] = [];
+    bench_fill_datachannel_payload(payload[0:BENCH_DATACHANNEL_MESSAGE_BYTES]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_DATACHANNEL_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        try data_channel_send(&channel, payload[0:BENCH_DATACHANNEL_MESSAGE_BYTES]);
+        if !data_channel_has_outgoing_message(&channel) {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const outgoing: DataChannelMessage = data_channel_pop_outgoing_message(&channel);
+        try data_channel_deliver_message(&channel, outgoing.payload[0:outgoing.payload_len]);
+        if !data_channel_has_received_message(&channel) {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const incoming: DataChannelMessage = data_channel_pop_received_message(&channel);
+        if incoming.payload_len != BENCH_DATACHANNEL_MESSAGE_BYTES || incoming.payload[0usize] != payload[0usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = channel.buffered_amount_high_watermark as u64;
+    if channel.incoming_budget.high_watermark_bytes as u64 > high_watermark {
+        high_watermark = channel.incoming_budget.high_watermark_bytes as u64;
+    }
+
+    return BenchmarkSample{
         name: "bench_datachannel" as &[byte],
         suite: "phase13" as &[byte],
         unit: "ns/op" as &[byte],
-        value: 0u64,
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_DATACHANNEL_ITERATIONS),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_DATACHANNEL_MESSAGE_BYTES as u64) * BENCH_DATACHANNEL_ITERATIONS,
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_DATACHANNEL_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: high_watermark,
+        vectorized: false,
     };
+}
+
+export fn benchmark_main_emit_datachannel_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_datachannel_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_datachannel_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

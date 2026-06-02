@@ -1,27 +1,188 @@
+use webrtc.arena;
 use webrtc.bench;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+use webrtc.time;
 
-/// Emit the phase-12 jitter benchmark JSONL row.
-export fn benchmark_main_emit_jitter_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
+const BENCH_JITTER_ITERATIONS: u64 = 1024u64;
+const BENCH_JITTER_PACKET_BYTES: usize = 64usize;
+const BENCH_JITTER_PAYLOAD_BYTES: usize = 20usize;
+
+fn bench_make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = 96u8;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn benchmark_jitter_sample() !BenchmarkSample {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = 16usize;
+    buffer.config.max_missing = 16usize;
+    buffer.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    buffer.config.nack_initial_backoff_us = 2000u64;
+    buffer.config.nack_max_backoff_us = 8000u64;
+
+    var payload_a: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var payload_b: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var payload_c: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var index: usize = 0usize;
+    while index < BENCH_JITTER_PAYLOAD_BYTES {
+        payload_a[index] = (0xA0usize + index) as byte;
+        payload_b[index] = (0xB0usize + index) as byte;
+        payload_c[index] = (0xC0usize + index) as byte;
+        index = index + 1usize;
+    }
+
+    var packet_a: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    var packet_b: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    var packet_c: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    const packet_a_len: usize = try bench_make_rtp_packet_bytes(100u16, 9000u32, 0x11223344u32, false, payload_a[0:BENCH_JITTER_PAYLOAD_BYTES], packet_a[0:BENCH_JITTER_PACKET_BYTES]);
+    const packet_b_len: usize = try bench_make_rtp_packet_bytes(101u16, 9000u32, 0x11223344u32, false, payload_b[0:BENCH_JITTER_PAYLOAD_BYTES], packet_b[0:BENCH_JITTER_PACKET_BYTES]);
+    const packet_c_len: usize = try bench_make_rtp_packet_bytes(102u16, 9000u32, 0x11223344u32, true, payload_c[0:BENCH_JITTER_PAYLOAD_BYTES], packet_c[0:BENCH_JITTER_PACKET_BYTES]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_JITTER_ITERATIONS {
+        rtp_jitter_buffer_reset(&buffer);
+
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_a[0:packet_a_len], 1000u64);
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_c[0:packet_c_len], 2000u64);
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_b[0:packet_b_len], 3000u64);
+
+        const first: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        const second: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        const third: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        if first.header.sequence_number != 100u16
+            || second.header.sequence_number != 101u16
+            || third.header.sequence_number != 102u16 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
         name: "bench_jitter" as &[byte],
         suite: "phase12" as &[byte],
         unit: "ns/op" as &[byte],
-        value: 0u64,
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_JITTER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_JITTER_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: buffer.packet_high_watermark as u64,
     };
-    return benchmark_jsonl_write_line(dst, &sample);
 }
 
-/// Emit the phase-12 retransmission cache benchmark JSONL row.
-export fn benchmark_main_emit_retransmission_cache_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
+fn benchmark_retransmission_cache_sample() !BenchmarkSample {
+    var src_arena: PacketArena = packet_arena_make();
+    var owner_arena: PacketArena = packet_arena_make();
+    try packet_arena_init(&src_arena, 10u32, 8usize, BENCH_JITTER_PACKET_BYTES);
+    try packet_arena_init(&owner_arena, 11u32, 8usize, BENCH_JITTER_PACKET_BYTES);
+
+    var cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    cache.max_entries = 8usize;
+
+    var budget: PacketCloneBudget = packet_clone_budget_make();
+    packet_clone_budget_init(&budget, 8192u64, 8u64);
+
+    var payload: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var packet_bytes: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    var index: usize = 0usize;
+    while index < BENCH_JITTER_PAYLOAD_BYTES {
+        payload[index] = (0x55usize + index) as byte;
+        index = index + 1usize;
+    }
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_JITTER_ITERATIONS {
+        packet_arena_reset(&src_arena);
+        packet_arena_reset(&owner_arena);
+        packet_clone_budget_init(&budget, 8192u64, 8u64);
+        rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+
+        const sequence_number: u16 = (1000u64 + iteration) as u16;
+        const packet_len: usize = try bench_make_rtp_packet_bytes(
+            sequence_number,
+            18000u32,
+            0x55667788u32,
+            false,
+            payload[0:BENCH_JITTER_PAYLOAD_BYTES],
+            packet_bytes[0:BENCH_JITTER_PACKET_BYTES],
+        );
+        const packet: PacketRef = try packet_arena_alloc(
+            &src_arena,
+            packet_bytes[0:packet_len],
+            iteration,
+            3u32,
+            1u16,
+            0u16,
+        );
+        _ = try rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &packet, &budget, iteration);
+        const cached: PacketRef = try rtp_retransmission_cache_lookup(&cache, 0x55667788u32, sequence_number);
+        if cached.len == 0u16 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = cache.high_watermark as u64;
+    if budget.high_watermark > high_watermark {
+        high_watermark = budget.high_watermark;
+    }
+
+    rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+
+    return BenchmarkSample{
         name: "bench_retransmission_cache" as &[byte],
         suite: "phase12" as &[byte],
         unit: "ns/op" as &[byte],
-        value: 0u64,
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_JITTER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_JITTER_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: high_watermark,
     };
+}
+
+export fn benchmark_main_emit_jitter_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_jitter_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export fn benchmark_main_emit_retransmission_cache_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_retransmission_cache_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var sample: BenchmarkSample = benchmark_jitter_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_retransmission_cache_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

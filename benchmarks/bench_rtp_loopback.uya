@@ -1,14 +1,118 @@
 use webrtc.bench;
+use webrtc.media.model;
+use webrtc.receiver;
+use webrtc.sender;
+use webrtc.time;
+use webrtc.track;
 
-// Phase 18 RTP loopback benchmark baseline placeholder.
-export fn benchmark_main_emit_rtp_loopback_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
+const BENCH_RTP_LOOPBACK_ITERATIONS: u64 = 2048u64;
+const BENCH_RTP_LOOPBACK_PAYLOAD_BYTES: usize = 1200usize;
+
+fn route_sender_to_track(sender_state: &Sender, track_state: &Track) !void {
+    while sender_has_pending_frame(sender_state) {
+        const pending: EncodedFrame = sender_pop_pending_frame(sender_state);
+        try track_write_encoded_frame(track_state, &pending);
+    }
+    return;
+}
+
+fn route_track_to_receiver(track_state: &Track, receiver_state: &Receiver) !void {
+    while track_has_pending_frame(track_state) {
+        const pending: EncodedFrame = track_pop_pending_frame(track_state);
+        try receiver_deliver_encoded_frame(receiver_state, &pending);
+    }
+    return;
+}
+
+fn benchmark_rtp_loopback_sample() !BenchmarkSample {
+    var sender_state: Sender = sender_make();
+    try sender_init(&sender_state, 1u64, MEDIA_KIND_VIDEO);
+    if !sender_open(&sender_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var track_state: Track = track_make();
+    try track_init(&track_state, 2u64, MEDIA_KIND_VIDEO);
+    if !track_open(&track_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var receiver_state: Receiver = receiver_make();
+    try receiver_init(&receiver_state, 3u64, MEDIA_KIND_VIDEO);
+    if !receiver_open(&receiver_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var payload: [byte: BENCH_RTP_LOOPBACK_PAYLOAD_BYTES] = [];
+    var index: usize = 0usize;
+    while index < BENCH_RTP_LOOPBACK_PAYLOAD_BYTES {
+        payload[index] = ((index * 5usize) & 0xffusize) as byte;
+        index = index + 1usize;
+    }
+
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.duration_us = 33333u32;
+    frame.payload = payload[0:BENCH_RTP_LOOPBACK_PAYLOAD_BYTES];
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_LOOPBACK_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        frame.sequence_id = iteration;
+        frame.timestamp = 90000u64 + (iteration * 3000u64);
+        try sender_send_encoded_frame(&sender_state, &frame);
+        try route_sender_to_track(&sender_state, &track_state);
+        try route_track_to_receiver(&track_state, &receiver_state);
+
+        var received: EncodedFrame = encoded_frame_make();
+        const has_frame: bool = try receiver_read_encoded_frame(&receiver_state, &received);
+        if !has_frame || received.payload.len != BENCH_RTP_LOOPBACK_PAYLOAD_BYTES || received.payload[0usize] != payload[0usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = sender_high_watermark(&sender_state) as u64;
+    if track_high_watermark(&track_state) as u64 > high_watermark {
+        high_watermark = track_high_watermark(&track_state) as u64;
+    }
+    if receiver_high_watermark(&receiver_state) as u64 > high_watermark {
+        high_watermark = receiver_high_watermark(&receiver_state) as u64;
+    }
+
+    return BenchmarkSample{
         name: "bench_rtp_loopback" as &[byte],
         suite: "phase18" as &[byte],
         unit: "ns/op" as &[byte],
-        value: 0u64,
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_LOOPBACK_ITERATIONS),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_RTP_LOOPBACK_PAYLOAD_BYTES as u64) * BENCH_RTP_LOOPBACK_ITERATIONS,
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_LOOPBACK_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: high_watermark,
     };
+}
+
+export fn benchmark_main_emit_rtp_loopback_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_rtp_loopback_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_rtp_loopback_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

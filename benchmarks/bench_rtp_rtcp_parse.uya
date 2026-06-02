@@ -1,41 +1,179 @@
 use webrtc.bench;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.rtp_packet;
+use webrtc.time;
 
-fn benchmark_emit_rtp_rtcp_parser_row(
-    dst: &[byte],
-    name: &[byte],
-    unit: &[byte],
-) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
-        name: name,
+const BENCH_RTP_PARSE_ITERATIONS: u64 = 4096u64;
+const BENCH_RTP_PAYLOAD_BYTES: usize = 48usize;
+
+fn bench_fill_rtp_payload(dst: &[byte], seed: byte) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = seed + (index as byte);
+        index = index + 1usize;
+    }
+}
+
+fn bench_make_rtp_packet(out: &[byte]) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = 100u16;
+    header.timestamp = 9000u32;
+    header.ssrc = 0x11223344u32;
+    header.payload_type = 96u8;
+    header.marker = true;
+
+    var payload: [byte: BENCH_RTP_PAYLOAD_BYTES] = [];
+    bench_fill_rtp_payload(payload[0:BENCH_RTP_PAYLOAD_BYTES], 0x11 as byte);
+    return rtp_packet_write(&header, payload[0:BENCH_RTP_PAYLOAD_BYTES], out);
+}
+
+fn bench_make_rtp_extension_packet(out: &[byte]) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = 101u16;
+    header.timestamp = 12000u32;
+    header.ssrc = 0x55667788u32;
+    header.payload_type = 97u8;
+    header.extension = true;
+    header.extension_profile = 0xBEDEu16;
+
+    var extension_data: [byte: 4] = [0x10 as byte, 0xAA as byte, 0x00 as byte, 0x00 as byte];
+    var payload: [byte: BENCH_RTP_PAYLOAD_BYTES] = [];
+    bench_fill_rtp_payload(payload[0:BENCH_RTP_PAYLOAD_BYTES], 0x33 as byte);
+    header.extension_data = extension_data[0:4];
+    return rtp_packet_write(&header, payload[0:BENCH_RTP_PAYLOAD_BYTES], out);
+}
+
+fn bench_make_rtcp_packet(out: &[byte]) !usize {
+    var report: RtcpReceiverReport = rtcp_receiver_report_make();
+    report.sender_ssrc = 0xABCD1234u32;
+    report.report_count = 1u8;
+    report.report_blocks[0usize].ssrc = 0x01020304u32;
+    report.report_blocks[0usize].highest_seq = 77u32;
+    report.report_blocks[0usize].jitter = 90u32;
+    report.report_blocks[0usize].lsr = 1234u32;
+    report.report_blocks[0usize].dlsr = 5678u32;
+    return rtcp_receiver_report_write(&report, out);
+}
+
+fn benchmark_rtp_parse_sample() !BenchmarkSample {
+    var packet: [byte: 128] = [];
+    const packet_len: usize = try bench_make_rtp_packet(packet[0:128]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtpPacket = try rtp_packet_parse(packet[0:packet_len]);
+        if parsed.header.sequence_number != 100u16 || parsed.header.payload.len != BENCH_RTP_PAYLOAD_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtp_parse" as &[byte],
         suite: "phase10" as &[byte],
-        unit: unit,
-        value: 0u64,
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
         allocations: 0u64,
         high_watermark: 0u64,
     };
-    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+fn benchmark_rtp_extension_parse_sample() !BenchmarkSample {
+    var packet: [byte: 160] = [];
+    const packet_len: usize = try bench_make_rtp_extension_packet(packet[0:160]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtpPacket = try rtp_packet_parse(packet[0:packet_len]);
+        if !parsed.header.extension || parsed.header.extension_data.len != 4usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtp_extension_parse" as &[byte],
+        suite: "phase10" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_rtcp_parse_sample() !BenchmarkSample {
+    var packet: [byte: 96] = [];
+    const packet_len: usize = try bench_make_rtcp_packet(packet[0:96]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtcpReceiverReport = try rtcp_receiver_report_parse(packet[0:packet_len]);
+        if parsed.report_count != 1u8 || parsed.report_blocks[0usize].jitter != 90u32 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtcp_parse" as &[byte],
+        suite: "phase10" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
 }
 
 export fn benchmark_main_emit_rtp_parse_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_rtp_rtcp_parser_row(
-        dst,
-        "bench_rtp_parse" as &[byte],
-        "ns/packet" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_rtp_parse_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_rtp_extension_parse_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_rtp_rtcp_parser_row(
-        dst,
-        "bench_rtp_extension_parse" as &[byte],
-        "ns/packet" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_rtp_extension_parse_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
 }
 
 export fn benchmark_main_emit_rtcp_parse_jsonl(dst: &[byte]) !usize {
-    return benchmark_emit_rtp_rtcp_parser_row(
-        dst,
-        "bench_rtcp_parse" as &[byte],
-        "ns/packet" as &[byte],
-    );
+    const sample: BenchmarkSample = try benchmark_rtcp_parse_sample();
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var sample: BenchmarkSample = benchmark_rtp_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtp_extension_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtcp_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

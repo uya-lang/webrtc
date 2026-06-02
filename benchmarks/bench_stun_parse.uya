@@ -1,14 +1,97 @@
 use webrtc.bench;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+use webrtc.time;
 
-// Phase 4 STUN parser baseline 占位：后续接入真实 ns/packet 和 allocation count。
-export fn benchmark_main_emit_stun_parse_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
-        name: "bench_stun_parse",
-        suite: "phase4",
-        unit: "ns/packet",
-        value: 0u64,
+const BENCH_STUN_PARSE_ITERATIONS: u64 = 2048u64;
+
+fn bench_fill_transaction_id(dst: &[byte]) void {
+    var index: usize = 0usize;
+    while index < STUN_TRANSACTION_ID_BYTES {
+        dst[index] = (0x10usize + index) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn benchmark_stun_parse_sample() !BenchmarkSample {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    bench_fill_transaction_id(txid[0:STUN_TRANSACTION_ID_BYTES]);
+
+    var packet: [byte: 192] = [];
+    var builder: StunMessageBuilder = StunMessageBuilder{};
+    try stun_builder_init_binding_request(&builder, packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_username(&builder, "bench-user" as &[byte]);
+    try stun_builder_append_priority(&builder, 0x6E0001FFu32);
+    try stun_builder_append_use_candidate(&builder);
+    try stun_builder_append_ice_controlling(&builder, 0x0102030405060708u64);
+    try stun_builder_append_message_integrity(&builder, "bench-secret" as &[byte]);
+    try stun_builder_append_fingerprint(&builder);
+    const packet_len: usize = try stun_builder_finish(&builder);
+    const attr_bytes_len: usize = packet_len - STUN_HEADER_BYTES;
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    var attr_count: u64 = 0u64;
+    while iteration < BENCH_STUN_PARSE_ITERATIONS {
+        const header: StunMessageHeader = try stun_header_parse(packet[0:packet_len]);
+        if header.method != STUN_METHOD_BINDING || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        var iter: StunAttributeIterator = StunAttributeIterator{};
+        stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:attr_bytes_len]);
+        var seen_mask: u32 = 0u32;
+        var count: u64 = 0u64;
+        while iter.cursor < iter.bytes.len {
+            const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+            seen_mask = try stun_binding_request_validate_attribute(&attr, seen_mask);
+            if attr.attr_type == STUN_ATTRIBUTE_USERNAME {
+                _ = try stun_parse_username(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_PRIORITY {
+                _ = try stun_parse_priority(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_USE_CANDIDATE {
+                try stun_parse_use_candidate(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_ICE_CONTROLLING {
+                _ = try stun_parse_ice_role_tiebreaker(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+                _ = try stun_parse_message_integrity(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+                _ = try stun_parse_fingerprint(attr.value);
+            }
+            count = count + 1u64;
+        }
+        attr_count = count;
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_stun_parse" as &[byte],
+        suite: "phase4" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_STUN_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_STUN_PARSE_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: attr_count,
     };
+}
+
+export fn benchmark_main_emit_stun_parse_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_stun_parse_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_stun_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

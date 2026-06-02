@@ -1,1 +1,1 @@
-{"name":"bench_stun_parse","suite":"phase4","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_stun_parse","suite":"phase4","unit":"ns/packet","value":421,"throughput_mb_s":0,"packets_per_s":2370957,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":6,"vectorized":false}

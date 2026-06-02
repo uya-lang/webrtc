@@ -215,7 +215,7 @@ export fn udp_socket_recv_fallback(socket: &UdpSocket, slot: &UdpRecvSlot) !usiz
 export fn udp_socket_send_fallback(socket: &UdpSocket, slot: &UdpSendSlot) !usize {
     try udp_socket_validate(socket);
     if slot.payload.len == 0 {
-        return 0;
+        return 0usize;
     }
 
     const addr_len: u32 = if slot.addr_len == 0u32 { UDP_SOCKADDR_BYTES as u32 } else { slot.addr_len };
@@ -228,7 +228,7 @@ export fn udp_socket_recvmmsg(socket: &UdpSocket, slots: &UdpRecvSlot, slot_coun
     try udp_socket_validate(socket);
     const batch_len: usize = try udp_batch_validate(slot_count);
 
-    var result: UdpIoBatchResult = UdpIoBatchResult{};
+    var batch_result: UdpIoBatchResult = UdpIoBatchResult{};
     var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
     var i: usize = 0;
     while i < batch_len {
@@ -243,30 +243,33 @@ export fn udp_socket_recvmmsg(socket: &UdpSocket, slots: &UdpRecvSlot, slot_coun
     const recv_result: !i32 = sys_udp_recvmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
     if recv_result.error_id != 0 {
         const fallback_len: usize = try udp_socket_recv_fallback(socket, &slots[0]);
-        result.packet_count = if fallback_len > 0 { 1 } else { 0 };
-        result.used_fallback = true;
-        return result;
+        batch_result.packet_count = if fallback_len > 0usize { 1usize } else { 0usize };
+        batch_result.used_fallback = true;
+        return batch_result;
     }
 
-    const recv_count: usize = recv_result as usize;
-    result.packet_count = recv_count;
+    const recv_count: usize = recv_result.value as usize;
+    batch_result.packet_count = recv_count;
     i = 0;
     while i < recv_count {
         slots[i].payload_len = msgs[i].len as usize;
         i = i + 1;
     }
-    return result;
+    return batch_result;
 }
 
 export fn udp_socket_sendmmsg(socket: &UdpSocket, slots: &UdpSendSlot, slot_count: usize) !UdpIoBatchResult {
     try udp_socket_validate(socket);
     const batch_len: usize = try udp_batch_validate(slot_count);
 
-    var result: UdpIoBatchResult = UdpIoBatchResult{};
+    var batch_result: UdpIoBatchResult = UdpIoBatchResult{};
     var msgs: [UdpMMsgHdr: UDP_IO_BATCH_MAX] = [];
     var i: usize = 0;
     while i < batch_len {
-        const send_len: usize = if slots[i].payload_len == 0 { slots[i].payload.len } else { slots[i].payload_len };
+        var send_len: usize = slots[i].payload_len;
+        if send_len == 0usize {
+            send_len = slots[i].payload.len;
+        }
         msgs[i].msg = UdpMsgHdr{
             name: slots[i].addr[0:UDP_SOCKADDR_BYTES],
             payload: slots[i].payload[0:send_len],
@@ -278,15 +281,15 @@ export fn udp_socket_sendmmsg(socket: &UdpSocket, slots: &UdpSendSlot, slot_coun
     const send_result: !i32 = sys_udp_sendmmsg(socket.fd, &msgs[0], batch_len as u32, 0u32);
     if send_result.error_id != 0 {
         const fallback_len: usize = try udp_socket_send_fallback(socket, &slots[0]);
-        result.packet_count = if fallback_len > 0 { 1 } else { 0 };
-        result.used_fallback = true;
-        return result;
+        batch_result.packet_count = if fallback_len > 0usize { 1usize } else { 0usize };
+        batch_result.used_fallback = true;
+        return batch_result;
     }
 
-    const send_count: usize = send_result as usize;
-    result.packet_count = send_count;
+    const send_count: usize = send_result.value as usize;
+    batch_result.packet_count = send_count;
     if send_count < batch_len {
-        result.short_writes = 1u64;
+        batch_result.short_writes = 1u64;
     }
-    return result;
+    return batch_result;
 }

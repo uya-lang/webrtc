@@ -1,2 +1,2 @@
-{"name":"bench_jitter","suite":"phase12","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
-{"name":"bench_retransmission_cache","suite":"phase12","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_jitter","suite":"phase12","unit":"ns/op","value":2600,"throughput_mb_s":0,"packets_per_s":384503,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":3,"vectorized":false}
+{"name":"bench_retransmission_cache","suite":"phase12","unit":"ns/op","value":1337,"throughput_mb_s":0,"packets_per_s":747447,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":1,"vectorized":false}

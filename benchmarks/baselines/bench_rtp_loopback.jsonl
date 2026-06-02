@@ -1,1 +1,1 @@
-{"name":"bench_rtp_loopback","suite":"phase18","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_rtp_loopback","suite":"phase18","unit":"ns/op","value":3515,"throughput_mb_s":341,"packets_per_s":284439,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":1,"vectorized":false}

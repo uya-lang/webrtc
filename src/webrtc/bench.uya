@@ -1,7 +1,10 @@
 // webrtc.bench - benchmark JSON lines 输出 helper
 // 模块路径：src/webrtc/bench.uya → use webrtc.bench;
 
-export const BENCHMARK_JSONL_MAX_LINE_BYTES: usize = 256;
+use libc.syscall;
+use webrtc.time;
+
+export const BENCHMARK_JSONL_MAX_LINE_BYTES: usize = 384usize;
 
 export error BenchmarkLineBufferTooSmall;
 
@@ -11,16 +14,19 @@ export struct BenchmarkSample {
     unit: &[byte] = [],
     value: u64 = 0u64,
     throughput_mb_s: u64 = 0u64,
+    packets_per_s: u64 = 0u64,
+    p95_ns: u64 = 0u64,
+    p99_ns: u64 = 0u64,
     allocations: u64 = 0u64,
     high_watermark: u64 = 0u64,
     vectorized: bool = false,
 }
 
 fn benchmark_copy_bytes(dst: &byte, cursor: usize, src: &[byte]) usize {
-    var i: usize = 0;
+    var i: usize = 0usize;
     while i < src.len {
         dst[cursor + i] = src[i];
-        i = i + 1;
+        i = i + 1usize;
     }
     return cursor + src.len;
 }
@@ -28,12 +34,12 @@ fn benchmark_copy_bytes(dst: &byte, cursor: usize, src: &[byte]) usize {
 fn benchmark_write_ascii_u64(dst: &byte, cursor: usize, value: u64) usize {
     if value < 10u64 {
         dst[cursor] = (48u64 + value) as byte;
-        return cursor + 1;
+        return cursor + 1usize;
     }
 
     const next: usize = benchmark_write_ascii_u64(dst, cursor, value / 10u64);
     dst[next] = (48u64 + (value % 10u64)) as byte;
-    return next + 1;
+    return next + 1usize;
 }
 
 export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !usize {
@@ -41,7 +47,7 @@ export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !us
         return error.BenchmarkLineBufferTooSmall;
     }
 
-    var cursor: usize = 0;
+    var cursor: usize = 0usize;
     cursor = benchmark_copy_bytes(&dst[0], cursor, "{\"name\":\"" as &[byte]);
     cursor = benchmark_copy_bytes(&dst[0], cursor, sample.name);
     cursor = benchmark_copy_bytes(&dst[0], cursor, "\",\"suite\":\"" as &[byte]);
@@ -52,6 +58,12 @@ export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !us
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.value);
     cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"throughput_mb_s\":" as &[byte]);
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.throughput_mb_s);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"packets_per_s\":" as &[byte]);
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.packets_per_s);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"p95_ns\":" as &[byte]);
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.p95_ns);
+    cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"p99_ns\":" as &[byte]);
+    cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.p99_ns);
     cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"allocations\":" as &[byte]);
     cursor = benchmark_write_ascii_u64(&dst[0], cursor, sample.allocations);
     cursor = benchmark_copy_bytes(&dst[0], cursor, ",\"high_watermark\":" as &[byte]);
@@ -64,4 +76,80 @@ export fn benchmark_jsonl_write_line(dst: &[byte], sample: &BenchmarkSample) !us
     }
     cursor = benchmark_copy_bytes(&dst[0], cursor, "}\n" as &[byte]);
     return cursor;
+}
+
+export fn benchmark_nonzero_elapsed_ns(start_ns: u64, end_ns: u64) u64 {
+    if end_ns <= start_ns {
+        return 1u64;
+    }
+    return end_ns - start_ns;
+}
+
+export fn benchmark_ns_per_op(elapsed_ns: u64, iterations: u64) u64 {
+    if iterations == 0u64 {
+        return 0u64;
+    }
+    return elapsed_ns / iterations;
+}
+
+export fn benchmark_packets_per_s(iterations: u64, elapsed_ns: u64) u64 {
+    if iterations == 0u64 || elapsed_ns == 0u64 {
+        return 0u64;
+    }
+    return (iterations * NSEC_PER_SEC) / elapsed_ns;
+}
+
+export fn benchmark_throughput_mb_s(total_bytes: u64, elapsed_ns: u64) u64 {
+    if total_bytes == 0u64 || elapsed_ns == 0u64 {
+        return 0u64;
+    }
+    return ((total_bytes * NSEC_PER_SEC) / elapsed_ns) / 1000000u64;
+}
+
+export fn benchmark_sort_u64(values: &[u64], count: usize) void {
+    if count < 2usize {
+        return;
+    }
+
+    var i: usize = 1usize;
+    while i < count {
+        const value: u64 = values[i];
+        var j: usize = i;
+        while j > 0usize && values[j - 1usize] > value {
+            values[j] = values[j - 1usize];
+            j = j - 1usize;
+        }
+        values[j] = value;
+        i = i + 1usize;
+    }
+}
+
+export fn benchmark_percentile_u64(values: &[u64], count: usize, percentile: u8) u64 {
+    if count == 0usize {
+        return 0u64;
+    }
+
+    var effective_percentile: u64 = percentile as u64;
+    if effective_percentile > 100u64 {
+        effective_percentile = 100u64;
+    }
+    if effective_percentile == 0u64 {
+        return values[0usize];
+    }
+
+    var rank: u64 = (effective_percentile * (count as u64) + 99u64) / 100u64;
+    if rank == 0u64 {
+        rank = 1u64;
+    }
+    if rank > count as u64 {
+        rank = count as u64;
+    }
+
+    return values[(rank - 1u64) as usize];
+}
+
+export fn benchmark_write_stdout(sample: &BenchmarkSample) !void {
+    var line: [byte: BENCHMARK_JSONL_MAX_LINE_BYTES] = [];
+    const written: usize = try benchmark_jsonl_write_line(line[0:BENCHMARK_JSONL_MAX_LINE_BYTES], sample);
+    _ = try sys_write(1i32, &line[0] as *const byte, written);
 }

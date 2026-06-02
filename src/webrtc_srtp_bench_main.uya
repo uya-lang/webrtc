@@ -1,0 +1,292 @@
+use webrtc.bench;
+use webrtc.binary;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.time;
+
+const BENCH_SRTP_ITERATIONS: usize = 512usize;
+const BENCH_SRTP_PAYLOAD_BYTES: usize = 160usize;
+const BENCH_SRTP_RTP_HEADER_BYTES: usize = 12usize;
+const BENCH_SRTP_RTP_PACKET_BYTES: usize = 172usize;
+const BENCH_SRTP_PROTECTED_PACKET_BYTES: usize = 182usize;
+
+fn bench_fill_payload(dst: &[byte], seed: byte) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = seed + ((index & 0xffusize) as byte);
+        index = index + 1usize;
+    }
+}
+
+fn bench_make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    if out_packet.len < BENCH_SRTP_RTP_HEADER_BYTES + payload.len {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+    out_packet[0usize] = 0x80 as byte;
+    out_packet[1usize] = 111u8 as byte;
+    try write_be_u16(out_packet[2usize:2], sequence_number);
+    try write_be_u32(out_packet[4usize:4], timestamp);
+    try write_be_u32(out_packet[8usize:4], ssrc);
+
+    var index: usize = 0usize;
+    while index < payload.len {
+        out_packet[BENCH_SRTP_RTP_HEADER_BYTES + index] = payload[index];
+        index = index + 1usize;
+    }
+    return BENCH_SRTP_RTP_PACKET_BYTES;
+}
+
+fn srtp_init_context(ctx: &SrtpContext, ssrc: u32) !void {
+    var master_key: [byte: SRTP_KEY_BYTES] = [
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+        0x0b as byte, 0x0b as byte, 0x0b as byte, 0x0b as byte,
+    ];
+    var master_salt: [byte: SRTP_SALT_BYTES] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte,
+        0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte, 0x0d as byte,
+    ];
+
+    try srtp_context_init(
+        ctx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        ssrc,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    );
+    try srtp_derive_session_keys(ctx);
+}
+
+fn srtp_prepare_rtp_packets(storage: &[byte], ssrc: u32) !void {
+    var payload: [byte: BENCH_SRTP_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_SRTP_PAYLOAD_BYTES], 0x20 as byte);
+
+    var index: usize = 0usize;
+    while index < BENCH_SRTP_ITERATIONS {
+        payload[0usize] = (index & 0xffusize) as byte;
+        const offset: usize = index * BENCH_SRTP_RTP_PACKET_BYTES;
+        const written: usize = try bench_make_rtp_packet_bytes(
+            (index + 1usize) as u16,
+            48000u32 + ((index as u32) * 960u32),
+            ssrc,
+            payload[0:BENCH_SRTP_PAYLOAD_BYTES],
+            storage[offset:BENCH_SRTP_RTP_PACKET_BYTES],
+        );
+        if written != BENCH_SRTP_RTP_PACKET_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn srtp_prepare_protected_packets(
+    rtp_storage: &[byte],
+    protected_storage: &[byte],
+    ssrc: u32,
+) !void {
+    var tx_ctx: SrtpContext = srtp_context_make();
+    try srtp_init_context(&tx_ctx, ssrc);
+    try srtp_prepare_rtp_packets(rtp_storage, ssrc);
+
+    var index: usize = 0usize;
+    while index < BENCH_SRTP_ITERATIONS {
+        const rtp_offset: usize = index * BENCH_SRTP_RTP_PACKET_BYTES;
+        const protected_offset: usize = index * BENCH_SRTP_PROTECTED_PACKET_BYTES;
+        const written: usize = try srtp_protect(
+            &tx_ctx,
+            rtp_storage[rtp_offset:BENCH_SRTP_RTP_PACKET_BYTES],
+            protected_storage[protected_offset:BENCH_SRTP_PROTECTED_PACKET_BYTES],
+        );
+        if written != BENCH_SRTP_PROTECTED_PACKET_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        index = index + 1usize;
+    }
+    return;
+}
+
+fn benchmark_srtp_protect_sample() !BenchmarkSample {
+    var tx_ctx: SrtpContext = srtp_context_make();
+    try srtp_init_context(&tx_ctx, 0x12345678u32);
+
+    var rtp_storage: [byte: BENCH_SRTP_ITERATIONS * BENCH_SRTP_RTP_PACKET_BYTES] = [];
+    var protected_storage: [byte: BENCH_SRTP_ITERATIONS * BENCH_SRTP_PROTECTED_PACKET_BYTES] = [];
+    var samples: [u64: BENCH_SRTP_ITERATIONS] = [];
+    try srtp_prepare_rtp_packets(
+        rtp_storage[0:BENCH_SRTP_ITERATIONS * BENCH_SRTP_RTP_PACKET_BYTES],
+        0x12345678u32,
+    );
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var index: usize = 0usize;
+    while index < BENCH_SRTP_ITERATIONS {
+        const rtp_offset: usize = index * BENCH_SRTP_RTP_PACKET_BYTES;
+        const protected_offset: usize = index * BENCH_SRTP_PROTECTED_PACKET_BYTES;
+        const sample_start: u64 = try monotonic_now_ns();
+        const written: usize = try srtp_protect(
+            &tx_ctx,
+            rtp_storage[rtp_offset:BENCH_SRTP_RTP_PACKET_BYTES],
+            protected_storage[protected_offset:BENCH_SRTP_PROTECTED_PACKET_BYTES],
+        );
+        const sample_end: u64 = try monotonic_now_ns();
+        if written != BENCH_SRTP_PROTECTED_PACKET_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        samples[index] = benchmark_nonzero_elapsed_ns(sample_start, sample_end);
+        index = index + 1usize;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+    benchmark_sort_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS);
+
+    return BenchmarkSample{
+        name: "bench_srtp_protect" as &[byte],
+        suite: "phase9" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_SRTP_ITERATIONS as u64),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_SRTP_RTP_PACKET_BYTES as u64) * (BENCH_SRTP_ITERATIONS as u64),
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_SRTP_ITERATIONS as u64, elapsed_ns),
+        p95_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 95u8),
+        p99_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 99u8),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_srtp_unprotect_sample() !BenchmarkSample {
+    var rtp_storage: [byte: BENCH_SRTP_ITERATIONS * BENCH_SRTP_RTP_PACKET_BYTES] = [];
+    var protected_storage: [byte: BENCH_SRTP_ITERATIONS * BENCH_SRTP_PROTECTED_PACKET_BYTES] = [];
+    var output_storage: [byte: BENCH_SRTP_ITERATIONS * BENCH_SRTP_RTP_PACKET_BYTES] = [];
+    var samples: [u64: BENCH_SRTP_ITERATIONS] = [];
+
+    try srtp_prepare_protected_packets(
+        rtp_storage[0:BENCH_SRTP_ITERATIONS * BENCH_SRTP_RTP_PACKET_BYTES],
+        protected_storage[0:BENCH_SRTP_ITERATIONS * BENCH_SRTP_PROTECTED_PACKET_BYTES],
+        0x12345678u32,
+    );
+
+    var rx_ctx: SrtpContext = srtp_context_make();
+    try srtp_init_context(&rx_ctx, 0x12345678u32);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var index: usize = 0usize;
+    while index < BENCH_SRTP_ITERATIONS {
+        const protected_offset: usize = index * BENCH_SRTP_PROTECTED_PACKET_BYTES;
+        const output_offset: usize = index * BENCH_SRTP_RTP_PACKET_BYTES;
+        const sample_start: u64 = try monotonic_now_ns();
+        const written: usize = try srtp_unprotect(
+            &rx_ctx,
+            protected_storage[protected_offset:BENCH_SRTP_PROTECTED_PACKET_BYTES],
+            output_storage[output_offset:BENCH_SRTP_RTP_PACKET_BYTES],
+        );
+        const sample_end: u64 = try monotonic_now_ns();
+        if written != BENCH_SRTP_RTP_PACKET_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        if output_storage[output_offset + 12usize] != rtp_storage[output_offset + 12usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        samples[index] = benchmark_nonzero_elapsed_ns(sample_start, sample_end);
+        index = index + 1usize;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+    benchmark_sort_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS);
+
+    return BenchmarkSample{
+        name: "bench_srtp_unprotect" as &[byte],
+        suite: "phase9" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_SRTP_ITERATIONS as u64),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_SRTP_RTP_PACKET_BYTES as u64) * (BENCH_SRTP_ITERATIONS as u64),
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_SRTP_ITERATIONS as u64, elapsed_ns),
+        p95_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 95u8),
+        p99_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 99u8),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_srtp_replay_check_sample() !BenchmarkSample {
+    var rx_ctx: SrtpContext = srtp_context_make();
+    try srtp_init_context(&rx_ctx, 0x12345678u32);
+    rx_ctx.has_recv_index = true;
+    rx_ctx.s_largest_index = 0u64;
+    rx_ctx.roc = 0u32;
+    rx_ctx.replay_window = 1u64;
+
+    var samples: [u64: BENCH_SRTP_ITERATIONS] = [];
+    const start_ns: u64 = try monotonic_now_ns();
+    var index: usize = 0usize;
+    while index < BENCH_SRTP_ITERATIONS {
+        const packet_index: u64 = (index + 1usize) as u64;
+        const sample_start: u64 = try monotonic_now_ns();
+        const allowed: bool = srtp_replay_check(&rx_ctx, packet_index);
+        const sample_end: u64 = try monotonic_now_ns();
+        if !allowed {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        try srtp_replay_accept(&rx_ctx, packet_index);
+        samples[index] = benchmark_nonzero_elapsed_ns(sample_start, sample_end);
+        index = index + 1usize;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+    benchmark_sort_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS);
+
+    return BenchmarkSample{
+        name: "bench_srtp_replay_check" as &[byte],
+        suite: "phase9" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_SRTP_ITERATIONS as u64),
+        packets_per_s: benchmark_packets_per_s(BENCH_SRTP_ITERATIONS as u64, elapsed_ns),
+        p95_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 95u8),
+        p99_ns: benchmark_percentile_u64(samples[0:BENCH_SRTP_ITERATIONS], BENCH_SRTP_ITERATIONS, 99u8),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var sample: BenchmarkSample = benchmark_srtp_protect_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_srtp_unprotect_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_srtp_replay_check_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
+}

@@ -1,3 +1,3 @@
-{"name":"bench_rtp_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
-{"name":"bench_rtp_extension_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
-{"name":"bench_rtcp_parse","suite":"phase10","unit":"ns/packet","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_rtp_parse","suite":"phase10","unit":"ns/packet","value":125,"throughput_mb_s":0,"packets_per_s":7993832,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_rtp_extension_parse","suite":"phase10","unit":"ns/packet","value":160,"throughput_mb_s":0,"packets_per_s":6237702,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_rtcp_parse","suite":"phase10","unit":"ns/packet","value":309,"throughput_mb_s":0,"packets_per_s":3234676,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0,"vectorized":false}

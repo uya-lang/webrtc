@@ -1,0 +1,1 @@
+{"name":"bench_sdp_parse","suite":"phase3","unit":"ns/op","value":50120,"throughput_mb_s":0,"packets_per_s":19952,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":3,"vectorized":false}

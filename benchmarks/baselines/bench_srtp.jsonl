@@ -1,3 +1,3 @@
-{"name":"bench_srtp_protect","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
-{"name":"bench_srtp_unprotect","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
-{"name":"bench_srtp_replay_check","suite":"phase9","unit":"ns/op","value":0,"throughput_mb_s":0,"packets_per_s":0,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":0}
+{"name":"bench_srtp_protect","suite":"phase9","unit":"ns/op","value":47051,"throughput_mb_s":3,"packets_per_s":21253,"p95_ns":54329,"p99_ns":58495,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_srtp_unprotect","suite":"phase9","unit":"ns/op","value":43566,"throughput_mb_s":3,"packets_per_s":22953,"p95_ns":46761,"p99_ns":53086,"allocations":0,"high_watermark":0,"vectorized":false}
+{"name":"bench_srtp_replay_check","suite":"phase9","unit":"ns/op","value":247,"throughput_mb_s":0,"packets_per_s":4039065,"p95_ns":123,"p99_ns":135,"allocations":0,"high_watermark":0,"vectorized":false}

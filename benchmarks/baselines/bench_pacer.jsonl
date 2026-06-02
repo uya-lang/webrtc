@@ -1,1 +1,1 @@
-{"name":"bench_pacer","suite":"phase15","unit":"ns/op","value":0,"allocations":0,"high_watermark":0}
+{"name":"bench_pacer","suite":"phase15","unit":"ns/op","value":30,"throughput_mb_s":0,"packets_per_s":32672335,"p95_ns":0,"p99_ns":0,"allocations":0,"high_watermark":1,"vectorized":false}

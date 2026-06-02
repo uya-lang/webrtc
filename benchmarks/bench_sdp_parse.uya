@@ -1,14 +1,58 @@
 use webrtc.bench;
+use webrtc.sdp.model;
+use webrtc.sdp.parse;
+use webrtc.sdp.write;
+use webrtc.time;
 
-// Phase 3 SDP parser/writer microbench 基线占位：后续切到真实长行与大 SDP 输入。
-export fn benchmark_main_emit_sdp_parse_jsonl(dst: &[byte]) !usize {
-    const sample: BenchmarkSample = BenchmarkSample{
-        name: "bench_sdp_parse",
-        suite: "phase3",
-        unit: "ns/op",
-        value: 0u64,
+const BENCH_SDP_PARSE_ITERATIONS: u64 = 512u64;
+const BENCH_SDP_SAMPLE: &[byte] = "v=0\r\no=- 4962311346732082950 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1 data\r\na=msid-semantic: WMS\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111 0\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendrecv\r\na=rtcp-mux\r\na=ice-ufrag:audioUfrag\r\na=ice-pwd:audioPwd0123456789abcdef\r\na=fingerprint:sha-256 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20\r\na=setup:actpass\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\na=rtcp-fb:111 transport-cc\r\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=candidate:1 1 udp 2122260223 192.0.2.10 50000 typ host generation 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=sendrecv\r\na=rtcp-mux\r\na=ice-ufrag:videoUfrag\r\na=ice-pwd:videoPwd0123456789abcdef\r\na=fingerprint:sha-256 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20\r\na=setup:actpass\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:97 rtx/90000\r\na=fmtp:97 apt=96\r\na=rtcp-fb:96 nack\r\na=rtcp-fb:96 transport-cc\r\na=extmap:2 urn:ietf:params:rtp-hdrext:toffset\r\na=candidate:2 1 udp 2122194687 192.0.2.20 50002 typ host generation 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=mid:data\r\na=sendrecv\r\na=ice-ufrag:dataUfrag\r\na=ice-pwd:dataPwd0123456789abcdef\r\na=fingerprint:sha-256 01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20\r\na=setup:actpass\r\na=rtcp-mux\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n" as &[byte];
+
+fn benchmark_sdp_parse_sample() !BenchmarkSample {
+    var out: [byte: SDP_WRITER_MAX_BYTES] = [];
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    var media_sections: u64 = 0u64;
+    while iteration < BENCH_SDP_PARSE_ITERATIONS {
+        const desc: SessionDescription = try sdp_parse_session_description_bytes(BENCH_SDP_SAMPLE);
+        if desc.media_section_count != 3usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        const written: usize = try sdp_write_session_description(&desc, out[0:SDP_WRITER_MAX_BYTES]);
+        if written == 0usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        media_sections = desc.media_section_count as u64;
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_sdp_parse" as &[byte],
+        suite: "phase3" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_SDP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_SDP_PARSE_ITERATIONS, elapsed_ns),
         allocations: 0u64,
-        high_watermark: 0u64,
+        high_watermark: media_sections,
     };
+}
+
+export fn benchmark_main_emit_sdp_parse_jsonl(dst: &[byte]) !usize {
+    const sample: BenchmarkSample = try benchmark_sdp_parse_sample();
     return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    const sample: BenchmarkSample = benchmark_sdp_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+    return 0i32;
 }

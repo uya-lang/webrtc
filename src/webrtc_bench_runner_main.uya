@@ -1,0 +1,874 @@
+use webrtc.api;
+use webrtc.arena;
+use webrtc.bench;
+use webrtc.congestion.pacer;
+use webrtc.media.model;
+use webrtc.receiver;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.ring;
+use webrtc.rtp.jitter;
+use webrtc.rtp.rtp_packet;
+use webrtc.sender;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+use webrtc.time;
+use webrtc.track;
+
+const BENCH_ARENA_RING_ITERATIONS: u64 = 2048u64;
+const BENCH_ARENA_RING_SLABS: usize = 64usize;
+const BENCH_ARENA_RING_PAYLOAD_BYTES: usize = 256usize;
+
+const BENCH_STUN_PARSE_ITERATIONS: u64 = 2048u64;
+
+const BENCH_RTP_PARSE_ITERATIONS: u64 = 4096u64;
+const BENCH_RTP_PAYLOAD_BYTES: usize = 48usize;
+
+const BENCH_JITTER_ITERATIONS: u64 = 1024u64;
+const BENCH_JITTER_PACKET_BYTES: usize = 64usize;
+const BENCH_JITTER_PAYLOAD_BYTES: usize = 20usize;
+
+const BENCH_PACER_ITERATIONS: u64 = 4096u64;
+
+const BENCH_DATACHANNEL_ITERATIONS: u64 = 2048u64;
+const BENCH_DATACHANNEL_MESSAGE_BYTES: usize = 1024usize;
+
+const BENCH_RTP_LOOPBACK_ITERATIONS: u64 = 2048u64;
+const BENCH_RTP_LOOPBACK_PAYLOAD_BYTES: usize = 1200usize;
+
+fn bench_fill_payload(dst: &[byte], seed: byte) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = seed + ((index & 0xffusize) as byte);
+        index = index + 1usize;
+    }
+}
+
+fn bench_make_rtp_packet_bytes(
+    sequence_number: u16,
+    timestamp: u32,
+    ssrc: u32,
+    marker: bool,
+    payload: &[byte],
+    out_packet: &[byte],
+) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = sequence_number;
+    header.timestamp = timestamp;
+    header.ssrc = ssrc;
+    header.marker = marker;
+    header.payload_type = 96u8;
+    return rtp_packet_write(&header, payload, out_packet);
+}
+
+fn route_sender_to_track(sender_state: &Sender, track_state: &Track) !void {
+    while sender_has_pending_frame(sender_state) {
+        const pending: EncodedFrame = sender_pop_pending_frame(sender_state);
+        try track_write_encoded_frame(track_state, &pending);
+    }
+    return;
+}
+
+fn route_track_to_receiver(track_state: &Track, receiver_state: &Receiver) !void {
+    while track_has_pending_frame(track_state) {
+        const pending: EncodedFrame = track_pop_pending_frame(track_state);
+        try receiver_deliver_encoded_frame(receiver_state, &pending);
+    }
+    return;
+}
+
+fn benchmark_arena_ring_sample() !BenchmarkSample {
+    var packet_arena: PacketArena = packet_arena_make();
+    try packet_arena_init(&packet_arena, 1u32, BENCH_ARENA_RING_SLABS, BENCH_ARENA_RING_PAYLOAD_BYTES);
+
+    var queue: RingQueue = RingQueue{};
+    try ring_queue_init(&queue, BENCH_ARENA_RING_SLABS);
+
+    var payload: [byte: BENCH_ARENA_RING_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_ARENA_RING_PAYLOAD_BYTES], 0x10 as byte);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_ARENA_RING_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        const packet: PacketRef = try packet_arena_alloc(
+            &packet_arena,
+            payload[0:BENCH_ARENA_RING_PAYLOAD_BYTES],
+            iteration,
+            7u32,
+            1u16,
+            0u16,
+        );
+        try ring_queue_push(&queue, (packet.slab_id as! u64).value);
+        const popped: u64 = try ring_queue_pop(&queue);
+        if popped != (packet.slab_id as! u64).value {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        try packet_arena_free(&packet_arena, &packet);
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = packet_arena.high_watermark;
+    if queue.high_watermark > high_watermark {
+        high_watermark = queue.high_watermark;
+    }
+
+    return BenchmarkSample{
+        name: "bench_arena_ring" as &[byte],
+        suite: "phase1" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_ARENA_RING_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_ARENA_RING_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: high_watermark,
+    };
+}
+
+fn benchmark_stun_parse_sample() !BenchmarkSample {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [];
+    var index: usize = 0usize;
+    while index < STUN_TRANSACTION_ID_BYTES {
+        txid[index] = (0x10usize + index) as byte;
+        index = index + 1usize;
+    }
+
+    var packet: [byte: 192] = [];
+    var builder: StunMessageBuilder = StunMessageBuilder{};
+    try stun_builder_init_binding_request(&builder, packet[0:192], txid[0:STUN_TRANSACTION_ID_BYTES]);
+    try stun_builder_append_username(&builder, "bench-user" as &[byte]);
+    try stun_builder_append_priority(&builder, 0x6E0001FFu32);
+    try stun_builder_append_use_candidate(&builder);
+    try stun_builder_append_ice_controlling(&builder, 0x0102030405060708u64);
+    try stun_builder_append_message_integrity(&builder, "bench-secret" as &[byte]);
+    try stun_builder_append_fingerprint(&builder);
+    const packet_len: usize = try stun_builder_finish(&builder);
+    const attr_bytes_len: usize = packet_len - STUN_HEADER_BYTES;
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    var attr_count: u64 = 0u64;
+    while iteration < BENCH_STUN_PARSE_ITERATIONS {
+        const header: StunMessageHeader = try stun_header_parse(packet[0:packet_len]);
+        if header.method != STUN_METHOD_BINDING || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        var iter: StunAttributeIterator = StunAttributeIterator{};
+        stun_attribute_iterator_init(&iter, packet[STUN_HEADER_BYTES:attr_bytes_len]);
+        var seen_mask: u32 = 0u32;
+        var count: u64 = 0u64;
+        while iter.cursor < iter.bytes.len {
+            const attr: StunAttribute = try stun_attribute_iterator_next(&iter);
+            seen_mask = try stun_binding_request_validate_attribute(&attr, seen_mask);
+            if attr.attr_type == STUN_ATTRIBUTE_USERNAME {
+                _ = try stun_parse_username(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_PRIORITY {
+                _ = try stun_parse_priority(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_USE_CANDIDATE {
+                try stun_parse_use_candidate(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_ICE_CONTROLLING {
+                _ = try stun_parse_ice_role_tiebreaker(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_MESSAGE_INTEGRITY {
+                _ = try stun_parse_message_integrity(attr.value);
+            } else if attr.attr_type == STUN_ATTRIBUTE_FINGERPRINT {
+                _ = try stun_parse_fingerprint(attr.value);
+            }
+            count = count + 1u64;
+        }
+        attr_count = count;
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_stun_parse" as &[byte],
+        suite: "phase4" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_STUN_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_STUN_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: attr_count,
+    };
+}
+
+fn bench_make_rtp_packet(out: &[byte]) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = 100u16;
+    header.timestamp = 9000u32;
+    header.ssrc = 0x11223344u32;
+    header.payload_type = 96u8;
+    header.marker = true;
+
+    var payload: [byte: BENCH_RTP_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_RTP_PAYLOAD_BYTES], 0x11 as byte);
+    return rtp_packet_write(&header, payload[0:BENCH_RTP_PAYLOAD_BYTES], out);
+}
+
+fn bench_make_rtp_extension_packet(out: &[byte]) !usize {
+    var header: RtpHeader = rtp_header_make();
+    header.sequence_number = 101u16;
+    header.timestamp = 12000u32;
+    header.ssrc = 0x55667788u32;
+    header.payload_type = 97u8;
+    header.extension = true;
+    header.extension_profile = 0xBEDEu16;
+
+    var extension_data: [byte: 4] = [0x10 as byte, 0xAA as byte, 0x00 as byte, 0x00 as byte];
+    var payload: [byte: BENCH_RTP_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_RTP_PAYLOAD_BYTES], 0x33 as byte);
+    header.extension_data = extension_data[0:4];
+    return rtp_packet_write(&header, payload[0:BENCH_RTP_PAYLOAD_BYTES], out);
+}
+
+fn bench_make_rtcp_packet(out: &[byte]) !usize {
+    var report: RtcpReceiverReport = rtcp_receiver_report_make();
+    report.sender_ssrc = 0xABCD1234u32;
+    report.report_count = 1u8;
+    report.report_blocks[0usize].ssrc = 0x01020304u32;
+    report.report_blocks[0usize].highest_seq = 77u32;
+    report.report_blocks[0usize].jitter = 90u32;
+    report.report_blocks[0usize].lsr = 1234u32;
+    report.report_blocks[0usize].dlsr = 5678u32;
+    return rtcp_receiver_report_write(&report, out);
+}
+
+fn benchmark_rtp_parse_sample() !BenchmarkSample {
+    var packet: [byte: 128] = [];
+    const packet_len: usize = try bench_make_rtp_packet(packet[0:128]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtpPacket = try rtp_packet_parse(packet[0:packet_len]);
+        if parsed.header.sequence_number != 100u16 || parsed.header.payload.len != BENCH_RTP_PAYLOAD_BYTES {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtp_parse" as &[byte],
+        suite: "phase10" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_rtp_extension_parse_sample() !BenchmarkSample {
+    var packet: [byte: 160] = [];
+    const packet_len: usize = try bench_make_rtp_extension_packet(packet[0:160]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtpPacket = try rtp_packet_parse(packet[0:packet_len]);
+        if !parsed.header.extension || parsed.header.extension_data.len != 4usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtp_extension_parse" as &[byte],
+        suite: "phase10" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_rtcp_parse_sample() !BenchmarkSample {
+    var packet: [byte: 96] = [];
+    const packet_len: usize = try bench_make_rtcp_packet(packet[0:96]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_PARSE_ITERATIONS {
+        const parsed: RtcpReceiverReport = try rtcp_receiver_report_parse(packet[0:packet_len]);
+        if parsed.report_count != 1u8 || parsed.report_blocks[0usize].jitter != 90u32 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_rtcp_parse" as &[byte],
+        suite: "phase10" as &[byte],
+        unit: "ns/packet" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_PARSE_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_PARSE_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_jitter_sample() !BenchmarkSample {
+    var buffer: RtpJitterBuffer = rtp_jitter_buffer_make();
+    buffer.config.max_packets = 16usize;
+    buffer.config.max_missing = 16usize;
+    buffer.config.drop_policy = RTP_JITTER_DROP_OLDEST;
+    buffer.config.nack_initial_backoff_us = 2000u64;
+    buffer.config.nack_max_backoff_us = 8000u64;
+
+    var payload_a: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var payload_b: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var payload_c: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload_a[0:BENCH_JITTER_PAYLOAD_BYTES], 0xA0 as byte);
+    bench_fill_payload(payload_b[0:BENCH_JITTER_PAYLOAD_BYTES], 0xB0 as byte);
+    bench_fill_payload(payload_c[0:BENCH_JITTER_PAYLOAD_BYTES], 0xC0 as byte);
+
+    var packet_a: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    var packet_b: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    var packet_c: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    const packet_a_len: usize = try bench_make_rtp_packet_bytes(100u16, 9000u32, 0x11223344u32, false, payload_a[0:BENCH_JITTER_PAYLOAD_BYTES], packet_a[0:BENCH_JITTER_PACKET_BYTES]);
+    const packet_b_len: usize = try bench_make_rtp_packet_bytes(101u16, 9000u32, 0x11223344u32, false, payload_b[0:BENCH_JITTER_PAYLOAD_BYTES], packet_b[0:BENCH_JITTER_PACKET_BYTES]);
+    const packet_c_len: usize = try bench_make_rtp_packet_bytes(102u16, 9000u32, 0x11223344u32, true, payload_c[0:BENCH_JITTER_PAYLOAD_BYTES], packet_c[0:BENCH_JITTER_PACKET_BYTES]);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_JITTER_ITERATIONS {
+        rtp_jitter_buffer_reset(&buffer);
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_a[0:packet_a_len], 1000u64);
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_c[0:packet_c_len], 2000u64);
+        _ = try rtp_jitter_buffer_push_packet(&buffer, packet_b[0:packet_b_len], 3000u64);
+
+        const first: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        const second: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        const third: RtpPacket = try rtp_jitter_buffer_pop_ready_packet(&buffer);
+        if first.header.sequence_number != 100u16
+            || second.header.sequence_number != 101u16
+            || third.header.sequence_number != 102u16 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_jitter" as &[byte],
+        suite: "phase12" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_JITTER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_JITTER_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: (buffer.packet_high_watermark as! u64).value,
+    };
+}
+
+fn benchmark_retransmission_cache_sample() !BenchmarkSample {
+    var src_arena: PacketArena = packet_arena_make();
+    var owner_arena: PacketArena = packet_arena_make();
+    try packet_arena_init(&src_arena, 10u32, 8usize, BENCH_JITTER_PACKET_BYTES);
+    try packet_arena_init(&owner_arena, 11u32, 8usize, BENCH_JITTER_PACKET_BYTES);
+
+    var cache: RtpRetransmissionCache = rtp_retransmission_cache_make();
+    cache.max_entries = 8usize;
+
+    var budget: PacketCloneBudget = packet_clone_budget_make();
+    packet_clone_budget_init(&budget, 8192u64, 8u64);
+
+    var payload: [byte: BENCH_JITTER_PAYLOAD_BYTES] = [];
+    var packet_bytes: [byte: BENCH_JITTER_PACKET_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_JITTER_PAYLOAD_BYTES], 0x55 as byte);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_JITTER_ITERATIONS {
+        packet_arena_reset(&src_arena);
+        packet_arena_reset(&owner_arena);
+        packet_clone_budget_init(&budget, 8192u64, 8u64);
+        rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+
+        const sequence_number: u16 = (1000u64 + iteration) as u16;
+        const packet_len: usize = try bench_make_rtp_packet_bytes(
+            sequence_number,
+            18000u32,
+            0x55667788u32,
+            false,
+            payload[0:BENCH_JITTER_PAYLOAD_BYTES],
+            packet_bytes[0:BENCH_JITTER_PACKET_BYTES],
+        );
+        const packet: PacketRef = try packet_arena_alloc(
+            &src_arena,
+            packet_bytes[0:packet_len],
+            iteration,
+            3u32,
+            1u16,
+            0u16,
+        );
+        _ = try rtp_retransmission_cache_store(&cache, &owner_arena, &src_arena, &packet, &budget, iteration);
+        const cached: PacketRef = try rtp_retransmission_cache_lookup(&cache, 0x55667788u32, sequence_number);
+        if cached.len == 0u16 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = (cache.high_watermark as! u64).value;
+    if budget.high_watermark > high_watermark {
+        high_watermark = budget.high_watermark;
+    }
+    rtp_retransmission_cache_reset(&cache, &owner_arena, &budget);
+
+    return BenchmarkSample{
+        name: "bench_retransmission_cache" as &[byte],
+        suite: "phase12" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_JITTER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_JITTER_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: high_watermark,
+    };
+}
+
+fn benchmark_congestion_bandwidth_drop_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 2000000u64;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 3usize;
+    feedback.recv_deltas[0usize] = 250i32;
+    feedback.recv_deltas[1usize] = 180i32;
+    feedback.recv_deltas[2usize] = 200i32;
+
+    var elapsed_ms: u64 = 0u64;
+    while estimator.current_bitrate_bps >= 1500000u64 {
+        _ = try pacer_delay_based_estimator_update(&estimator, &feedback, 80000u64);
+        elapsed_ms = elapsed_ms + 20u64;
+        if elapsed_ms > 1000u64 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_bandwidth_drop" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: elapsed_ms,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_congestion_bandwidth_recovery_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 600000u64;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 3usize;
+    feedback.recv_deltas[0usize] = -50i32;
+    feedback.recv_deltas[1usize] = -25i32;
+    feedback.recv_deltas[2usize] = -10i32;
+
+    var elapsed_ms: u64 = 0u64;
+    while estimator.current_bitrate_bps < 1000000u64 {
+        _ = try pacer_delay_based_estimator_update(&estimator, &feedback, 20000u64);
+        elapsed_ms = elapsed_ms + 20u64;
+        if elapsed_ms > 2000u64 {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_bandwidth_recovery" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: elapsed_ms,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_congestion_queue_delay_sample() !BenchmarkSample {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 16usize;
+    queue.config.max_bytes = 64000usize;
+
+    var index: usize = 0usize;
+    while index < 8usize {
+        const send_at_us: u64 = ((index + 1usize) as u64) * 5000u64;
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1200usize,
+            enqueue_time_us: 0u64,
+            ready_at_us: send_at_us,
+            priority: PACER_PRIORITY_VIDEO,
+        };
+        try pacer_queue_push(&queue, &packet);
+        _ = try pacer_queue_pop_ready_packet(&queue, send_at_us);
+        index = index + 1usize;
+    }
+
+    var value_ms: u64 = pacer_queue_p95_delay_us(&queue) / 1000u64;
+    if value_ms == 0u64 {
+        value_ms = 1u64;
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_queue_delay" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: value_ms,
+        allocations: 0u64,
+        high_watermark: queue.high_watermark,
+    };
+}
+
+fn benchmark_congestion_loss_sample() !BenchmarkSample {
+    var estimator: PacerDelayBasedEstimator = pacer_delay_based_estimator_make();
+    estimator.current_bitrate_bps = 2000000u64;
+
+    var fallback: PacerLossBasedFallback = pacer_loss_based_fallback_make();
+    fallback.loss_threshold_percent = 5u8;
+    fallback.decrease_percent = 80u8;
+
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.packet_status_count = 20usize;
+    feedback.missing_count = 3usize;
+    feedback.received_count = 17usize;
+
+    _ = try pacer_loss_based_fallback_apply(&fallback, &estimator, &feedback);
+
+    return BenchmarkSample{
+        name: "bench_congestion_loss" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "pct" as &[byte],
+        value: ((feedback.missing_count as u64) * 100u64) / (feedback.packet_status_count as u64),
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_congestion_jitter_sample() !BenchmarkSample {
+    var feedback: PacerTransportCcFeedback = PacerTransportCcFeedback{};
+    feedback.delta_count = 5usize;
+    feedback.recv_deltas[0usize] = 1000i32;
+    feedback.recv_deltas[1usize] = 2000i32;
+    feedback.recv_deltas[2usize] = 1500i32;
+    feedback.recv_deltas[3usize] = 2800i32;
+    feedback.recv_deltas[4usize] = 1900i32;
+
+    var min_delta: i32 = feedback.recv_deltas[0usize];
+    var max_delta: i32 = feedback.recv_deltas[0usize];
+    var index: usize = 1usize;
+    while index < feedback.delta_count {
+        const delta: i32 = feedback.recv_deltas[index];
+        if delta < min_delta {
+            min_delta = delta;
+        }
+        if delta > max_delta {
+            max_delta = delta;
+        }
+        index = index + 1usize;
+    }
+
+    var jitter_ms: u64 = ((max_delta - min_delta) as u64) / 1000u64;
+    if jitter_ms == 0u64 {
+        jitter_ms = 1u64;
+    }
+
+    return BenchmarkSample{
+        name: "bench_congestion_jitter" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ms" as &[byte],
+        value: jitter_ms,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+}
+
+fn benchmark_pacer_sample() !BenchmarkSample {
+    var queue: PacerQueue = pacer_queue_make();
+    queue.config.max_packets = 16usize;
+    queue.config.max_bytes = 64000usize;
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_PACER_ITERATIONS {
+        const send_at_us: u64 = iteration * 100u64;
+        var packet: PacerPacket = PacerPacket{
+            size_bytes: 1200usize,
+            enqueue_time_us: send_at_us,
+            ready_at_us: send_at_us,
+            priority: PACER_PRIORITY_VIDEO,
+        };
+        try pacer_queue_push(&queue, &packet);
+        const popped: PacerPacket = try pacer_queue_pop_ready_packet(&queue, send_at_us);
+        if popped.size_bytes != 1200usize {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    return BenchmarkSample{
+        name: "bench_pacer" as &[byte],
+        suite: "phase15" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_PACER_ITERATIONS),
+        packets_per_s: benchmark_packets_per_s(BENCH_PACER_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: queue.high_watermark,
+    };
+}
+
+fn benchmark_datachannel_sample() !BenchmarkSample {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    init.negotiated = true;
+
+    var channel: DataChannel = try data_channel_make(
+        "bench" as &[byte],
+        "webrtc-datachannel" as &[byte],
+        &init,
+    );
+    if !data_channel_open(&channel) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var payload: [byte: BENCH_DATACHANNEL_MESSAGE_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_DATACHANNEL_MESSAGE_BYTES], 0x40 as byte);
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_DATACHANNEL_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        try data_channel_send(&channel, payload[0:BENCH_DATACHANNEL_MESSAGE_BYTES]);
+        if !data_channel_has_outgoing_message(&channel) {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const outgoing: DataChannelMessage = data_channel_pop_outgoing_message(&channel);
+        try data_channel_deliver_message(&channel, outgoing.payload[0:outgoing.payload_len]);
+        if !data_channel_has_received_message(&channel) {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+
+        const incoming: DataChannelMessage = data_channel_pop_received_message(&channel);
+        if incoming.payload_len != BENCH_DATACHANNEL_MESSAGE_BYTES || incoming.payload[0usize] != payload[0usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = (channel.buffered_amount_high_watermark as! u64).value;
+    if (channel.incoming_budget.high_watermark_bytes as! u64).value > high_watermark {
+        high_watermark = (channel.incoming_budget.high_watermark_bytes as! u64).value;
+    }
+
+    return BenchmarkSample{
+        name: "bench_datachannel" as &[byte],
+        suite: "phase13" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_DATACHANNEL_ITERATIONS),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_DATACHANNEL_MESSAGE_BYTES as u64) * BENCH_DATACHANNEL_ITERATIONS,
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_DATACHANNEL_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: high_watermark,
+        vectorized: false,
+    };
+}
+
+fn benchmark_rtp_loopback_sample() !BenchmarkSample {
+    var sender_state: Sender = sender_make();
+    try sender_init(&sender_state, 1u64, MEDIA_KIND_VIDEO);
+    if !sender_open(&sender_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var track_state: Track = track_make();
+    try track_init(&track_state, 2u64, MEDIA_KIND_VIDEO);
+    if !track_open(&track_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var receiver_state: Receiver = receiver_make();
+    try receiver_init(&receiver_state, 3u64, MEDIA_KIND_VIDEO);
+    if !receiver_open(&receiver_state) {
+        return error.BenchmarkLineBufferTooSmall;
+    }
+
+    var payload: [byte: BENCH_RTP_LOOPBACK_PAYLOAD_BYTES] = [];
+    bench_fill_payload(payload[0:BENCH_RTP_LOOPBACK_PAYLOAD_BYTES], 0x60 as byte);
+
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.duration_us = 33333u32;
+    frame.payload = payload[0:BENCH_RTP_LOOPBACK_PAYLOAD_BYTES];
+
+    const start_ns: u64 = try monotonic_now_ns();
+    var iteration: u64 = 0u64;
+    while iteration < BENCH_RTP_LOOPBACK_ITERATIONS {
+        payload[0usize] = (iteration & 0xffu64) as byte;
+        frame.sequence_id = iteration;
+        frame.timestamp = 90000u64 + (iteration * 3000u64);
+        try sender_send_encoded_frame(&sender_state, &frame);
+        try route_sender_to_track(&sender_state, &track_state);
+        try route_track_to_receiver(&track_state, &receiver_state);
+
+        var received: EncodedFrame = encoded_frame_make();
+        const has_frame: bool = try receiver_read_encoded_frame(&receiver_state, &received);
+        if !has_frame || received.payload.len != BENCH_RTP_LOOPBACK_PAYLOAD_BYTES || received.payload[0usize] != payload[0usize] {
+            return error.BenchmarkLineBufferTooSmall;
+        }
+        iteration = iteration + 1u64;
+    }
+    const end_ns: u64 = try monotonic_now_ns();
+    const elapsed_ns: u64 = benchmark_nonzero_elapsed_ns(start_ns, end_ns);
+
+    var high_watermark: u64 = (sender_high_watermark(&sender_state) as! u64).value;
+    if (track_high_watermark(&track_state) as! u64).value > high_watermark {
+        high_watermark = (track_high_watermark(&track_state) as! u64).value;
+    }
+    if (receiver_high_watermark(&receiver_state) as! u64).value > high_watermark {
+        high_watermark = (receiver_high_watermark(&receiver_state) as! u64).value;
+    }
+
+    return BenchmarkSample{
+        name: "bench_rtp_loopback" as &[byte],
+        suite: "phase18" as &[byte],
+        unit: "ns/op" as &[byte],
+        value: benchmark_ns_per_op(elapsed_ns, BENCH_RTP_LOOPBACK_ITERATIONS),
+        throughput_mb_s: benchmark_throughput_mb_s(
+            (BENCH_RTP_LOOPBACK_PAYLOAD_BYTES as u64) * BENCH_RTP_LOOPBACK_ITERATIONS,
+            elapsed_ns,
+        ),
+        packets_per_s: benchmark_packets_per_s(BENCH_RTP_LOOPBACK_ITERATIONS, elapsed_ns),
+        allocations: 0u64,
+        high_watermark: high_watermark,
+    };
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    _ = argc;
+    _ = argv;
+
+    var sample: BenchmarkSample = benchmark_arena_ring_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_stun_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtp_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtp_extension_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtcp_parse_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_jitter_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_retransmission_cache_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_bandwidth_drop_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_bandwidth_recovery_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_queue_delay_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_loss_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_congestion_jitter_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_pacer_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_datachannel_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    sample = benchmark_rtp_loopback_sample() catch {
+        return 1i32;
+    };
+    benchmark_write_stdout(&sample) catch {
+        return 1i32;
+    };
+
+    return 0i32;
+}
