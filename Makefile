@@ -70,6 +70,7 @@ test: build
 	test -x tests/check_phase16_get_stats.sh
 	test -x tests/check_phase16_dump_stats.sh
 	test -x tests/check_phase16_trace_ring.sh
+	test -x tests/check_phase18_rtp_rtcp_bench.sh
 	rg -q "export struct ByteReader" src/webrtc/binary.uya
 	rg -q "export struct ByteWriter" src/webrtc/binary.uya
 	rg -q "export fn read_be_u16" src/webrtc/binary.uya
@@ -118,6 +119,7 @@ test: build
 	bash tests/check_phase16_get_stats.sh
 	bash tests/check_phase16_dump_stats.sh
 	bash tests/check_phase16_trace_ring.sh
+	bash tests/check_phase18_rtp_rtcp_bench.sh
 	test -x $(BIN)
 	./$(BIN) --help >/dev/null
 	./$(BIN) version >/dev/null

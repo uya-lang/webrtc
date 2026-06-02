@@ -1,0 +1,41 @@
+use webrtc.bench;
+
+fn benchmark_emit_rtp_rtcp_parser_row(
+    dst: &[byte],
+    name: &[byte],
+    unit: &[byte],
+) !usize {
+    const sample: BenchmarkSample = BenchmarkSample{
+        name: name,
+        suite: "phase10" as &[byte],
+        unit: unit,
+        value: 0u64,
+        allocations: 0u64,
+        high_watermark: 0u64,
+    };
+    return benchmark_jsonl_write_line(dst, &sample);
+}
+
+export fn benchmark_main_emit_rtp_parse_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_rtp_rtcp_parser_row(
+        dst,
+        "bench_rtp_parse" as &[byte],
+        "ns/packet" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_rtp_extension_parse_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_rtp_rtcp_parser_row(
+        dst,
+        "bench_rtp_extension_parse" as &[byte],
+        "ns/packet" as &[byte],
+    );
+}
+
+export fn benchmark_main_emit_rtcp_parse_jsonl(dst: &[byte]) !usize {
+    return benchmark_emit_rtp_rtcp_parser_row(
+        dst,
+        "bench_rtcp_parse" as &[byte],
+        "ns/packet" as &[byte],
+    );
+}
