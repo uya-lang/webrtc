@@ -581,7 +581,7 @@ def make_audio_test_page() -> str:
     ).strip()
 
 
-def make_video_test_page() -> str:
+def make_video_test_page(codec_mode: str = "vp8") -> str:
     return textwrap.dedent(
         """
         <!doctype html>
@@ -589,6 +589,7 @@ def make_video_test_page() -> str:
         <title>Phase 17 Browser Video Interop</title>
         <script>
         window.__phase14Result = null;
+        const codecMode = "__CODEC_MODE__";
 
         function fail(message, error) {
           window.__phase14Result = {
@@ -651,7 +652,7 @@ def make_video_test_page() -> str:
           };
         }
 
-        async function waitForInboundVideoPackets(receiver) {
+        async function waitForInboundVideoStats(receiver) {
           const deadline = Date.now() + 5000;
           while (Date.now() < deadline) {
             const stats = await receiver.getStats();
@@ -659,13 +660,26 @@ def make_video_test_page() -> str:
               if (stat.type === 'inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
                 const packets = stat.packetsReceived || 0;
                 if (packets > 0) {
-                  return packets;
+                  let codecMimeType = '';
+                  if (stat.codecId) {
+                    const codecStat = stats.get(stat.codecId);
+                    if (codecStat && codecStat.mimeType) {
+                      codecMimeType = String(codecStat.mimeType);
+                    }
+                  }
+                  return {
+                    packetsReceived: packets,
+                    codecMimeType,
+                  };
                 }
               }
             }
             await delay(100);
           }
-          return 0;
+          return {
+            packetsReceived: 0,
+            codecMimeType: '',
+          };
         }
 
         async function run() {
@@ -705,7 +719,14 @@ def make_video_test_page() -> str:
           const intervalId = setInterval(drawFrame, 33);
           const stream = canvas.captureStream(30);
           const sourceTrack = stream.getVideoTracks()[0];
-          pc1.addTrack(sourceTrack, stream);
+          const transceiver = pc1.addTransceiver(sourceTrack, {direction: 'sendonly'});
+          if (codecMode === 'h264') {
+            const h264Codecs = RTCRtpSender.getCapabilities('video').codecs.filter(codec => codec.mimeType === 'video/H264');
+            if (h264Codecs.length === 0) {
+              throw new Error('H264 codec not available');
+            }
+            transceiver.setCodecPreferences(h264Codecs);
+          }
 
           const trackPromise = waitForEvent(pc2, 'track');
 
@@ -731,9 +752,12 @@ def make_video_test_page() -> str:
             waitForState(pc2, 'connectionstatechange', () => pc2.connectionState === 'connected'),
           ]);
 
-          const packetsReceived = await waitForInboundVideoPackets(receiver);
-          if (packetsReceived <= 0) {
+          const videoStats = await waitForInboundVideoStats(receiver);
+          if (videoStats.packetsReceived <= 0) {
             throw new Error('video packets were not received');
+          }
+          if (codecMode === 'h264' && String(videoStats.codecMimeType).toUpperCase().indexOf('H264') < 0) {
+            throw new Error('video codec was not H264');
           }
 
           const receivedTrackKind = receivedTrack.kind;
@@ -752,7 +776,8 @@ def make_video_test_page() -> str:
             tracks,
             receivedTrackKind,
             receivedTrackReadyState,
-            packetsReceived,
+            packetsReceived: videoStats.packetsReceived,
+            codecMimeType: videoStats.codecMimeType,
             pc1ConnectionState: pc1.connectionState,
             pc2ConnectionState: pc2.connectionState,
           };
@@ -761,7 +786,7 @@ def make_video_test_page() -> str:
         run().catch(error => fail('phase17 browser video test failed', error));
         </script>
         """
-    ).strip()
+    ).strip().replace("__CODEC_MODE__", codec_mode)
 
 
 def start_http_server(directory: Path) -> tuple[ThreadingHTTPServer, threading.Thread, int]:
@@ -853,6 +878,17 @@ def validate_browser_result(result: dict[str, Any], mode: str) -> None:
         require(isinstance(tracks, list) and "video" in tracks, "browser did not surface a video track event")
         return
 
+    if mode == "h264":
+        require(result.get("receivedTrackKind") == "video", "browser did not receive a video track")
+        require(result.get("receivedTrackReadyState") == "live", "video track should be live before cleanup")
+        packets_received = result.get("packetsReceived")
+        require(isinstance(packets_received, int) and packets_received > 0, "H264 packets were not received")
+        tracks = result.get("tracks")
+        require(isinstance(tracks, list) and "video" in tracks, "browser did not surface a video track event")
+        codec_mime_type = str(result.get("codecMimeType", ""))
+        require("h264" in codec_mime_type.lower(), "browser did not negotiate H264")
+        return
+
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
@@ -862,7 +898,9 @@ def make_test_page(mode: str) -> str:
     if mode == "audio":
         return make_audio_test_page()
     if mode == "video":
-        return make_video_test_page()
+        return make_video_test_page("vp8")
+    if mode == "h264":
+        return make_video_test_page("h264")
     raise InteropError(f"unsupported browser interop mode: {mode}")
 
 
