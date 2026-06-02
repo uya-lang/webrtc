@@ -1,0 +1,149 @@
+use libc.printf;
+use webrtc.api;
+use webrtc.media.model;
+use webrtc.rtp.rtp_receiver_route;
+use webrtc.track;
+
+fn check_ssrc_route_limit() i32 {
+    var table: RtpReceiverRouteTable = rtp_receiver_route_table_make();
+    var empty_mid: [byte: 1] = [];
+
+    var index: usize = 0usize;
+    while index < RTP_RECEIVER_ROUTE_MAX_ENTRIES {
+        const result: !void = rtp_receiver_route_add(
+            &table,
+            (100u32 + (index as u32)),
+            true,
+            (0xA0000000u32 + (index as u32)),
+            false,
+            empty_mid[0:0],
+        );
+        if result.error_id != 0 {
+            return 10i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    const overflow: !void = rtp_receiver_route_add(
+        &table,
+        9999u32,
+        true,
+        0xAFFFFFFFu32,
+        false,
+        empty_mid[0:0],
+    );
+    if overflow.error_id != @error_id(error.RtpReceiverRouteTableFull) {
+        return 50i32;
+    }
+
+    return 0i32;
+}
+
+fn make_frame(sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.sequence_id = sequence_id;
+    frame.timestamp = 90000u64 + sequence_id;
+    frame.duration_us = 33333u32;
+    frame.marker = true;
+    frame.payload = payload;
+    return frame;
+}
+
+fn check_track_queue_limit() i32 {
+    var track_state: Track = track_make();
+    const init: !void = track_init(&track_state, 7u64, MEDIA_KIND_VIDEO);
+    if init.error_id != 0 {
+        return 60i32;
+    }
+    if !track_open(&track_state) {
+        return 61i32;
+    }
+
+    var index: usize = 0usize;
+    while index < TRACK_MAX_PENDING_FRAMES {
+        var payload: [byte: 1] = [(65usize + index) as byte];
+        const frame: EncodedFrame = make_frame((index + 1usize) as u64, payload[0:1]);
+        const result: !void = track_write_encoded_frame(&track_state, &frame);
+        if result.error_id != 0 {
+            return 70i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    var overflow_payload: [byte: 1] = [0x7Fu8 as byte];
+    const overflow_frame: EncodedFrame = make_frame(999u64, overflow_payload[0:1]);
+    const overflow: !void = track_write_encoded_frame(&track_state, &overflow_frame);
+    if overflow.error_id != @error_id(error.TrackQueueFull) {
+        return 90i32;
+    }
+    if track_pending_count(&track_state) != TRACK_MAX_PENDING_FRAMES {
+        return 91i32;
+    }
+    if track_high_watermark(&track_state) != TRACK_MAX_PENDING_FRAMES {
+        return 92i32;
+    }
+    if track_drop_count(&track_state) != 1u64 {
+        return 93i32;
+    }
+
+    return 0i32;
+}
+
+fn check_datachannel_queue_limit() i32 {
+    var init: SctpDataChannelInit = data_channel_init_make();
+    const channel_result: !DataChannel = data_channel_make("limit" as &[byte], "webrtc-datachannel" as &[byte], &init);
+    if channel_result.error_id != 0 {
+        return 100i32;
+    }
+
+    var channel: DataChannel = channel_result.value;
+    if !data_channel_open(&channel) {
+        return 101i32;
+    }
+
+    var index: usize = 0usize;
+    while index < DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        var payload: [byte: 1] = [(48usize + index) as byte];
+        const result: !void = data_channel_send(&channel, payload[0:1]);
+        if result.error_id != 0 {
+            return 110i32 + (index as i32);
+        }
+        index = index + 1usize;
+    }
+
+    var overflow_payload: [byte: 1] = [0x7Fu8 as byte];
+    const overflow: !void = data_channel_send(&channel, overflow_payload[0:1]);
+    if overflow.error_id != @error_id(error.SctpDataChannelQueueFull) {
+        return 130i32;
+    }
+    if data_channel_buffered_amount(&channel) != DATA_CHANNEL_MAX_BUFFERED_MESSAGES {
+        return 131i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_ssrc_route_limit();
+    if result != 0i32 {
+        printf("Peer SSRC/track/datachannel limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_track_queue_limit();
+    if result != 0i32 {
+        printf("Peer SSRC/track/datachannel limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_datachannel_queue_limit();
+    if result != 0i32 {
+        printf("Peer SSRC/track/datachannel limit tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Peer SSRC/track/datachannel limit tests passed\n");
+    return 0i32;
+}
