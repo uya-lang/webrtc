@@ -1,0 +1,60 @@
+// webrtc.media.ffmpeg_direct_ingest - explicit FFmpeg ingest adapter for Uya sender tests
+// Module: src/webrtc/media/ffmpeg_direct_ingest.uya -> use webrtc.media.ffmpeg_direct_ingest;
+//
+// This module is intentionally separate from direct_sender.uya so the default
+// encoded-frame sender path does not link FFmpeg.
+
+use webrtc.media.direct_sender;
+use webrtc.media.ffmpeg_codec;
+use webrtc.media.model;
+
+export struct FfmpegDirectSenderIngestResult {
+    frame: EncodedFrame = EncodedFrame{},
+    rtp: DirectSenderPacket = DirectSenderPacket{},
+}
+
+export fn ffmpeg_direct_sender_encode_opus_rtp(
+    sender: &UyaDirectSender,
+    encoder: &FfmpegCodecEncoder,
+    raw: &FfmpegCodecRawAudioView,
+    encoded_packet: &[byte],
+    out_rtp_packet: &[byte],
+) !FfmpegDirectSenderIngestResult {
+    const frame: EncodedFrame = try ffmpeg_codec_encode_audio_to_frame(encoder, raw, encoded_packet);
+    const rtp: DirectSenderPacket = try rtp_packetize_encoded_frame(sender, &frame, out_rtp_packet);
+    return FfmpegDirectSenderIngestResult{
+        frame: frame,
+        rtp: rtp,
+    };
+}
+
+export fn ffmpeg_direct_sender_encode_vp8_rtp(
+    sender: &UyaDirectSender,
+    encoder: &FfmpegCodecEncoder,
+    raw: &FfmpegCodecRawVideoI420View,
+    encoded_packet: &[byte],
+    out_rtp_packet: &[byte],
+) !FfmpegDirectSenderIngestResult {
+    const frame: EncodedFrame = try ffmpeg_codec_encode_video_i420_to_frame(encoder, raw, encoded_packet);
+    const rtp: DirectSenderPacket = try rtp_packetize_encoded_frame(sender, &frame, out_rtp_packet);
+    return FfmpegDirectSenderIngestResult{
+        frame: frame,
+        rtp: rtp,
+    };
+}
+
+export fn ffmpeg_direct_sender_decode_opus_for_verification(
+    decoder: &FfmpegCodecDecoder,
+    frame: &EncodedFrame,
+    out_pcm_s16le: &[byte],
+) !FfmpegCodecRawAudioView {
+    return ffmpeg_codec_decode_audio_frame(decoder, frame, out_pcm_s16le);
+}
+
+export fn ffmpeg_direct_sender_decode_vp8_i420_for_verification(
+    decoder: &FfmpegCodecDecoder,
+    frame: &EncodedFrame,
+    out_i420: &[byte],
+) !FfmpegCodecRawVideoI420View {
+    return ffmpeg_codec_decode_video_i420_frame(decoder, frame, out_i420);
+}

@@ -10,6 +10,10 @@ export error FfmpegCodecInvalidConfig;
 export error FfmpegCodecInvalidRawFrame;
 export error FfmpegCodecInvalidEncodedPacket;
 export error FfmpegCodecUnsupportedCodec;
+export error FfmpegCodecUnavailable;
+export error FfmpegCodecEncodeFailed;
+export error FfmpegCodecDecodeFailed;
+export error FfmpegCodecOutputTooSmall;
 
 export const FFMPEG_CODEC_STATUS_OK: i32 = 0i32;
 export const FFMPEG_CODEC_STATUS_UNAVAILABLE: i32 = -1i32;
@@ -17,6 +21,7 @@ export const FFMPEG_CODEC_STATUS_INVALID_ARGUMENT: i32 = -2i32;
 export const FFMPEG_CODEC_STATUS_UNSUPPORTED_CODEC: i32 = -3i32;
 export const FFMPEG_CODEC_STATUS_ENCODE_FAILED: i32 = -4i32;
 export const FFMPEG_CODEC_STATUS_DECODE_FAILED: i32 = -5i32;
+export const FFMPEG_CODEC_STATUS_OUTPUT_TOO_SMALL: i32 = -6i32;
 export const FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ: u32 = 48000u32;
 export const FFMPEG_CODEC_OPUS_DEFAULT_CHANNELS: u8 = 1u8;
 export const FFMPEG_CODEC_OPUS_DEFAULT_DURATION_US: u32 = 20000u32;
@@ -65,6 +70,17 @@ export struct FfmpegCodecEncodedPacketView {
     temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
 }
 
+export struct FfmpegCodecEncoder {
+    handle: &void = null,
+    config: FfmpegCodecEncoderConfig = FfmpegCodecEncoderConfig{},
+    next_sequence_id: u64 = 0u64,
+}
+
+export struct FfmpegCodecDecoder {
+    handle: &void = null,
+    config: FfmpegCodecEncoderConfig = FfmpegCodecEncoderConfig{},
+}
+
 // Implemented by an optional C shim linked only by explicit FFmpeg tests.
 extern fn uya_ffmpeg_codec_encoder_open(
     media_kind: u8,
@@ -79,6 +95,17 @@ extern fn uya_ffmpeg_codec_encoder_open(
 ) &void;
 
 extern fn uya_ffmpeg_codec_encoder_close(handle: &void) void;
+
+extern fn uya_ffmpeg_codec_decoder_open(
+    media_kind: u8,
+    codec_id: u16,
+    sample_rate_hz: u32,
+    channels: u8,
+    width: u32,
+    height: u32,
+) &void;
+
+extern fn uya_ffmpeg_codec_decoder_close(handle: &void) void;
 
 extern fn uya_ffmpeg_codec_encode_audio(
     handle: &void,
@@ -123,6 +150,119 @@ extern fn uya_ffmpeg_codec_decode_video_i420(
 
 export fn ffmpeg_codec_encoder_config_make() FfmpegCodecEncoderConfig {
     return FfmpegCodecEncoderConfig{};
+}
+
+export fn ffmpeg_codec_encoder_make() FfmpegCodecEncoder {
+    return FfmpegCodecEncoder{};
+}
+
+export fn ffmpeg_codec_decoder_make() FfmpegCodecDecoder {
+    return FfmpegCodecDecoder{};
+}
+
+fn ffmpeg_codec_validate_encoder_config(config: &FfmpegCodecEncoderConfig) !void {
+    if config == null {
+        return error.FfmpegCodecInvalidConfig;
+    }
+
+    if config.media_kind == MEDIA_KIND_AUDIO && config.codec_id == CODEC_ID_OPUS {
+        if config.sample_rate_hz != FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ || config.channels == 0u8 {
+            return error.FfmpegCodecInvalidConfig;
+        }
+        return;
+    }
+
+    if config.media_kind == MEDIA_KIND_VIDEO && config.codec_id == CODEC_ID_VP8 {
+        if config.width == 0u32 || config.height == 0u32 || config.fps_num == 0u32 || config.fps_den == 0u32 {
+            return error.FfmpegCodecInvalidConfig;
+        }
+        if (config.width & 1u32) != 0u32 || (config.height & 1u32) != 0u32 {
+            return error.FfmpegCodecInvalidConfig;
+        }
+        return;
+    }
+
+    return error.FfmpegCodecUnsupportedCodec;
+}
+
+fn ffmpeg_codec_status_to_error(status: i32) !void {
+    if status == FFMPEG_CODEC_STATUS_OK {
+        return;
+    }
+    if status == FFMPEG_CODEC_STATUS_INVALID_ARGUMENT {
+        return error.FfmpegCodecInvalidConfig;
+    }
+    if status == FFMPEG_CODEC_STATUS_UNSUPPORTED_CODEC {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if status == FFMPEG_CODEC_STATUS_ENCODE_FAILED {
+        return error.FfmpegCodecEncodeFailed;
+    }
+    if status == FFMPEG_CODEC_STATUS_DECODE_FAILED {
+        return error.FfmpegCodecDecodeFailed;
+    }
+    if status == FFMPEG_CODEC_STATUS_OUTPUT_TOO_SMALL {
+        return error.FfmpegCodecOutputTooSmall;
+    }
+    return error.FfmpegCodecUnavailable;
+}
+
+export fn ffmpeg_codec_encoder_open(config: FfmpegCodecEncoderConfig) !FfmpegCodecEncoder {
+    try ffmpeg_codec_validate_encoder_config(&config);
+    const handle: &void = uya_ffmpeg_codec_encoder_open(
+        config.media_kind,
+        config.codec_id,
+        config.sample_rate_hz,
+        config.channels,
+        config.width,
+        config.height,
+        config.bitrate_bps,
+        config.fps_num,
+        config.fps_den,
+    );
+    if handle == null {
+        return error.FfmpegCodecUnavailable;
+    }
+    return FfmpegCodecEncoder{
+        handle: handle,
+        config: config,
+        next_sequence_id: 0u64,
+    };
+}
+
+export fn ffmpeg_codec_encoder_close(encoder: &FfmpegCodecEncoder) void {
+    if encoder == null || encoder.handle == null {
+        return;
+    }
+    uya_ffmpeg_codec_encoder_close(encoder.handle);
+    encoder.handle = null;
+}
+
+export fn ffmpeg_codec_decoder_open(config: FfmpegCodecEncoderConfig) !FfmpegCodecDecoder {
+    try ffmpeg_codec_validate_encoder_config(&config);
+    const handle: &void = uya_ffmpeg_codec_decoder_open(
+        config.media_kind,
+        config.codec_id,
+        config.sample_rate_hz,
+        config.channels,
+        config.width,
+        config.height,
+    );
+    if handle == null {
+        return error.FfmpegCodecUnavailable;
+    }
+    return FfmpegCodecDecoder{
+        handle: handle,
+        config: config,
+    };
+}
+
+export fn ffmpeg_codec_decoder_close(decoder: &FfmpegCodecDecoder) void {
+    if decoder == null || decoder.handle == null {
+        return;
+    }
+    uya_ffmpeg_codec_decoder_close(decoder.handle);
+    decoder.handle = null;
 }
 
 export fn ffmpeg_codec_encoded_packet_view_make(
@@ -190,6 +330,96 @@ export fn ffmpeg_codec_packet_to_encoded_frame(packet: &FfmpegCodecEncodedPacket
     return frame;
 }
 
+export fn ffmpeg_codec_encode_audio_to_frame(
+    encoder: &FfmpegCodecEncoder,
+    raw: &FfmpegCodecRawAudioView,
+    out_packet: &[byte],
+) !EncodedFrame {
+    if encoder == null || encoder.handle == null || raw == null || out_packet.len == 0usize {
+        return error.FfmpegCodecInvalidConfig;
+    }
+    if encoder.config.media_kind != MEDIA_KIND_AUDIO || encoder.config.codec_id != CODEC_ID_OPUS {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if raw.pcm_s16le.len == 0usize {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+
+    var out_len: usize = 0usize;
+    const status: i32 = uya_ffmpeg_codec_encode_audio(
+        encoder.handle,
+        &raw.pcm_s16le[0] as &const byte,
+        raw.pcm_s16le.len,
+        raw.timestamp_us,
+        raw.duration_us,
+        &out_packet[0],
+        out_packet.len,
+        &out_len,
+    );
+    try ffmpeg_codec_status_to_error(status);
+    if out_len == 0usize || out_len > out_packet.len {
+        return error.FfmpegCodecOutputTooSmall;
+    }
+
+    const packet: FfmpegCodecEncodedPacketView = try ffmpeg_codec_encoded_packet_view_make(
+        out_packet[0:out_len],
+        raw.timestamp_us,
+        raw.duration_us,
+        encoder.next_sequence_id,
+        CODEC_ID_OPUS,
+        MEDIA_KIND_AUDIO,
+        false,
+    );
+    encoder.next_sequence_id = encoder.next_sequence_id + 1u64;
+    return ffmpeg_codec_packet_to_encoded_frame(&packet);
+}
+
+export fn ffmpeg_codec_encode_video_i420_to_frame(
+    encoder: &FfmpegCodecEncoder,
+    raw: &FfmpegCodecRawVideoI420View,
+    out_packet: &[byte],
+) !EncodedFrame {
+    if encoder == null || encoder.handle == null || raw == null || out_packet.len == 0usize {
+        return error.FfmpegCodecInvalidConfig;
+    }
+    if encoder.config.media_kind != MEDIA_KIND_VIDEO || encoder.config.codec_id != CODEC_ID_VP8 {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if raw.i420.len == 0usize {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+
+    var out_len: usize = 0usize;
+    var out_keyframe: i32 = 0i32;
+    const status: i32 = uya_ffmpeg_codec_encode_video_i420(
+        encoder.handle,
+        &raw.i420[0] as &const byte,
+        raw.i420.len,
+        raw.timestamp_us,
+        raw.duration_us,
+        &out_packet[0],
+        out_packet.len,
+        &out_len,
+        &out_keyframe,
+    );
+    try ffmpeg_codec_status_to_error(status);
+    if out_len == 0usize || out_len > out_packet.len {
+        return error.FfmpegCodecOutputTooSmall;
+    }
+
+    const packet: FfmpegCodecEncodedPacketView = try ffmpeg_codec_encoded_packet_view_make(
+        out_packet[0:out_len],
+        raw.timestamp_us,
+        raw.duration_us,
+        encoder.next_sequence_id,
+        CODEC_ID_VP8,
+        MEDIA_KIND_VIDEO,
+        out_keyframe != 0i32,
+    );
+    encoder.next_sequence_id = encoder.next_sequence_id + 1u64;
+    return ffmpeg_codec_packet_to_encoded_frame(&packet);
+}
+
 export fn ffmpeg_codec_encoded_frame_to_packet(frame: &EncodedFrame) !FfmpegCodecEncodedPacketView {
     if frame == null || frame.payload.len == 0usize || frame.duration_us == 0u32 {
         return error.FfmpegCodecInvalidEncodedPacket;
@@ -238,6 +468,48 @@ export fn ffmpeg_codec_raw_audio_view_make(
     };
 }
 
+export fn ffmpeg_codec_decode_audio_frame(
+    decoder: &FfmpegCodecDecoder,
+    frame: &EncodedFrame,
+    out_pcm_s16le: &[byte],
+) !FfmpegCodecRawAudioView {
+    if decoder == null || decoder.handle == null || frame == null || out_pcm_s16le.len == 0usize {
+        return error.FfmpegCodecInvalidConfig;
+    }
+    if decoder.config.media_kind != MEDIA_KIND_AUDIO || decoder.config.codec_id != CODEC_ID_OPUS {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if frame.media_kind != MEDIA_KIND_AUDIO || frame.codec_id != CODEC_ID_OPUS || frame.payload.len == 0usize {
+        return error.FfmpegCodecInvalidEncodedPacket;
+    }
+
+    var out_len: usize = 0usize;
+    const status: i32 = uya_ffmpeg_codec_decode_audio(
+        decoder.handle,
+        &frame.payload[0] as &const byte,
+        frame.payload.len,
+        &out_pcm_s16le[0],
+        out_pcm_s16le.len,
+        &out_len,
+    );
+    try ffmpeg_codec_status_to_error(status);
+    if out_len == 0usize || out_len > out_pcm_s16le.len {
+        return error.FfmpegCodecOutputTooSmall;
+    }
+    const bytes_per_sample_per_channel: usize = 2usize * (decoder.config.channels as usize);
+    if bytes_per_sample_per_channel == 0usize || (out_len % bytes_per_sample_per_channel) != 0usize {
+        return error.FfmpegCodecDecodeFailed;
+    }
+    return ffmpeg_codec_raw_audio_view_make(
+        out_pcm_s16le[0:out_len],
+        frame.timestamp,
+        frame.duration_us,
+        decoder.config.sample_rate_hz,
+        decoder.config.channels,
+        out_len / bytes_per_sample_per_channel,
+    );
+}
+
 export fn ffmpeg_codec_raw_video_i420_view_make(
     i420: &[byte],
     timestamp_us: u64,
@@ -266,4 +538,43 @@ export fn ffmpeg_codec_raw_video_i420_view_make(
         width: width,
         height: height,
     };
+}
+
+export fn ffmpeg_codec_decode_video_i420_frame(
+    decoder: &FfmpegCodecDecoder,
+    frame: &EncodedFrame,
+    out_i420: &[byte],
+) !FfmpegCodecRawVideoI420View {
+    if decoder == null || decoder.handle == null || frame == null || out_i420.len == 0usize {
+        return error.FfmpegCodecInvalidConfig;
+    }
+    if decoder.config.media_kind != MEDIA_KIND_VIDEO || decoder.config.codec_id != CODEC_ID_VP8 {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if frame.media_kind != MEDIA_KIND_VIDEO || frame.codec_id != CODEC_ID_VP8 || frame.payload.len == 0usize {
+        return error.FfmpegCodecInvalidEncodedPacket;
+    }
+
+    var out_len: usize = 0usize;
+    const status: i32 = uya_ffmpeg_codec_decode_video_i420(
+        decoder.handle,
+        &frame.payload[0] as &const byte,
+        frame.payload.len,
+        &out_i420[0],
+        out_i420.len,
+        &out_len,
+    );
+    try ffmpeg_codec_status_to_error(status);
+    if out_len == 0usize || out_len > out_i420.len {
+        return error.FfmpegCodecOutputTooSmall;
+    }
+
+    const decoded: FfmpegCodecRawVideoI420View = try ffmpeg_codec_raw_video_i420_view_make(
+        out_i420[0:out_len],
+        frame.timestamp,
+        frame.duration_us,
+        decoder.config.width,
+        decoder.config.height,
+    );
+    return decoded;
 }

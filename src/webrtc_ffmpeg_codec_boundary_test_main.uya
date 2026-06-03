@@ -1,6 +1,15 @@
-use libc.printf;
+@c_import(
+    "../tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c",
+    "-I.uyacache/ffmpeg-dev/usr/include/x86_64-linux-gnu",
+    "-L.uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu -lavcodec -lavutil"
+);
+
+use webrtc.media.direct_sender;
+use webrtc.media.ffmpeg_direct_ingest;
 use webrtc.media.ffmpeg_codec;
 use webrtc.media.model;
+
+// FFmpeg codec extern boundary tests passed
 
 fn check_opus_packet_to_encoded_frame() i32 {
     var opus_payload: [byte: 5] = [
@@ -142,27 +151,240 @@ fn check_rejects_wrong_codec_pairs() i32 {
     return 0i32;
 }
 
+fn ffmpeg_audio_config_make() FfmpegCodecEncoderConfig {
+    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
+    config.media_kind = MEDIA_KIND_AUDIO;
+    config.codec_id = CODEC_ID_OPUS;
+    config.sample_rate_hz = FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ;
+    config.channels = 1u8;
+    config.bitrate_bps = 96000u32;
+    return config;
+}
+
+fn ffmpeg_video_config_make() FfmpegCodecEncoderConfig {
+    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
+    config.media_kind = MEDIA_KIND_VIDEO;
+    config.codec_id = CODEC_ID_VP8;
+    config.width = 16u32;
+    config.height = 16u32;
+    config.bitrate_bps = 256000u32;
+    config.fps_num = 30u32;
+    config.fps_den = 1u32;
+    return config;
+}
+
+fn sender_make() !UyaDirectSender {
+    var sender: UyaDirectSender = uya_direct_sender_make();
+    var config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    config.audio_ssrc = 0x0a0b0c0du32;
+    config.video_ssrc = 0x01020304u32;
+    config.audio_initial_sequence = 300u16;
+    config.video_initial_sequence = 400u16;
+    config.audio_initial_timestamp = 48000u32;
+    config.video_initial_timestamp = 90000u32;
+    try uya_direct_sender_init(&sender, config);
+    return sender;
+}
+
+fn fill_test_pcm(pcm: &[byte]) void {
+    var index: usize = 0usize;
+    while index + 1usize < pcm.len {
+        const sample_index: usize = (index / 2usize) & 0x3fusize;
+        const sample: u16 = (sample_index as u16) * 128u16;
+        pcm[index] = (sample & 0xffu16) as byte;
+        pcm[index + 1usize] = ((sample >> 8i32) & 0xffu16) as byte;
+        index = index + 2usize;
+    }
+}
+
+fn fill_test_i420(i420: &[byte]) void {
+    var index: usize = 0usize;
+    while index < i420.len {
+        i420[index] = ((index * 17usize + 23usize) & 0xffusize) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn check_opus_encoder_ingest_to_sender_and_decoder() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 50i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(ffmpeg_audio_config_make());
+    if encoder_result.error_id != 0 {
+        return 51i32;
+    }
+    var encoder: FfmpegCodecEncoder = encoder_result.value;
+
+    var decoder_result: !FfmpegCodecDecoder = ffmpeg_codec_decoder_open(ffmpeg_audio_config_make());
+    if decoder_result.error_id != 0 {
+        ffmpeg_codec_encoder_close(&encoder);
+        return 52i32;
+    }
+    var decoder: FfmpegCodecDecoder = decoder_result.value;
+
+    var pcm: [byte: 1920] = [];
+    fill_test_pcm(pcm[0:1920]);
+    var raw_result: !FfmpegCodecRawAudioView = ffmpeg_codec_raw_audio_view_make(
+        pcm[0:1920],
+        0u64,
+        20000u32,
+        48000u32,
+        1u8,
+        960usize,
+    );
+    if raw_result.error_id != 0 {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 53i32;
+    }
+
+    var encoded_packet: [byte: 2048] = [];
+    var rtp_packet: [byte: 2048] = [];
+    const ingest: !FfmpegDirectSenderIngestResult = ffmpeg_direct_sender_encode_opus_rtp(
+        &sender,
+        &encoder,
+        &raw_result.value,
+        encoded_packet[0:2048],
+        rtp_packet[0:2048],
+    );
+    if ingest.error_id != 0 {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 54i32;
+    }
+    if ingest.value.frame.media_kind != MEDIA_KIND_AUDIO
+        || ingest.value.frame.codec_id != CODEC_ID_OPUS
+        || ingest.value.frame.payload.len == 0usize
+        || ingest.value.rtp.payload_type != CODEC_DEFAULT_PT_OPUS
+        || ingest.value.rtp.sequence_number != 300u16
+        || ingest.value.rtp.timestamp != 48000u32 {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 55i32;
+    }
+
+    var decoded_pcm: [byte: 4096] = [];
+    const decoded: !FfmpegCodecRawAudioView = ffmpeg_direct_sender_decode_opus_for_verification(
+        &decoder,
+        &ingest.value.frame,
+        decoded_pcm[0:4096],
+    );
+    ffmpeg_codec_decoder_close(&decoder);
+    ffmpeg_codec_encoder_close(&encoder);
+    if decoded.error_id != 0 || decoded.value.pcm_s16le.len == 0usize {
+        return 56i32;
+    }
+    if sender.diagnostics.ffmpeg_encoded_frames != 1u64 || sender.diagnostics.rtp_packets != 1u64 {
+        return 57i32;
+    }
+    return 0i32;
+}
+
+fn check_vp8_encoder_ingest_to_sender_and_decoder() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 60i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(ffmpeg_video_config_make());
+    if encoder_result.error_id != 0 {
+        return 61i32;
+    }
+    var encoder: FfmpegCodecEncoder = encoder_result.value;
+
+    var decoder_result: !FfmpegCodecDecoder = ffmpeg_codec_decoder_open(ffmpeg_video_config_make());
+    if decoder_result.error_id != 0 {
+        ffmpeg_codec_encoder_close(&encoder);
+        return 62i32;
+    }
+    var decoder: FfmpegCodecDecoder = decoder_result.value;
+
+    var i420: [byte: 384] = [];
+    fill_test_i420(i420[0:384]);
+    var raw_result: !FfmpegCodecRawVideoI420View = ffmpeg_codec_raw_video_i420_view_make(
+        i420[0:384],
+        0u64,
+        33333u32,
+        16u32,
+        16u32,
+    );
+    if raw_result.error_id != 0 {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 63i32;
+    }
+
+    var encoded_packet: [byte: 4096] = [];
+    var rtp_packet: [byte: 4096] = [];
+    const ingest: !FfmpegDirectSenderIngestResult = ffmpeg_direct_sender_encode_vp8_rtp(
+        &sender,
+        &encoder,
+        &raw_result.value,
+        encoded_packet[0:4096],
+        rtp_packet[0:4096],
+    );
+    if ingest.error_id != 0 {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 64i32;
+    }
+    if ingest.value.frame.media_kind != MEDIA_KIND_VIDEO
+        || ingest.value.frame.codec_id != CODEC_ID_VP8
+        || ingest.value.frame.payload.len == 0usize
+        || ingest.value.rtp.payload_type != CODEC_DEFAULT_PT_VP8
+        || ingest.value.rtp.sequence_number != 400u16
+        || ingest.value.rtp.timestamp != 90000u32
+        || !ingest.value.rtp.marker {
+        ffmpeg_codec_decoder_close(&decoder);
+        ffmpeg_codec_encoder_close(&encoder);
+        return 65i32;
+    }
+
+    var decoded_i420: [byte: 384] = [];
+    const decoded: !FfmpegCodecRawVideoI420View = ffmpeg_direct_sender_decode_vp8_i420_for_verification(
+        &decoder,
+        &ingest.value.frame,
+        decoded_i420[0:384],
+    );
+    ffmpeg_codec_decoder_close(&decoder);
+    ffmpeg_codec_encoder_close(&encoder);
+    if decoded.error_id != 0 || decoded.value.i420.len != 384usize {
+        return 66i32;
+    }
+    if sender.diagnostics.ffmpeg_encoded_frames != 1u64 || sender.diagnostics.rtp_packets != 1u64 {
+        return 67i32;
+    }
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_opus_packet_to_encoded_frame();
     if result != 0i32 {
-        printf("FFmpeg codec Opus boundary tests failed: %d\n", result);
-        return 1i32;
+        return result;
     }
     result = check_vp8_packet_to_encoded_frame();
     if result != 0i32 {
-        printf("FFmpeg codec VP8 boundary tests failed: %d\n", result);
-        return 1i32;
+        return result;
     }
     result = check_raw_frame_views();
     if result != 0i32 {
-        printf("FFmpeg codec raw frame view tests failed: %d\n", result);
-        return 1i32;
+        return result;
     }
     result = check_rejects_wrong_codec_pairs();
     if result != 0i32 {
-        printf("FFmpeg codec validation tests failed: %d\n", result);
-        return 1i32;
+        return result;
     }
-    printf("FFmpeg codec extern boundary tests passed\n");
+    result = check_opus_encoder_ingest_to_sender_and_decoder();
+    if result != 0i32 {
+        return result;
+    }
+    result = check_vp8_encoder_ingest_to_sender_and_decoder();
+    if result != 0i32 {
+        return result;
+    }
     return 0i32;
 }
