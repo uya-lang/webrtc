@@ -549,7 +549,11 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
   - [x] 建立 `test-ffmpeg-chrome-call` 的 Uya direct sender 验收壳：Chrome 只做 recvonly inbound peer，测试禁止 `captureStream`、浏览器内部 `pc1`/`pc2` loopback 和 Pion/aiortc/wrtc 等外部 WebRTC sender。
   - [x] 增加 Uya sender CLI 入口 `uya_ffmpeg_direct_sender`，dry-run 可读取 Chrome offer / media 参数并输出诊断 JSON；非 dry-run 在 DTLS-SRTP 未接通前拒绝写假 SDP answer。
   - [x] 在 Uya sender 中实现 `EncodedFrame` -> Opus/VP8 RTP payload packetizer，并覆盖 timestamp、payload type、SSRC、marker、单包 MTU guard。
-  - [~] 在 Uya sender 中实现 FFmpeg Opus/VP8 encoded packet 读取或 FFmpeg 编码子进程 ingest，并转换为 `EncodedFrame`。
+  - [~] 在 Uya sender 中实现 FFmpeg libavcodec/libavutil extern codec ingest：PCM/I420 raw frame -> Opus/VP8 `EncodedFrame`，并保留 decoder path 供后续验证 Uya 自研 encoder/decoder。
+    - [x] 定义 FFmpeg codec extern ABI、raw audio/video view、encoded packet -> `EncodedFrame` 适配和显式门禁 `test-ffmpeg-codec-extern`。
+    - [ ] 接入 FFmpeg Opus encoder：PCM/s16le -> Opus packet -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
+    - [ ] 接入 FFmpeg VP8 encoder：I420 -> VP8 frame -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
+    - [ ] 接入 FFmpeg decoder 验证路径：Opus/VP8 `EncodedFrame` -> decoded PCM/I420，用于后续 Uya 自研 encoder/decoder A/B 验证。
   - [ ] 在 Uya sender 中接通 Chrome host ICE/STUN 和 DTLS-SRTP exporter，生成真实 SRTP/SRTCP key。
   - [ ] 在 Uya sender 中将 RTP/RTCP 经 SRTP/SRTCP protect 后通过 UDP 发给 Chrome selected pair。
   - [ ] 通过 Chrome inbound-rtp stats 和 decoded audio/video frames 验证观看成功，并记录 FFmpeg packet、RTP packet、SRTP packet、UDP packet 计数。

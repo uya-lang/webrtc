@@ -1,0 +1,269 @@
+// webrtc.media.ffmpeg_codec - optional FFmpeg libavcodec boundary
+// Module: src/webrtc/media/ffmpeg_codec.uya -> use webrtc.media.ffmpeg_codec;
+//
+// FFmpeg lives only at the explicit codec boundary. WebRTC RTP, SRTP/SRTCP,
+// ICE/DTLS, and UDP remain Uya-owned.
+
+use webrtc.media.model;
+
+export error FfmpegCodecInvalidConfig;
+export error FfmpegCodecInvalidRawFrame;
+export error FfmpegCodecInvalidEncodedPacket;
+export error FfmpegCodecUnsupportedCodec;
+
+export const FFMPEG_CODEC_STATUS_OK: i32 = 0i32;
+export const FFMPEG_CODEC_STATUS_UNAVAILABLE: i32 = -1i32;
+export const FFMPEG_CODEC_STATUS_INVALID_ARGUMENT: i32 = -2i32;
+export const FFMPEG_CODEC_STATUS_UNSUPPORTED_CODEC: i32 = -3i32;
+export const FFMPEG_CODEC_STATUS_ENCODE_FAILED: i32 = -4i32;
+export const FFMPEG_CODEC_STATUS_DECODE_FAILED: i32 = -5i32;
+export const FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ: u32 = 48000u32;
+export const FFMPEG_CODEC_OPUS_DEFAULT_CHANNELS: u8 = 1u8;
+export const FFMPEG_CODEC_OPUS_DEFAULT_DURATION_US: u32 = 20000u32;
+export const FFMPEG_CODEC_VP8_CLOCK_RATE_HZ: u32 = 90000u32;
+export const FFMPEG_CODEC_VP8_DEFAULT_DURATION_US: u32 = 33333u32;
+const FFMPEG_CODEC_MAX_USIZE: usize = ~(0 as usize);
+
+export struct FfmpegCodecEncoderConfig {
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
+    sample_rate_hz: u32 = FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ,
+    channels: u8 = FFMPEG_CODEC_OPUS_DEFAULT_CHANNELS,
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+    bitrate_bps: u32 = 0u32,
+    fps_num: u32 = 30u32,
+    fps_den: u32 = 1u32,
+}
+
+export struct FfmpegCodecRawAudioView {
+    pcm_s16le: &[byte] = [],
+    timestamp_us: u64 = 0u64,
+    duration_us: u32 = FFMPEG_CODEC_OPUS_DEFAULT_DURATION_US,
+    sample_rate_hz: u32 = FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ,
+    channels: u8 = FFMPEG_CODEC_OPUS_DEFAULT_CHANNELS,
+    samples_per_channel: usize = 0usize,
+}
+
+export struct FfmpegCodecRawVideoI420View {
+    i420: &[byte] = [],
+    timestamp_us: u64 = 0u64,
+    duration_us: u32 = FFMPEG_CODEC_VP8_DEFAULT_DURATION_US,
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+}
+
+export struct FfmpegCodecEncodedPacketView {
+    packet: &[byte] = [],
+    timestamp_us: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    sequence_id: u64 = 0u64,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
+    is_keyframe: bool = false,
+    marker: bool = true,
+    temporal_id: i32 = ENCODED_FRAME_NO_TEMPORAL_ID,
+}
+
+// Implemented by an optional C shim linked only by explicit FFmpeg tests.
+extern fn uya_ffmpeg_codec_encoder_open(
+    media_kind: u8,
+    codec_id: u16,
+    sample_rate_hz: u32,
+    channels: u8,
+    width: u32,
+    height: u32,
+    bitrate_bps: u32,
+    fps_num: u32,
+    fps_den: u32,
+) &void;
+
+extern fn uya_ffmpeg_codec_encoder_close(handle: &void) void;
+
+extern fn uya_ffmpeg_codec_encode_audio(
+    handle: &void,
+    pcm_s16le: &const byte,
+    pcm_len: usize,
+    timestamp_us: u64,
+    duration_us: u32,
+    out_packet: &byte,
+    out_capacity: usize,
+    out_len: &usize,
+) i32;
+
+extern fn uya_ffmpeg_codec_encode_video_i420(
+    handle: &void,
+    i420: &const byte,
+    i420_len: usize,
+    timestamp_us: u64,
+    duration_us: u32,
+    out_packet: &byte,
+    out_capacity: usize,
+    out_len: &usize,
+    out_keyframe: &i32,
+) i32;
+
+extern fn uya_ffmpeg_codec_decode_audio(
+    handle: &void,
+    packet: &const byte,
+    packet_len: usize,
+    out_pcm_s16le: &byte,
+    out_capacity: usize,
+    out_len: &usize,
+) i32;
+
+extern fn uya_ffmpeg_codec_decode_video_i420(
+    handle: &void,
+    packet: &const byte,
+    packet_len: usize,
+    out_i420: &byte,
+    out_capacity: usize,
+    out_len: &usize,
+) i32;
+
+export fn ffmpeg_codec_encoder_config_make() FfmpegCodecEncoderConfig {
+    return FfmpegCodecEncoderConfig{};
+}
+
+export fn ffmpeg_codec_encoded_packet_view_make(
+    packet: &[byte],
+    timestamp_us: u64,
+    duration_us: u32,
+    sequence_id: u64,
+    codec_id: u16,
+    media_kind: u8,
+    is_keyframe: bool,
+) !FfmpegCodecEncodedPacketView {
+    if packet.len == 0usize || duration_us == 0u32 {
+        return error.FfmpegCodecInvalidEncodedPacket;
+    }
+    if media_kind == MEDIA_KIND_AUDIO && codec_id == CODEC_ID_OPUS {
+        return FfmpegCodecEncodedPacketView{
+            packet: packet,
+            timestamp_us: timestamp_us,
+            duration_us: duration_us,
+            sequence_id: sequence_id,
+            codec_id: codec_id,
+            media_kind: media_kind,
+            is_keyframe: false,
+            marker: true,
+            temporal_id: ENCODED_FRAME_NO_TEMPORAL_ID,
+        };
+    }
+    if media_kind == MEDIA_KIND_VIDEO && codec_id == CODEC_ID_VP8 {
+        return FfmpegCodecEncodedPacketView{
+            packet: packet,
+            timestamp_us: timestamp_us,
+            duration_us: duration_us,
+            sequence_id: sequence_id,
+            codec_id: codec_id,
+            media_kind: media_kind,
+            is_keyframe: is_keyframe,
+            marker: true,
+            temporal_id: ENCODED_FRAME_NO_TEMPORAL_ID,
+        };
+    }
+    return error.FfmpegCodecUnsupportedCodec;
+}
+
+export fn ffmpeg_codec_packet_to_encoded_frame(packet: &FfmpegCodecEncodedPacketView) !EncodedFrame {
+    if packet == null || packet.packet.len == 0usize || packet.duration_us == 0u32 {
+        return error.FfmpegCodecInvalidEncodedPacket;
+    }
+    if packet.media_kind != MEDIA_KIND_AUDIO && packet.media_kind != MEDIA_KIND_VIDEO {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+    if packet.codec_id != CODEC_ID_OPUS && packet.codec_id != CODEC_ID_VP8 {
+        return error.FfmpegCodecUnsupportedCodec;
+    }
+
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = packet.codec_id;
+    frame.media_kind = packet.media_kind;
+    frame.timestamp = packet.timestamp_us;
+    frame.duration_us = packet.duration_us;
+    frame.sequence_id = packet.sequence_id;
+    frame.payload = packet.packet;
+    frame.is_keyframe = packet.is_keyframe;
+    frame.marker = packet.marker;
+    frame.temporal_id = packet.temporal_id;
+    return frame;
+}
+
+export fn ffmpeg_codec_encoded_frame_to_packet(frame: &EncodedFrame) !FfmpegCodecEncodedPacketView {
+    if frame == null || frame.payload.len == 0usize || frame.duration_us == 0u32 {
+        return error.FfmpegCodecInvalidEncodedPacket;
+    }
+    return ffmpeg_codec_encoded_packet_view_make(
+        frame.payload,
+        frame.timestamp,
+        frame.duration_us,
+        frame.sequence_id,
+        frame.codec_id,
+        frame.media_kind,
+        frame.is_keyframe,
+    );
+}
+
+export fn ffmpeg_codec_raw_audio_view_make(
+    pcm_s16le: &[byte],
+    timestamp_us: u64,
+    duration_us: u32,
+    sample_rate_hz: u32,
+    channels: u8,
+    samples_per_channel: usize,
+) !FfmpegCodecRawAudioView {
+    if sample_rate_hz != FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ || channels == 0u8 || samples_per_channel == 0usize || duration_us == 0u32 {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    const channels_usize: usize = channels as usize;
+    if samples_per_channel > FFMPEG_CODEC_MAX_USIZE / channels_usize {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    const sample_count: usize = samples_per_channel * channels_usize;
+    if sample_count > FFMPEG_CODEC_MAX_USIZE / 2usize {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    const required_bytes: usize = sample_count * 2usize;
+    if required_bytes > pcm_s16le.len {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    return FfmpegCodecRawAudioView{
+        pcm_s16le: pcm_s16le[0:required_bytes],
+        timestamp_us: timestamp_us,
+        duration_us: duration_us,
+        sample_rate_hz: sample_rate_hz,
+        channels: channels,
+        samples_per_channel: samples_per_channel,
+    };
+}
+
+export fn ffmpeg_codec_raw_video_i420_view_make(
+    i420: &[byte],
+    timestamp_us: u64,
+    duration_us: u32,
+    width: u32,
+    height: u32,
+) !FfmpegCodecRawVideoI420View {
+    if width == 0u32 || height == 0u32 || duration_us == 0u32 {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    if (width & 1u32) != 0u32 || (height & 1u32) != 0u32 {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    const pixels: usize = (width as usize) * (height as usize);
+    if pixels > FFMPEG_CODEC_MAX_USIZE / 3usize {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    const required_bytes: usize = (pixels * 3usize) / 2usize;
+    if required_bytes > i420.len {
+        return error.FfmpegCodecInvalidRawFrame;
+    }
+    return FfmpegCodecRawVideoI420View{
+        i420: i420[0:required_bytes],
+        timestamp_us: timestamp_us,
+        duration_us: duration_us,
+        width: width,
+        height: height,
+    };
+}

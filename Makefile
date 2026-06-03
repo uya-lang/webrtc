@@ -6,7 +6,7 @@ BENCH_DIR := $(BUILD_DIR)/benchmarks
 BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
 BENCH_RUNNER := benchmarks/run.sh
 
-.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-chrome-call preview-ffmpeg-chrome-call clean
+.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call preview-ffmpeg-chrome-call clean
 
 all: build
 
@@ -225,7 +225,13 @@ test-ffmpeg-codec-flow:
 	test -x tests/ffmpeg_codec_flow.py
 	python3 tests/ffmpeg_codec_flow.py
 
+test-ffmpeg-codec-extern:
+	test -x tests/check_phase21_ffmpeg_codec_extern.sh
+	bash tests/check_phase21_ffmpeg_codec_extern.sh
+
 test-ffmpeg-chrome-call:
+	test -x tests/check_phase21_ffmpeg_codec_extern.sh
+	bash tests/check_phase21_ffmpeg_codec_extern.sh
 	test -x tests/check_phase21_ffmpeg_direct_sender.sh
 	bash tests/check_phase21_ffmpeg_direct_sender.sh
 	test -x tests/check_phase21_ffmpeg_direct_sender_cli.sh

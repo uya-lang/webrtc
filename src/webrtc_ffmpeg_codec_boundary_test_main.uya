@@ -1,0 +1,168 @@
+use libc.printf;
+use webrtc.media.ffmpeg_codec;
+use webrtc.media.model;
+
+fn check_opus_packet_to_encoded_frame() i32 {
+    var opus_payload: [byte: 5] = [
+        0xf8 as byte, 0xaa as byte, 0xbb as byte, 0xcc as byte, 0xdd as byte,
+    ];
+    const packet_result: !FfmpegCodecEncodedPacketView = ffmpeg_codec_encoded_packet_view_make(
+        opus_payload[0:5],
+        1000u64,
+        20000u32,
+        7u64,
+        CODEC_ID_OPUS,
+        MEDIA_KIND_AUDIO,
+        false,
+    );
+    if packet_result.error_id != 0 {
+        return 10i32;
+    }
+    const frame_result: !EncodedFrame = ffmpeg_codec_packet_to_encoded_frame(&packet_result.value);
+    if frame_result.error_id != 0 {
+        return 11i32;
+    }
+    const frame: EncodedFrame = frame_result.value;
+    if frame.codec_id != CODEC_ID_OPUS
+        || frame.media_kind != MEDIA_KIND_AUDIO
+        || frame.timestamp != 1000u64
+        || frame.duration_us != 20000u32
+        || frame.sequence_id != 7u64
+        || !frame.marker
+        || frame.is_keyframe {
+        return 12i32;
+    }
+
+    const roundtrip: !FfmpegCodecEncodedPacketView = ffmpeg_codec_encoded_frame_to_packet(&frame);
+    if roundtrip.error_id != 0 || roundtrip.value.packet.len != 5usize {
+        return 13i32;
+    }
+    return 0i32;
+}
+
+fn check_vp8_packet_to_encoded_frame() i32 {
+    var vp8_payload: [byte: 6] = [
+        0x10 as byte, 0x25 as byte, 0x00 as byte,
+        0x9d as byte, 0x01 as byte, 0x2a as byte,
+    ];
+    const packet_result: !FfmpegCodecEncodedPacketView = ffmpeg_codec_encoded_packet_view_make(
+        vp8_payload[0:6],
+        3000u64,
+        33333u32,
+        2u64,
+        CODEC_ID_VP8,
+        MEDIA_KIND_VIDEO,
+        true,
+    );
+    if packet_result.error_id != 0 {
+        return 20i32;
+    }
+    const frame_result: !EncodedFrame = ffmpeg_codec_packet_to_encoded_frame(&packet_result.value);
+    if frame_result.error_id != 0 {
+        return 21i32;
+    }
+    const frame: EncodedFrame = frame_result.value;
+    if frame.codec_id != CODEC_ID_VP8
+        || frame.media_kind != MEDIA_KIND_VIDEO
+        || frame.timestamp != 3000u64
+        || frame.duration_us != 33333u32
+        || frame.sequence_id != 2u64
+        || !frame.marker
+        || !frame.is_keyframe {
+        return 22i32;
+    }
+    return 0i32;
+}
+
+fn check_raw_frame_views() i32 {
+    var pcm: [byte: 1920] = [];
+    const audio: !FfmpegCodecRawAudioView = ffmpeg_codec_raw_audio_view_make(
+        pcm[0:1920],
+        0u64,
+        20000u32,
+        48000u32,
+        1u8,
+        960usize,
+    );
+    if audio.error_id != 0 || audio.value.pcm_s16le.len != 1920usize {
+        return 30i32;
+    }
+
+    var i420: [byte: 384] = [];
+    const video: !FfmpegCodecRawVideoI420View = ffmpeg_codec_raw_video_i420_view_make(
+        i420[0:384],
+        0u64,
+        33333u32,
+        16u32,
+        16u32,
+    );
+    if video.error_id != 0 || video.value.i420.len != 384usize {
+        return 31i32;
+    }
+
+    const bad_audio: !FfmpegCodecRawAudioView = ffmpeg_codec_raw_audio_view_make(
+        pcm[0:12],
+        0u64,
+        20000u32,
+        44100u32,
+        1u8,
+        6usize,
+    );
+    if bad_audio.error_id != @error_id(error.FfmpegCodecInvalidRawFrame) {
+        return 32i32;
+    }
+
+    const bad_video: !FfmpegCodecRawVideoI420View = ffmpeg_codec_raw_video_i420_view_make(
+        i420[0:384],
+        0u64,
+        33333u32,
+        15u32,
+        16u32,
+    );
+    if bad_video.error_id != @error_id(error.FfmpegCodecInvalidRawFrame) {
+        return 33i32;
+    }
+    return 0i32;
+}
+
+fn check_rejects_wrong_codec_pairs() i32 {
+    var payload: [byte: 3] = [0x01 as byte, 0x02 as byte, 0x03 as byte];
+    const wrong_pair: !FfmpegCodecEncodedPacketView = ffmpeg_codec_encoded_packet_view_make(
+        payload[0:3],
+        0u64,
+        20000u32,
+        1u64,
+        CODEC_ID_VP8,
+        MEDIA_KIND_AUDIO,
+        false,
+    );
+    if wrong_pair.error_id != @error_id(error.FfmpegCodecUnsupportedCodec) {
+        return 40i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_opus_packet_to_encoded_frame();
+    if result != 0i32 {
+        printf("FFmpeg codec Opus boundary tests failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_vp8_packet_to_encoded_frame();
+    if result != 0i32 {
+        printf("FFmpeg codec VP8 boundary tests failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_raw_frame_views();
+    if result != 0i32 {
+        printf("FFmpeg codec raw frame view tests failed: %d\n", result);
+        return 1i32;
+    }
+    result = check_rejects_wrong_codec_pairs();
+    if result != 0i32 {
+        printf("FFmpeg codec validation tests failed: %d\n", result);
+        return 1i32;
+    }
+    printf("FFmpeg codec extern boundary tests passed\n");
+    return 0i32;
+}
