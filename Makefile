@@ -226,6 +226,10 @@ test-ffmpeg-codec-flow:
 	python3 tests/ffmpeg_codec_flow.py
 
 test-ffmpeg-chrome-call:
+	test -x tests/check_phase21_ffmpeg_direct_sender.sh
+	bash tests/check_phase21_ffmpeg_direct_sender.sh
+	test -x tests/check_phase21_ffmpeg_direct_sender_cli.sh
+	bash tests/check_phase21_ffmpeg_direct_sender_cli.sh
 	test -x tests/check_phase21_ffmpeg_chrome_call.sh
 	bash tests/check_phase21_ffmpeg_chrome_call.sh
 

@@ -1,0 +1,228 @@
+// webrtc.media.direct_sender - Uya-owned FFmpeg encoded frame RTP sender boundary
+// Module: src/webrtc/media/direct_sender.uya -> use webrtc.media.direct_sender;
+
+use webrtc.media.model;
+use webrtc.media.opus_rtp;
+use webrtc.media.vp8_rtp;
+use webrtc.rtp.rtp_packet;
+use webrtc.rtp.rtp_sender;
+
+export error DirectSenderInvalidConfig;
+export error DirectSenderUnsupportedCodec;
+export error DirectSenderFrameRequired;
+export error DirectSenderPayloadTooLarge;
+export error DirectSenderPacketTooLarge;
+
+export const DIRECT_SENDER_DEFAULT_MTU_BYTES: usize = 1200usize;
+export const DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES: usize = 1400usize;
+export const DIRECT_SENDER_DEFAULT_AUDIO_SSRC: u32 = 0x41554431u32;
+export const DIRECT_SENDER_DEFAULT_VIDEO_SSRC: u32 = 0x56494431u32;
+export const DIRECT_SENDER_DEFAULT_AUDIO_SEQUENCE: u16 = 1000u16;
+export const DIRECT_SENDER_DEFAULT_VIDEO_SEQUENCE: u16 = 2000u16;
+export const DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ: u32 = 48000u32;
+export const DIRECT_SENDER_VIDEO_CLOCK_RATE_HZ: u32 = 90000u32;
+
+export struct UyaDirectSenderConfig {
+    mtu_bytes: usize = DIRECT_SENDER_DEFAULT_MTU_BYTES,
+    audio_ssrc: u32 = DIRECT_SENDER_DEFAULT_AUDIO_SSRC,
+    video_ssrc: u32 = DIRECT_SENDER_DEFAULT_VIDEO_SSRC,
+    audio_payload_type: u8 = CODEC_DEFAULT_PT_OPUS,
+    video_payload_type: u8 = CODEC_DEFAULT_PT_VP8,
+    audio_initial_sequence: u16 = DIRECT_SENDER_DEFAULT_AUDIO_SEQUENCE,
+    video_initial_sequence: u16 = DIRECT_SENDER_DEFAULT_VIDEO_SEQUENCE,
+    audio_initial_timestamp: u32 = 0u32,
+    video_initial_timestamp: u32 = 0u32,
+}
+
+export struct UyaDirectSenderDiagnostics {
+    ffmpeg_encoded_frames: u64 = 0u64,
+    rtp_packets: u64 = 0u64,
+    rtp_payload_bytes: u64 = 0u64,
+    srtp_packets: u64 = 0u64,
+    udp_packets: u64 = 0u64,
+}
+
+export struct UyaDirectSender {
+    config: UyaDirectSenderConfig = UyaDirectSenderConfig{},
+    audio_sender: RtpSenderState = RtpSenderState{},
+    video_sender: RtpSenderState = RtpSenderState{},
+    diagnostics: UyaDirectSenderDiagnostics = UyaDirectSenderDiagnostics{},
+}
+
+export struct DirectSenderPacket {
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    payload_type: u8 = 0u8,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+    ssrc: u32 = 0u32,
+    marker: bool = false,
+    rtp_len: usize = 0usize,
+    rtp_payload_len: usize = 0usize,
+}
+
+export fn uya_direct_sender_config_make() UyaDirectSenderConfig {
+    return UyaDirectSenderConfig{};
+}
+
+export fn uya_direct_sender_diagnostics_make() UyaDirectSenderDiagnostics {
+    return UyaDirectSenderDiagnostics{};
+}
+
+export fn uya_direct_sender_make() UyaDirectSender {
+    return UyaDirectSender{};
+}
+
+fn direct_sender_validate_config(config: &UyaDirectSenderConfig) !void {
+    if config == null || config.mtu_bytes <= RTP_HEADER_MIN_BYTES {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.mtu_bytes > DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES + RTP_HEADER_MIN_BYTES {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.audio_payload_type == 0u8 || config.video_payload_type == 0u8 {
+        return error.DirectSenderInvalidConfig;
+    }
+}
+
+export fn uya_direct_sender_init(sender: &UyaDirectSender, config: UyaDirectSenderConfig) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    try direct_sender_validate_config(&config);
+
+    try rtp_sender_state_init(
+        &sender.audio_sender,
+        config.audio_ssrc,
+        config.audio_initial_sequence,
+        config.audio_initial_timestamp,
+        DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ,
+    );
+    try rtp_sender_state_init(
+        &sender.video_sender,
+        config.video_ssrc,
+        config.video_initial_sequence,
+        config.video_initial_timestamp,
+        DIRECT_SENDER_VIDEO_CLOCK_RATE_HZ,
+    );
+    sender.config = config;
+    sender.diagnostics = uya_direct_sender_diagnostics_make();
+}
+
+fn direct_sender_timestamp_increment(duration_us: u32, clock_rate_hz: u32) u32 {
+    if duration_us == 0u32 || clock_rate_hz == 0u32 {
+        return 0u32;
+    }
+    const scaled: u64 = (duration_us as u64) * (clock_rate_hz as u64);
+    return (scaled / 1000000u64) as u32;
+}
+
+fn direct_sender_packetize_opus(frame: &EncodedFrame, out_payload: &[byte]) !usize {
+    var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
+    cfg.max_payload_bytes = out_payload.len;
+    return opus_rtp_packetize(frame.payload, &cfg, out_payload);
+}
+
+fn direct_sender_packetize_vp8(frame: &EncodedFrame, out_payload: &[byte]) !usize {
+    var descriptor: Vp8RtpDescriptor = vp8_rtp_descriptor_make();
+    descriptor.start_of_partition = true;
+    descriptor.partition_index = 0u8;
+    descriptor.has_picture_id = true;
+    descriptor.picture_id = (frame.sequence_id & 0x7fffu64) as u16;
+    return vp8_rtp_descriptor_write(&descriptor, frame.payload, out_payload);
+}
+
+fn direct_sender_packetize_payload(frame: &EncodedFrame, out_payload: &[byte]) !usize {
+    if frame == null || frame.payload.len == 0usize {
+        return error.DirectSenderFrameRequired;
+    }
+    if out_payload.len == 0usize || frame.payload.len > out_payload.len {
+        return error.DirectSenderPayloadTooLarge;
+    }
+
+    if frame.media_kind == MEDIA_KIND_AUDIO && frame.codec_id == CODEC_ID_OPUS {
+        return direct_sender_packetize_opus(frame, out_payload);
+    }
+    if frame.media_kind == MEDIA_KIND_VIDEO && frame.codec_id == CODEC_ID_VP8 {
+        return direct_sender_packetize_vp8(frame, out_payload);
+    }
+    return error.DirectSenderUnsupportedCodec;
+}
+
+fn direct_sender_stamp_for_frame(sender: &UyaDirectSender, frame: &EncodedFrame) !RtpSenderStamp {
+    if frame.media_kind == MEDIA_KIND_AUDIO {
+        const increment: u32 = direct_sender_timestamp_increment(frame.duration_us, DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ);
+        return rtp_sender_stamp_packet(&sender.audio_sender, increment);
+    }
+    if frame.media_kind == MEDIA_KIND_VIDEO {
+        const increment: u32 = direct_sender_timestamp_increment(frame.duration_us, DIRECT_SENDER_VIDEO_CLOCK_RATE_HZ);
+        return rtp_sender_stamp_packet(&sender.video_sender, increment);
+    }
+    return error.DirectSenderUnsupportedCodec;
+}
+
+fn direct_sender_payload_type_for_frame(sender: &UyaDirectSender, frame: &EncodedFrame) !u8 {
+    if frame.media_kind == MEDIA_KIND_AUDIO && frame.codec_id == CODEC_ID_OPUS {
+        return sender.config.audio_payload_type;
+    }
+    if frame.media_kind == MEDIA_KIND_VIDEO && frame.codec_id == CODEC_ID_VP8 {
+        return sender.config.video_payload_type;
+    }
+    return error.DirectSenderUnsupportedCodec;
+}
+
+fn direct_sender_marker_for_frame(frame: &EncodedFrame) bool {
+    if frame.media_kind == MEDIA_KIND_VIDEO {
+        return true;
+    }
+    return frame.marker;
+}
+
+export fn rtp_packetize_encoded_frame(
+    sender: &UyaDirectSender,
+    frame: &EncodedFrame,
+    out_packet: &[byte],
+) !DirectSenderPacket {
+    if sender == null || frame == null {
+        return error.DirectSenderInvalidConfig;
+    }
+
+    const max_payload_len: usize = sender.config.mtu_bytes - RTP_HEADER_MIN_BYTES;
+    if max_payload_len > DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES {
+        return error.DirectSenderInvalidConfig;
+    }
+
+    var rtp_payload: [byte: DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES] = [];
+    const payload_len: usize = try direct_sender_packetize_payload(frame, rtp_payload[0:max_payload_len]);
+    if RTP_HEADER_MIN_BYTES + payload_len > sender.config.mtu_bytes {
+        return error.DirectSenderPacketTooLarge;
+    }
+
+    const stamp: RtpSenderStamp = try direct_sender_stamp_for_frame(sender, frame);
+    const payload_type: u8 = try direct_sender_payload_type_for_frame(sender, frame);
+    const marker: bool = direct_sender_marker_for_frame(frame);
+
+    var header: RtpHeader = rtp_header_make();
+    header.payload_type = payload_type;
+    header.sequence_number = stamp.sequence_number;
+    header.timestamp = stamp.timestamp;
+    header.ssrc = stamp.ssrc;
+    header.marker = marker;
+
+    const written: usize = try rtp_packet_write(&header, rtp_payload[0:payload_len], out_packet);
+    sender.diagnostics.ffmpeg_encoded_frames = sender.diagnostics.ffmpeg_encoded_frames + 1u64;
+    sender.diagnostics.rtp_packets = sender.diagnostics.rtp_packets + 1u64;
+    sender.diagnostics.rtp_payload_bytes = sender.diagnostics.rtp_payload_bytes + (payload_len as u64);
+
+    return DirectSenderPacket{
+        media_kind: frame.media_kind,
+        codec_id: frame.codec_id,
+        payload_type: payload_type,
+        sequence_number: stamp.sequence_number,
+        timestamp: stamp.timestamp,
+        ssrc: stamp.ssrc,
+        marker: marker,
+        rtp_len: written,
+        rtp_payload_len: payload_len,
+    };
+}

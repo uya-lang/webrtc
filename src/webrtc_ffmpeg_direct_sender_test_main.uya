@@ -1,0 +1,193 @@
+use libc.printf;
+use webrtc.media.direct_sender;
+use webrtc.media.model;
+use webrtc.media.vp8_rtp;
+use webrtc.rtp.rtp_packet;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn sender_make() !UyaDirectSender {
+    var sender: UyaDirectSender = uya_direct_sender_make();
+    var config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    config.audio_ssrc = 0x01020304u32;
+    config.video_ssrc = 0x11223344u32;
+    config.audio_initial_sequence = 10u16;
+    config.video_initial_sequence = 20u16;
+    config.audio_initial_timestamp = 480u32;
+    config.video_initial_timestamp = 900u32;
+    try uya_direct_sender_init(&sender, config);
+    return sender;
+}
+
+fn check_opus_frame_packetize() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 10i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var opus_payload: [byte: 6] = [
+        0xf8 as byte, 0xaa as byte, 0xbb as byte,
+        0xcc as byte, 0xdd as byte, 0xee as byte,
+    ];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_AUDIO;
+    frame.codec_id = CODEC_ID_OPUS;
+    frame.payload = opus_payload[0:6];
+    frame.duration_us = 20000u32;
+    frame.sequence_id = 1u64;
+    frame.marker = false;
+
+    var packet: [byte: 256] = [];
+    const summary: !DirectSenderPacket = rtp_packetize_encoded_frame(&sender, &frame, packet[0:256]);
+    if summary.error_id != 0 {
+        return 11i32;
+    }
+    if summary.value.payload_type != CODEC_DEFAULT_PT_OPUS
+        || summary.value.sequence_number != 10u16
+        || summary.value.timestamp != 480u32
+        || summary.value.ssrc != 0x01020304u32
+        || summary.value.marker {
+        return 12i32;
+    }
+
+    const parsed: !RtpPacket = rtp_packet_parse(packet[0:summary.value.rtp_len]);
+    if parsed.error_id != 0 {
+        return 13i32;
+    }
+    if parsed.value.header.payload_type != CODEC_DEFAULT_PT_OPUS {
+        return 14i32;
+    }
+    if !bytes_equal(parsed.value.header.payload, opus_payload[0:6]) {
+        return 15i32;
+    }
+    if sender.diagnostics.ffmpeg_encoded_frames != 1u64
+        || sender.diagnostics.rtp_packets != 1u64
+        || sender.diagnostics.rtp_payload_bytes != 6u64 {
+        return 16i32;
+    }
+    if sender.audio_sender.next_sequence != 11u16 || sender.audio_sender.next_timestamp != 1440u32 {
+        return 17i32;
+    }
+    return 0i32;
+}
+
+fn check_vp8_frame_packetize() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 20i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var vp8_payload: [byte: 5] = [
+        0x00 as byte, 0x9d as byte, 0x01 as byte, 0x2a as byte, 0x00 as byte,
+    ];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.codec_id = CODEC_ID_VP8;
+    frame.payload = vp8_payload[0:5];
+    frame.duration_us = 33333u32;
+    frame.sequence_id = 0x0123u64;
+    frame.marker = true;
+
+    var packet: [byte: 256] = [];
+    const summary: !DirectSenderPacket = rtp_packetize_encoded_frame(&sender, &frame, packet[0:256]);
+    if summary.error_id != 0 {
+        return 21i32;
+    }
+    if summary.value.payload_type != CODEC_DEFAULT_PT_VP8
+        || summary.value.sequence_number != 20u16
+        || summary.value.timestamp != 900u32
+        || summary.value.ssrc != 0x11223344u32
+        || !summary.value.marker {
+        return 22i32;
+    }
+
+    const parsed: !RtpPacket = rtp_packet_parse(packet[0:summary.value.rtp_len]);
+    if parsed.error_id != 0 {
+        return 23i32;
+    }
+    const descriptor: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(parsed.value.header.payload);
+    if descriptor.error_id != 0 {
+        return 24i32;
+    }
+    if !descriptor.value.start_of_partition
+        || descriptor.value.partition_index != 0u8
+        || !descriptor.value.has_picture_id
+        || descriptor.value.picture_id != 0x0123u16 {
+        return 25i32;
+    }
+    if !bytes_equal(descriptor.value.payload, vp8_payload[0:5]) {
+        return 26i32;
+    }
+    if sender.video_sender.next_sequence != 21u16 || sender.video_sender.next_timestamp != 3899u32 {
+        return 27i32;
+    }
+    return 0i32;
+}
+
+fn check_sender_limits_and_errors() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 30i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var payload: [byte: 4] = [0x11 as byte, 0x22 as byte, 0x33 as byte, 0x44 as byte];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_AUDIO;
+    frame.codec_id = CODEC_ID_VP8;
+    frame.payload = payload[0:4];
+    frame.duration_us = 20000u32;
+
+    var packet: [byte: 256] = [];
+    const unsupported: !DirectSenderPacket = rtp_packetize_encoded_frame(&sender, &frame, packet[0:256]);
+    if unsupported.error_id != @error_id(error.DirectSenderUnsupportedCodec) {
+        return 31i32;
+    }
+
+    var config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    config.mtu_bytes = 12usize;
+    var bad_sender: UyaDirectSender = uya_direct_sender_make();
+    const bad_init: !void = uya_direct_sender_init(&bad_sender, config);
+    if bad_init.error_id != @error_id(error.DirectSenderInvalidConfig) {
+        return 32i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_opus_frame_packetize();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender Opus packetize tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_vp8_frame_packetize();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender VP8 packetize tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sender_limits_and_errors();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender error tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Uya FFmpeg direct sender RTP packetizer tests passed\n");
+    return 0i32;
+}
