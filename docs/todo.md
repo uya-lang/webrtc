@@ -524,11 +524,13 @@
 ## Phase 21：Codec 兄弟仓库同步与集成
 
 该阶段不阻塞 WebRTC 传输栈首版。`../opus` 和 `../vp8` 已经作为独立纯 Uya codec 仓库存在，本仓库只维护 WebRTC 侧的边界、适配和互通测试。
+FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不能进入默认 runtime 或纯 Uya codec bridge。
 
 - [x] 确认 `../opus` 已有 `docs/design.md` 和 `docs/todo.md`。
 - [x] 确认 `../vp8` 已有 `docs/design.md` 和 `docs/todo.md`。
 - [x] 在 WebRTC 设计文档中同步 `../opus` / `../vp8` 的职责边界。
 - [x] 建立 codec bridge feature gate，默认关闭。
+- [x] 定义泛型 codec 抽象：`VideoEncoder<Encoder>`、`VideoDecoder<Decoder>`、`AudioEncoder<Encoder>`、`AudioDecoder<Decoder>`。
 - [x] 定义 Opus bridge：PCM/Opus packet 与 WebRTC `EncodedFrame` 的转换 API。
 - [x] 定义 VP8 bridge：YUV/VP8 frame 与 WebRTC `EncodedFrame` 的转换 API。
 - [~] 对齐 Opus RTP payload tests 与 `../opus` 的 `container/rtp_opus.uya` 计划。
@@ -537,10 +539,13 @@
   - blocked: `../vp8` 的 Phase 16 RTP VP8 payload descriptor parser 与 RTP packet reassembly 仍未实现，当前 sibling 仓库只有 IVF/raw container 模块，没有 RTP 模块、fixtures 或 reassembly 测试可供本仓库真实对齐。
 - [x] 建立跨仓库 fixture manifest，记录样本来源、hash、授权和适用阶段。
 - [x] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
+- [x] 增加 `make test-ffmpeg-codec-flow`，用 FFmpeg `libopus` / `libvpx` 验证泛型 codec 推拉流准确性。
+- [x] 增加 `make test-ffmpeg-chrome-call`，用 FFmpeg 生成 VP8/Opus WebM，Chrome `captureStream()` + `RTCPeerConnection` 验证 audio/video 通话、SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
 - [~] 增加浏览器 one-way audio 示例，可选择直接发送 encoded Opus 或通过 Opus bridge 编码。
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
 - [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
   - blocked: 现有 Phase 17 video interop 使用浏览器 canvas/内部 VP8 发送，不能作为本仓库直接发送 encoded VP8 或通过 VP8 bridge 编码的示例；`../vp8` encoder、library API 与 RTP reassembly 仍未实现，暂无真实 bridge encode 路径可验证。
+- [ ] 打通 Uya 进程直连 Chrome 的 FFmpeg codec 音视频通话：FFmpeg raw/encoded frame -> WebRTC RTP payload packetizer -> SRTP/SRTCP -> UDP -> Chrome inbound RTP，且不经浏览器内部 `pc1`/`pc2` loopback。
 - [x] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
 - [x] AV1 仅保留 OBU/RTP 工具，编解码另行评估。
 
@@ -549,6 +554,7 @@
 - codec bridge 不污染 WebRTC transport 核心。
 - transport 可在无 codec 编解码器时处理 encoded frames。
 - 启用 bridge 时只依赖纯 Uya sibling package，不引入 libopus、libvpx、FFmpeg runtime。
+- FFmpeg 相关能力只通过显式测试目标启用，并输出 Chrome inbound audio/video 统计。
 - Opus / VP8 bridge 的错误边界清楚区分 payload 错误、codec bitstream 错误和 WebRTC transport 错误。
 
 ## 第一条推荐执行线

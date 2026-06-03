@@ -6,7 +6,7 @@ BENCH_DIR := $(BUILD_DIR)/benchmarks
 BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
 BENCH_RUNNER := benchmarks/run.sh
 
-.PHONY: all build test bench test-codec-bridge clean
+.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-chrome-call clean
 
 all: build
 
@@ -220,6 +220,14 @@ test-codec-bridge:
 	bash tests/check_phase21_fixture_manifest.sh
 	bash tests/check_phase21_opus_bridge_api.sh
 	bash tests/check_phase21_vp8_bridge_api.sh
+
+test-ffmpeg-codec-flow:
+	test -x tests/ffmpeg_codec_flow.py
+	python3 tests/ffmpeg_codec_flow.py
+
+test-ffmpeg-chrome-call:
+	test -x tests/check_phase21_ffmpeg_chrome_call.sh
+	bash tests/check_phase21_ffmpeg_chrome_call.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

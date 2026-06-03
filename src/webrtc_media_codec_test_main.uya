@@ -1,0 +1,399 @@
+use libc.printf;
+use webrtc.media.codec;
+use webrtc.media.model;
+
+struct FfmpegVideoEncoderProbe {
+    id: u32 = 0u32,
+}
+
+struct FfmpegVideoDecoderProbe {
+    id: u32 = 0u32,
+}
+
+struct FfmpegAudioEncoderProbe {
+    id: u32 = 0u32,
+}
+
+struct FfmpegAudioDecoderProbe {
+    id: u32 = 0u32,
+}
+
+fn make_encoded_frame(codec_id: u16, media_kind: u8, timestamp: u64, duration_us: u32, sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = codec_id;
+    frame.media_kind = media_kind;
+    frame.timestamp = timestamp;
+    frame.duration_us = duration_us;
+    frame.sequence_id = sequence_id;
+    frame.payload = payload;
+    frame.marker = true;
+    if media_kind == MEDIA_KIND_VIDEO {
+        frame.is_keyframe = sequence_id == 0u64;
+    }
+    return frame;
+}
+
+fn check_generic_wrappers() i32 {
+    if codec_require_video_codec(CODEC_ID_VP8).error_id != 0 {
+        return 10i32;
+    }
+    var video_encoder: VideoEncoder<FfmpegVideoEncoderProbe> =
+        video_encoder_make<FfmpegVideoEncoderProbe>(FfmpegVideoEncoderProbe{ id: 7u32 }, CODEC_ID_VP8);
+    if video_encoder.backend.id != 7u32 || video_encoder.media_kind != MEDIA_KIND_VIDEO || video_encoder.clock_rate_hz != 90000u32 {
+        return 11i32;
+    }
+    if video_encoder_note_push<FfmpegVideoEncoderProbe>(&video_encoder).error_id != 0 {
+        return 12i32;
+    }
+    if video_encoder_note_output<FfmpegVideoEncoderProbe>(&video_encoder).error_id != 0 {
+        return 13i32;
+    }
+    if video_encoder.pushed_frames != 1u64 || video_encoder.produced_frames != 1u64 {
+        return 14i32;
+    }
+
+    if codec_require_video_codec(CODEC_ID_VP8).error_id != 0 {
+        return 15i32;
+    }
+    var video_decoder: VideoDecoder<FfmpegVideoDecoderProbe> =
+        video_decoder_make<FfmpegVideoDecoderProbe>(FfmpegVideoDecoderProbe{ id: 8u32 }, CODEC_ID_VP8);
+    if video_decoder_note_pull<FfmpegVideoDecoderProbe>(&video_decoder).error_id != 0 {
+        return 16i32;
+    }
+    if video_decoder_note_output<FfmpegVideoDecoderProbe>(&video_decoder).error_id != 0 {
+        return 17i32;
+    }
+    if video_decoder.pulled_frames != 1u64 || video_decoder.produced_frames != 1u64 {
+        return 18i32;
+    }
+
+    if codec_require_audio_codec(CODEC_ID_OPUS, 2u8).error_id != 0 {
+        return 19i32;
+    }
+    var audio_encoder: AudioEncoder<FfmpegAudioEncoderProbe> =
+        audio_encoder_make<FfmpegAudioEncoderProbe>(FfmpegAudioEncoderProbe{ id: 9u32 }, CODEC_ID_OPUS, 2u8);
+    if audio_encoder.media_kind != MEDIA_KIND_AUDIO || audio_encoder.channels != 2u8 || audio_encoder.clock_rate_hz != 48000u32 {
+        return 20i32;
+    }
+    if audio_encoder_note_push<FfmpegAudioEncoderProbe>(&audio_encoder).error_id != 0 {
+        return 21i32;
+    }
+    if audio_encoder_note_output<FfmpegAudioEncoderProbe>(&audio_encoder).error_id != 0 {
+        return 22i32;
+    }
+    if audio_encoder.pushed_frames != 1u64 || audio_encoder.produced_frames != 1u64 {
+        return 23i32;
+    }
+
+    if codec_require_audio_codec(CODEC_ID_OPUS, 2u8).error_id != 0 {
+        return 24i32;
+    }
+    var audio_decoder: AudioDecoder<FfmpegAudioDecoderProbe> =
+        audio_decoder_make<FfmpegAudioDecoderProbe>(FfmpegAudioDecoderProbe{ id: 10u32 }, CODEC_ID_OPUS, 2u8);
+    if audio_decoder_note_pull<FfmpegAudioDecoderProbe>(&audio_decoder).error_id != 0 {
+        return 25i32;
+    }
+    if audio_decoder_note_output<FfmpegAudioDecoderProbe>(&audio_decoder).error_id != 0 {
+        return 26i32;
+    }
+    if audio_decoder.pulled_frames != 1u64 || audio_decoder.produced_frames != 1u64 {
+        return 27i32;
+    }
+
+    const bad_video: !void = codec_require_video_codec(CODEC_ID_OPUS);
+    if bad_video.error_id != @error_id(error.CodecInvalidConfig) {
+        return 28i32;
+    }
+    const bad_audio: !void = codec_require_audio_codec(CODEC_ID_VP8, 1u8);
+    if bad_audio.error_id != @error_id(error.CodecInvalidConfig) {
+        return 29i32;
+    }
+    return 0i32;
+}
+
+fn check_raw_frame_validation() i32 {
+    var pcm: [i16: 8] = [10i16, -10i16, 20i16, -20i16, 30i16, -30i16, 40i16, -40i16];
+    const audio_result: !RawAudioFrame = raw_audio_frame_make(pcm[0:8], 48000u32, 2u8, 4usize, 960u64, 20000u32, 3u64);
+    if audio_result.error_id != 0 {
+        return 40i32;
+    }
+    if audio_result.value.pcm_s16.len != 8usize || audio_result.value.channels != 2u8 || audio_result.value.sequence_id != 3u64 {
+        return 41i32;
+    }
+    const bad_audio: !RawAudioFrame = raw_audio_frame_make(pcm[0:8], 48000u32, 2u8, 5usize, 0u64, 20000u32, 0u64);
+    if bad_audio.error_id != @error_id(error.CodecInvalidAudioFrame) {
+        return 42i32;
+    }
+
+    var y: [byte: 16] = [
+        1u8, 2u8, 3u8, 4u8,
+        5u8, 6u8, 7u8, 8u8,
+        9u8, 10u8, 11u8, 12u8,
+        13u8, 14u8, 15u8, 16u8,
+    ];
+    var u: [byte: 4] = [21u8, 22u8, 23u8, 24u8];
+    var v: [byte: 4] = [31u8, 32u8, 33u8, 34u8];
+    const video_result: !RawVideoFrame = raw_video_i420_frame_make(
+        y[0:16],
+        u[0:4],
+        v[0:4],
+        4u32,
+        4u32,
+        4usize,
+        2usize,
+        2usize,
+        3000u64,
+        33333u32,
+        4u64,
+    );
+    if video_result.error_id != 0 {
+        return 43i32;
+    }
+    if video_result.value.y_plane.len != 16usize || video_result.value.u_plane.len != 4usize || video_result.value.sequence_id != 4u64 {
+        return 44i32;
+    }
+    const bad_video: !RawVideoFrame = raw_video_i420_frame_make(
+        y[0:16],
+        u[0:4],
+        v[0:4],
+        3u32,
+        4u32,
+        4usize,
+        2usize,
+        2usize,
+        0u64,
+        33333u32,
+        0u64,
+    );
+    if bad_video.error_id != @error_id(error.CodecInvalidVideoFrame) {
+        return 45i32;
+    }
+    return 0i32;
+}
+
+fn check_encoded_frame_queue() i32 {
+    var queue: CodecFrameQueue<EncodedFrame> = CodecFrameQueue<EncodedFrame>{};
+    if codec_frame_queue_init<EncodedFrame>(&queue, 2usize).error_id != 0 {
+        return 60i32;
+    }
+
+    var payload_a: [byte: 3] = [1u8, 2u8, 3u8];
+    var payload_b: [byte: 2] = [4u8, 5u8];
+    var payload_c: [byte: 1] = [6u8];
+    const frame_a: EncodedFrame = make_encoded_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 3000u64, 33333u32, 1u64, payload_a[0:3]);
+    const frame_b: EncodedFrame = make_encoded_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 6000u64, 33333u32, 2u64, payload_b[0:2]);
+    const frame_c: EncodedFrame = make_encoded_frame(CODEC_ID_VP8, MEDIA_KIND_VIDEO, 9000u64, 33333u32, 3u64, payload_c[0:1]);
+
+    if codec_frame_queue_push<EncodedFrame>(&queue, frame_a).error_id != 0 {
+        return 61i32;
+    }
+    if codec_frame_queue_push<EncodedFrame>(&queue, frame_b).error_id != 0 {
+        return 62i32;
+    }
+    const full_result: !void = codec_frame_queue_push<EncodedFrame>(&queue, frame_c);
+    if full_result.error_id != @error_id(error.CodecFrameQueueFull) || queue.drop_count != 1u64 {
+        return 63i32;
+    }
+    if queue.high_watermark != 2u64 || codec_frame_queue_len<EncodedFrame>(&queue) != 2usize {
+        return 64i32;
+    }
+
+    const pulled_a: !EncodedFrame = codec_frame_queue_pull<EncodedFrame>(&queue);
+    if pulled_a.error_id != 0 || pulled_a.value.sequence_id != 1u64 || pulled_a.value.payload.len != 3usize {
+        return 65i32;
+    }
+    const pulled_b: !EncodedFrame = codec_frame_queue_pull<EncodedFrame>(&queue);
+    if pulled_b.error_id != 0 || pulled_b.value.sequence_id != 2u64 || pulled_b.value.payload.len != 2usize {
+        return 66i32;
+    }
+    const empty_result: !EncodedFrame = codec_frame_queue_pull<EncodedFrame>(&queue);
+    if empty_result.error_id != @error_id(error.CodecFrameQueueEmpty) {
+        return 67i32;
+    }
+    if queue.push_count != 2u64 || queue.pull_count != 2u64 {
+        return 68i32;
+    }
+    return 0i32;
+}
+
+fn check_audio_push_pull_flow() i32 {
+    var raw_queue: CodecFrameQueue<RawAudioFrame> = CodecFrameQueue<RawAudioFrame>{};
+    var encoded_queue: CodecFrameQueue<EncodedFrame> = CodecFrameQueue<EncodedFrame>{};
+    if codec_frame_queue_init<RawAudioFrame>(&raw_queue, 4usize).error_id != 0 {
+        return 80i32;
+    }
+    if codec_frame_queue_init<EncodedFrame>(&encoded_queue, 4usize).error_id != 0 {
+        return 81i32;
+    }
+
+    var encoder: AudioEncoder<FfmpegAudioEncoderProbe> =
+        audio_encoder_make<FfmpegAudioEncoderProbe>(FfmpegAudioEncoderProbe{ id: 11u32 }, CODEC_ID_OPUS, 1u8);
+    var decoder: AudioDecoder<FfmpegAudioDecoderProbe> =
+        audio_decoder_make<FfmpegAudioDecoderProbe>(FfmpegAudioDecoderProbe{ id: 12u32 }, CODEC_ID_OPUS, 1u8);
+
+    var pcm: [i16: 4] = [0i16, 10i16, -10i16, 0i16];
+    const raw: RawAudioFrame = raw_audio_frame_make(pcm[0:4], 48000u32, 1u8, 4usize, 960u64, 20000u32, 5u64).value;
+    if codec_frame_queue_push<RawAudioFrame>(&raw_queue, raw).error_id != 0 {
+        return 82i32;
+    }
+
+    const pulled_raw: !RawAudioFrame = codec_frame_queue_pull<RawAudioFrame>(&raw_queue);
+    if pulled_raw.error_id != 0 || pulled_raw.value.sequence_id != 5u64 {
+        return 83i32;
+    }
+    if audio_encoder_note_push<FfmpegAudioEncoderProbe>(&encoder).error_id != 0 {
+        return 84i32;
+    }
+
+    var packet: [byte: 4] = [0xf8u8, 0xffu8, 0xfeu8, 0xfdu8];
+    const encoded: EncodedFrame = make_encoded_frame(
+        CODEC_ID_OPUS,
+        MEDIA_KIND_AUDIO,
+        pulled_raw.value.timestamp,
+        pulled_raw.value.duration_us,
+        pulled_raw.value.sequence_id,
+        packet[0:4],
+    );
+    if codec_encoded_frame_validate(&encoded, MEDIA_KIND_AUDIO, CODEC_ID_OPUS).error_id != 0 {
+        return 85i32;
+    }
+    if codec_frame_queue_push<EncodedFrame>(&encoded_queue, encoded).error_id != 0 {
+        return 86i32;
+    }
+    if audio_encoder_note_output<FfmpegAudioEncoderProbe>(&encoder).error_id != 0 {
+        return 87i32;
+    }
+
+    const pulled_encoded: !EncodedFrame = codec_frame_queue_pull<EncodedFrame>(&encoded_queue);
+    if pulled_encoded.error_id != 0 || pulled_encoded.value.sequence_id != 5u64 {
+        return 88i32;
+    }
+    if audio_decoder_note_pull<FfmpegAudioDecoderProbe>(&decoder).error_id != 0 {
+        return 89i32;
+    }
+    if audio_decoder_note_output<FfmpegAudioDecoderProbe>(&decoder).error_id != 0 {
+        return 90i32;
+    }
+    if encoder.pushed_frames != 1u64 || encoder.produced_frames != 1u64 || decoder.pulled_frames != 1u64 || decoder.produced_frames != 1u64 {
+        return 91i32;
+    }
+    return 0i32;
+}
+
+fn check_video_push_pull_flow() i32 {
+    var raw_queue: CodecFrameQueue<RawVideoFrame> = CodecFrameQueue<RawVideoFrame>{};
+    var encoded_queue: CodecFrameQueue<EncodedFrame> = CodecFrameQueue<EncodedFrame>{};
+    if codec_frame_queue_init<RawVideoFrame>(&raw_queue, 4usize).error_id != 0 {
+        return 110i32;
+    }
+    if codec_frame_queue_init<EncodedFrame>(&encoded_queue, 4usize).error_id != 0 {
+        return 111i32;
+    }
+
+    var encoder: VideoEncoder<FfmpegVideoEncoderProbe> =
+        video_encoder_make<FfmpegVideoEncoderProbe>(FfmpegVideoEncoderProbe{ id: 13u32 }, CODEC_ID_VP8);
+    var decoder: VideoDecoder<FfmpegVideoDecoderProbe> =
+        video_decoder_make<FfmpegVideoDecoderProbe>(FfmpegVideoDecoderProbe{ id: 14u32 }, CODEC_ID_VP8);
+
+    var y: [byte: 16] = [
+        10u8, 20u8, 30u8, 40u8,
+        50u8, 60u8, 70u8, 80u8,
+        90u8, 100u8, 110u8, 120u8,
+        130u8, 140u8, 150u8, 160u8,
+    ];
+    var u: [byte: 4] = [90u8, 91u8, 92u8, 93u8];
+    var v: [byte: 4] = [100u8, 101u8, 102u8, 103u8];
+    const raw: RawVideoFrame = raw_video_i420_frame_make(
+        y[0:16],
+        u[0:4],
+        v[0:4],
+        4u32,
+        4u32,
+        4usize,
+        2usize,
+        2usize,
+        3000u64,
+        33333u32,
+        6u64,
+    ).value;
+    if codec_frame_queue_push<RawVideoFrame>(&raw_queue, raw).error_id != 0 {
+        return 112i32;
+    }
+
+    const pulled_raw: !RawVideoFrame = codec_frame_queue_pull<RawVideoFrame>(&raw_queue);
+    if pulled_raw.error_id != 0 || pulled_raw.value.sequence_id != 6u64 {
+        return 113i32;
+    }
+    if video_encoder_note_push<FfmpegVideoEncoderProbe>(&encoder).error_id != 0 {
+        return 114i32;
+    }
+
+    var frame_bytes: [byte: 6] = [0x9du8, 0x01u8, 0x2au8, 0x00u8, 0x10u8, 0x00u8];
+    const encoded: EncodedFrame = make_encoded_frame(
+        CODEC_ID_VP8,
+        MEDIA_KIND_VIDEO,
+        pulled_raw.value.timestamp,
+        pulled_raw.value.duration_us,
+        pulled_raw.value.sequence_id,
+        frame_bytes[0:6],
+    );
+    if codec_encoded_frame_validate(&encoded, MEDIA_KIND_VIDEO, CODEC_ID_VP8).error_id != 0 {
+        return 115i32;
+    }
+    if codec_frame_queue_push<EncodedFrame>(&encoded_queue, encoded).error_id != 0 {
+        return 116i32;
+    }
+    if video_encoder_note_output<FfmpegVideoEncoderProbe>(&encoder).error_id != 0 {
+        return 117i32;
+    }
+
+    const pulled_encoded: !EncodedFrame = codec_frame_queue_pull<EncodedFrame>(&encoded_queue);
+    if pulled_encoded.error_id != 0 || pulled_encoded.value.sequence_id != 6u64 || pulled_encoded.value.payload.len != 6usize {
+        return 118i32;
+    }
+    if video_decoder_note_pull<FfmpegVideoDecoderProbe>(&decoder).error_id != 0 {
+        return 119i32;
+    }
+    if video_decoder_note_output<FfmpegVideoDecoderProbe>(&decoder).error_id != 0 {
+        return 120i32;
+    }
+    if encoder.pushed_frames != 1u64 || encoder.produced_frames != 1u64 || decoder.pulled_frames != 1u64 || decoder.produced_frames != 1u64 {
+        return 121i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_generic_wrappers();
+    if result != 0i32 {
+        printf("media codec generic wrapper tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_raw_frame_validation();
+    if result != 0i32 {
+        printf("media codec raw frame tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_encoded_frame_queue();
+    if result != 0i32 {
+        printf("media codec queue tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_audio_push_pull_flow();
+    if result != 0i32 {
+        printf("media codec audio flow tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_video_push_pull_flow();
+    if result != 0i32 {
+        printf("media codec video flow tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("media codec tests passed\n");
+    return 0i32;
+}

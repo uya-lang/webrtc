@@ -6,11 +6,13 @@ cd "$repo_root"
 
 test -d src/webrtc/media
 test -f src/webrtc/media/model.uya
+test -f src/webrtc/media/codec.uya
 test -f src/webrtc/media/codec_bridge.uya
 test -f src/webrtc/media/opus_rtp.uya
 test -f src/webrtc/media/vp8_rtp.uya
 test -f src/webrtc/media/h264_rtp.uya
 test -f src/webrtc_media_model_test_main.uya
+test -f src/webrtc_media_codec_test_main.uya
 test -f src/webrtc_media_codec_bridge_test_main.uya
 test -f src/webrtc_media_opus_rtp_test_main.uya
 test -f src/webrtc_media_opus_rtp_golden_test_main.uya
@@ -20,6 +22,15 @@ test -f src/webrtc_media_h264_rtp_test_main.uya
 
 rg -q "export struct EncodedFrame" src/webrtc/media/model.uya
 rg -q "export fn encoded_frame_make" src/webrtc/media/model.uya
+rg -Fq "export struct VideoEncoder<Encoder>" src/webrtc/media/codec.uya
+rg -Fq "export struct VideoDecoder<Decoder>" src/webrtc/media/codec.uya
+rg -Fq "export struct AudioEncoder<Encoder>" src/webrtc/media/codec.uya
+rg -Fq "export struct AudioDecoder<Decoder>" src/webrtc/media/codec.uya
+rg -Fq "export struct CodecFrameQueue<Frame>" src/webrtc/media/codec.uya
+rg -q "export fn raw_audio_frame_make" src/webrtc/media/codec.uya
+rg -q "export fn raw_video_i420_frame_make" src/webrtc/media/codec.uya
+rg -q "export fn codec_frame_queue_push" src/webrtc/media/codec.uya
+rg -q "export fn codec_frame_queue_pull" src/webrtc/media/codec.uya
 rg -q "export struct CodecBridgeBoundary" src/webrtc/media/codec_bridge.uya
 rg -q "export fn codec_bridge_boundary_make" src/webrtc/media/codec_bridge.uya
 rg -q "export fn codec_bridge_register_opus_adapter" src/webrtc/media/codec_bridge.uya
@@ -65,6 +76,7 @@ rg -q "export fn codec_default_payload_type" src/webrtc/media/model.uya
 rg -q "export fn codec_id_from_default_payload_type" src/webrtc/media/model.uya
 
 ../uya/bin/uya run src/webrtc_media_model_test_main.uya
+../uya/bin/uya run src/webrtc_media_codec_test_main.uya
 ../uya/bin/uya run src/webrtc_media_codec_bridge_test_main.uya
 ../uya/bin/uya run src/webrtc_media_opus_rtp_test_main.uya
 ../uya/bin/uya run src/webrtc_media_opus_rtp_golden_test_main.uya

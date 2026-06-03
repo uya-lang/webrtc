@@ -1,0 +1,413 @@
+// webrtc.media.codec - generic audio/video codec abstractions
+// Module: src/webrtc/media/codec.uya -> use webrtc.media.codec;
+//
+// Codec implementations live outside the transport core. These wrappers carry
+// concrete encoder/decoder state while keeping push/pull frame flow generic.
+
+use webrtc.media.model;
+
+export error CodecInvalidConfig;
+export error CodecInvalidAudioFrame;
+export error CodecInvalidVideoFrame;
+export error CodecInvalidEncodedFrame;
+export error CodecFrameQueueFull;
+export error CodecFrameQueueEmpty;
+
+export const CODEC_RAW_VIDEO_FORMAT_UNKNOWN: u8 = 0u8;
+export const CODEC_RAW_VIDEO_FORMAT_I420: u8 = 1u8;
+export const CODEC_RAW_AUDIO_FORMAT_S16: u8 = 1u8;
+export const CODEC_FRAME_QUEUE_MAX_DEPTH: usize = 64usize;
+
+const CODEC_MAX_USIZE: usize = ~(0 as usize);
+
+export struct RawAudioFrame {
+    format: u8 = CODEC_RAW_AUDIO_FORMAT_S16,
+    sample_rate_hz: u32 = 0u32,
+    channels: u8 = 0u8,
+    samples_per_channel: usize = 0usize,
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    sequence_id: u64 = 0u64,
+    pcm_s16: &[i16] = [],
+}
+
+export struct RawVideoFrame {
+    format: u8 = CODEC_RAW_VIDEO_FORMAT_UNKNOWN,
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+    stride_y: usize = 0usize,
+    stride_u: usize = 0usize,
+    stride_v: usize = 0usize,
+    timestamp: u64 = 0u64,
+    duration_us: u32 = 0u32,
+    sequence_id: u64 = 0u64,
+    y_plane: &[byte] = [],
+    u_plane: &[byte] = [],
+    v_plane: &[byte] = [],
+}
+
+export struct VideoEncoder<Encoder> {
+    backend: Encoder,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_VIDEO,
+    clock_rate_hz: u32 = 0u32,
+    pushed_frames: u64 = 0u64,
+    produced_frames: u64 = 0u64,
+}
+
+export struct VideoDecoder<Decoder> {
+    backend: Decoder,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_VIDEO,
+    clock_rate_hz: u32 = 0u32,
+    pulled_frames: u64 = 0u64,
+    produced_frames: u64 = 0u64,
+}
+
+export struct AudioEncoder<Encoder> {
+    backend: Encoder,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_AUDIO,
+    clock_rate_hz: u32 = 0u32,
+    channels: u8 = 0u8,
+    pushed_frames: u64 = 0u64,
+    produced_frames: u64 = 0u64,
+}
+
+export struct AudioDecoder<Decoder> {
+    backend: Decoder,
+    codec_id: u16 = CODEC_ID_UNKNOWN,
+    media_kind: u8 = MEDIA_KIND_AUDIO,
+    clock_rate_hz: u32 = 0u32,
+    channels: u8 = 0u8,
+    pulled_frames: u64 = 0u64,
+    produced_frames: u64 = 0u64,
+}
+
+export struct CodecFrameQueue<Frame> {
+    slots: [Frame: CODEC_FRAME_QUEUE_MAX_DEPTH] = [],
+    capacity: usize = 0usize,
+    head: usize = 0usize,
+    tail: usize = 0usize,
+    count: usize = 0usize,
+    push_count: u64 = 0u64,
+    pull_count: u64 = 0u64,
+    drop_count: u64 = 0u64,
+    high_watermark: u64 = 0u64,
+}
+
+fn codec_is_video_codec(codec_id: u16) bool {
+    return codec_id == CODEC_ID_VP8 || codec_id == CODEC_ID_H264 || codec_id == CODEC_ID_AV1;
+}
+
+fn codec_is_audio_codec(codec_id: u16) bool {
+    return codec_id == CODEC_ID_OPUS;
+}
+
+export fn codec_require_video_codec(codec_id: u16) !void {
+    if !codec_is_video_codec(codec_id) {
+        return error.CodecInvalidConfig;
+    }
+    return;
+}
+
+export fn codec_require_audio_codec(codec_id: u16, channels: u8) !void {
+    if !codec_is_audio_codec(codec_id) || channels == 0u8 {
+        return error.CodecInvalidConfig;
+    }
+    return;
+}
+
+fn codec_checked_plane_len(stride: usize, rows: usize) !usize {
+    if stride == 0usize || rows == 0usize {
+        return error.CodecInvalidVideoFrame;
+    }
+    if stride > CODEC_MAX_USIZE / rows {
+        return error.CodecInvalidVideoFrame;
+    }
+    return stride * rows;
+}
+
+export fn raw_audio_frame_make(
+    pcm_s16: &[i16],
+    sample_rate_hz: u32,
+    channels: u8,
+    samples_per_channel: usize,
+    timestamp: u64,
+    duration_us: u32,
+    sequence_id: u64,
+) !RawAudioFrame {
+    if sample_rate_hz == 0u32 || channels == 0u8 || samples_per_channel == 0usize || duration_us == 0u32 {
+        return error.CodecInvalidAudioFrame;
+    }
+    if samples_per_channel > CODEC_MAX_USIZE / (channels as usize) {
+        return error.CodecInvalidAudioFrame;
+    }
+    const required_samples: usize = samples_per_channel * (channels as usize);
+    if required_samples > pcm_s16.len {
+        return error.CodecInvalidAudioFrame;
+    }
+    return RawAudioFrame{
+        format: CODEC_RAW_AUDIO_FORMAT_S16,
+        sample_rate_hz: sample_rate_hz,
+        channels: channels,
+        samples_per_channel: samples_per_channel,
+        timestamp: timestamp,
+        duration_us: duration_us,
+        sequence_id: sequence_id,
+        pcm_s16: pcm_s16[0:required_samples],
+    };
+}
+
+export fn raw_video_i420_frame_make(
+    y_plane: &[byte],
+    u_plane: &[byte],
+    v_plane: &[byte],
+    width: u32,
+    height: u32,
+    stride_y: usize,
+    stride_u: usize,
+    stride_v: usize,
+    timestamp: u64,
+    duration_us: u32,
+    sequence_id: u64,
+) !RawVideoFrame {
+    if width == 0u32 || height == 0u32 || duration_us == 0u32 {
+        return error.CodecInvalidVideoFrame;
+    }
+    if (width & 1u32) != 0u32 || (height & 1u32) != 0u32 {
+        return error.CodecInvalidVideoFrame;
+    }
+
+    const width_usize: usize = width as usize;
+    const height_usize: usize = height as usize;
+    const chroma_width: usize = width_usize / 2usize;
+    const chroma_height: usize = height_usize / 2usize;
+    if stride_y < width_usize || stride_u < chroma_width || stride_v < chroma_width {
+        return error.CodecInvalidVideoFrame;
+    }
+
+    const y_required: usize = try codec_checked_plane_len(stride_y, height_usize);
+    const u_required: usize = try codec_checked_plane_len(stride_u, chroma_height);
+    const v_required: usize = try codec_checked_plane_len(stride_v, chroma_height);
+    if y_required > y_plane.len || u_required > u_plane.len || v_required > v_plane.len {
+        return error.CodecInvalidVideoFrame;
+    }
+
+    return RawVideoFrame{
+        format: CODEC_RAW_VIDEO_FORMAT_I420,
+        width: width,
+        height: height,
+        stride_y: stride_y,
+        stride_u: stride_u,
+        stride_v: stride_v,
+        timestamp: timestamp,
+        duration_us: duration_us,
+        sequence_id: sequence_id,
+        y_plane: y_plane[0:y_required],
+        u_plane: u_plane[0:u_required],
+        v_plane: v_plane[0:v_required],
+    };
+}
+
+export fn video_encoder_make<Encoder>(backend: Encoder, codec_id: u16) VideoEncoder<Encoder> {
+    return VideoEncoder<Encoder>{
+        backend: backend,
+        codec_id: codec_id,
+        media_kind: MEDIA_KIND_VIDEO,
+        clock_rate_hz: codec_default_clock_rate_hz(codec_id, MEDIA_KIND_VIDEO),
+    };
+}
+
+export fn video_decoder_make<Decoder>(backend: Decoder, codec_id: u16) VideoDecoder<Decoder> {
+    return VideoDecoder<Decoder>{
+        backend: backend,
+        codec_id: codec_id,
+        media_kind: MEDIA_KIND_VIDEO,
+        clock_rate_hz: codec_default_clock_rate_hz(codec_id, MEDIA_KIND_VIDEO),
+    };
+}
+
+export fn audio_encoder_make<Encoder>(backend: Encoder, codec_id: u16, channels: u8) AudioEncoder<Encoder> {
+    return AudioEncoder<Encoder>{
+        backend: backend,
+        codec_id: codec_id,
+        media_kind: MEDIA_KIND_AUDIO,
+        clock_rate_hz: codec_default_clock_rate_hz(codec_id, MEDIA_KIND_AUDIO),
+        channels: channels,
+    };
+}
+
+export fn audio_decoder_make<Decoder>(backend: Decoder, codec_id: u16, channels: u8) AudioDecoder<Decoder> {
+    return AudioDecoder<Decoder>{
+        backend: backend,
+        codec_id: codec_id,
+        media_kind: MEDIA_KIND_AUDIO,
+        clock_rate_hz: codec_default_clock_rate_hz(codec_id, MEDIA_KIND_AUDIO),
+        channels: channels,
+    };
+}
+
+export fn video_encoder_note_push<Encoder>(encoder: &VideoEncoder<Encoder>) !void {
+    if encoder == null {
+        return error.CodecInvalidConfig;
+    }
+    encoder.pushed_frames = encoder.pushed_frames + 1u64;
+    return;
+}
+
+export fn video_encoder_note_output<Encoder>(encoder: &VideoEncoder<Encoder>) !void {
+    if encoder == null {
+        return error.CodecInvalidConfig;
+    }
+    encoder.produced_frames = encoder.produced_frames + 1u64;
+    return;
+}
+
+export fn video_decoder_note_pull<Decoder>(decoder: &VideoDecoder<Decoder>) !void {
+    if decoder == null {
+        return error.CodecInvalidConfig;
+    }
+    decoder.pulled_frames = decoder.pulled_frames + 1u64;
+    return;
+}
+
+export fn video_decoder_note_output<Decoder>(decoder: &VideoDecoder<Decoder>) !void {
+    if decoder == null {
+        return error.CodecInvalidConfig;
+    }
+    decoder.produced_frames = decoder.produced_frames + 1u64;
+    return;
+}
+
+export fn audio_encoder_note_push<Encoder>(encoder: &AudioEncoder<Encoder>) !void {
+    if encoder == null {
+        return error.CodecInvalidConfig;
+    }
+    encoder.pushed_frames = encoder.pushed_frames + 1u64;
+    return;
+}
+
+export fn audio_encoder_note_output<Encoder>(encoder: &AudioEncoder<Encoder>) !void {
+    if encoder == null {
+        return error.CodecInvalidConfig;
+    }
+    encoder.produced_frames = encoder.produced_frames + 1u64;
+    return;
+}
+
+export fn audio_decoder_note_pull<Decoder>(decoder: &AudioDecoder<Decoder>) !void {
+    if decoder == null {
+        return error.CodecInvalidConfig;
+    }
+    decoder.pulled_frames = decoder.pulled_frames + 1u64;
+    return;
+}
+
+export fn audio_decoder_note_output<Decoder>(decoder: &AudioDecoder<Decoder>) !void {
+    if decoder == null {
+        return error.CodecInvalidConfig;
+    }
+    decoder.produced_frames = decoder.produced_frames + 1u64;
+    return;
+}
+
+export fn codec_encoded_frame_validate(frame: &EncodedFrame, media_kind: u8, codec_id: u16) !void {
+    if frame == null {
+        return error.CodecInvalidEncodedFrame;
+    }
+    if frame.media_kind != media_kind || frame.codec_id != codec_id {
+        return error.CodecInvalidEncodedFrame;
+    }
+    if frame.payload.len == 0usize || frame.duration_us == 0u32 {
+        return error.CodecInvalidEncodedFrame;
+    }
+    return;
+}
+
+fn codec_frame_queue_validate<Frame>(queue: &CodecFrameQueue<Frame>) !void {
+    if queue == null || queue.capacity == 0usize || queue.capacity > CODEC_FRAME_QUEUE_MAX_DEPTH {
+        return error.CodecInvalidConfig;
+    }
+    if queue.head >= queue.capacity || queue.tail >= queue.capacity || queue.count > queue.capacity {
+        return error.CodecInvalidConfig;
+    }
+    return;
+}
+
+fn codec_frame_queue_next_index<Frame>(queue: &CodecFrameQueue<Frame>, index: usize) usize {
+    const next: usize = index + 1usize;
+    if next >= queue.capacity {
+        return 0usize;
+    }
+    return next;
+}
+
+export fn codec_frame_queue_init<Frame>(queue: &CodecFrameQueue<Frame>, capacity: usize) !void {
+    if queue == null || capacity == 0usize || capacity > CODEC_FRAME_QUEUE_MAX_DEPTH {
+        return error.CodecInvalidConfig;
+    }
+    queue.capacity = capacity;
+    codec_frame_queue_reset<Frame>(queue);
+    return;
+}
+
+export fn codec_frame_queue_reset<Frame>(queue: &CodecFrameQueue<Frame>) void {
+    if queue == null {
+        return;
+    }
+    queue.head = 0usize;
+    queue.tail = 0usize;
+    queue.count = 0usize;
+    queue.push_count = 0u64;
+    queue.pull_count = 0u64;
+    queue.drop_count = 0u64;
+    queue.high_watermark = 0u64;
+}
+
+export fn codec_frame_queue_len<Frame>(queue: &CodecFrameQueue<Frame>) usize {
+    if queue == null {
+        return 0usize;
+    }
+    return queue.count;
+}
+
+export fn codec_frame_queue_push<Frame>(queue: &CodecFrameQueue<Frame>, frame: Frame) !void {
+    try codec_frame_queue_validate<Frame>(queue);
+    if queue.count == queue.capacity {
+        queue.drop_count = queue.drop_count + 1u64;
+        return error.CodecFrameQueueFull;
+    }
+
+    const tail: usize = queue.tail;
+    if tail >= CODEC_FRAME_QUEUE_MAX_DEPTH {
+        return error.CodecInvalidConfig;
+    }
+    queue.slots[tail] = frame;
+    queue.tail = codec_frame_queue_next_index<Frame>(queue, tail);
+    queue.count = queue.count + 1usize;
+    queue.push_count = queue.push_count + 1u64;
+
+    const depth: u64 = queue.count as u64;
+    if depth > queue.high_watermark {
+        queue.high_watermark = depth;
+    }
+    return;
+}
+
+export fn codec_frame_queue_pull<Frame>(queue: &CodecFrameQueue<Frame>) !Frame {
+    try codec_frame_queue_validate<Frame>(queue);
+    if queue.count == 0usize {
+        return error.CodecFrameQueueEmpty;
+    }
+
+    const head: usize = queue.head;
+    if head >= CODEC_FRAME_QUEUE_MAX_DEPTH {
+        return error.CodecInvalidConfig;
+    }
+    const frame: Frame = queue.slots[head];
+    queue.head = codec_frame_queue_next_index<Frame>(queue, head);
+    queue.count = queue.count - 1usize;
+    queue.pull_count = queue.pull_count + 1u64;
+    return frame;
+}
