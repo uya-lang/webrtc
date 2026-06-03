@@ -11,6 +11,7 @@ runtime dependency.
 from __future__ import annotations
 
 import json
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -383,6 +384,321 @@ def make_call_page(media_name: str) -> str:
     ).strip().replace("__MEDIA_NAME__", media_json)
 
 
+def make_preview_page(media_name: str, ffmpeg_stats: dict[str, int | str]) -> str:
+    media_json = json.dumps(media_name)
+    stats_json = json.dumps(ffmpeg_stats, sort_keys=True)
+    return textwrap.dedent(
+        """
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>FFmpeg Chrome WebRTC Preview</title>
+        <style>
+          :root {
+            color-scheme: light;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f7f8fb;
+            color: #1f2937;
+          }
+          body {
+            margin: 0;
+            min-height: 100vh;
+          }
+          main {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 24px;
+          }
+          header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 16px;
+          }
+          h1 {
+            margin: 0;
+            font-size: 22px;
+            font-weight: 700;
+          }
+          button {
+            border: 0;
+            border-radius: 6px;
+            background: #14532d;
+            color: white;
+            cursor: pointer;
+            font: inherit;
+            font-weight: 700;
+            min-height: 40px;
+            padding: 0 16px;
+          }
+          button:disabled {
+            background: #94a3b8;
+            cursor: default;
+          }
+          .videos {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+          }
+          .pane {
+            background: white;
+            border: 1px solid #d9dee8;
+            border-radius: 8px;
+            overflow: hidden;
+          }
+          .pane h2 {
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 15px;
+            margin: 0;
+            padding: 10px 12px;
+          }
+          video {
+            aspect-ratio: 16 / 9;
+            background: #111827;
+            display: block;
+            width: 100%;
+          }
+          .status {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 16px;
+          }
+          .metric {
+            background: white;
+            border: 1px solid #d9dee8;
+            border-radius: 8px;
+            padding: 10px 12px;
+          }
+          .label {
+            color: #64748b;
+            display: block;
+            font-size: 12px;
+            margin-bottom: 4px;
+          }
+          .value {
+            font-size: 18px;
+            font-weight: 700;
+          }
+          pre {
+            background: #111827;
+            border-radius: 8px;
+            color: #e5e7eb;
+            font-size: 12px;
+            margin: 16px 0 0;
+            overflow: auto;
+            padding: 12px;
+            white-space: pre-wrap;
+          }
+          @media (max-width: 760px) {
+            main {
+              padding: 16px;
+            }
+            header {
+              align-items: stretch;
+              flex-direction: column;
+            }
+            .videos,
+            .status {
+              grid-template-columns: 1fr;
+            }
+          }
+        </style>
+        <main>
+          <header>
+            <h1>FFmpeg VP8/Opus WebRTC Preview</h1>
+            <button id="start">Start Call</button>
+          </header>
+          <section class="videos">
+            <div class="pane">
+              <h2>FFmpeg Source</h2>
+              <video id="source" controls loop playsinline></video>
+            </div>
+            <div class="pane">
+              <h2>Chrome WebRTC Receiver</h2>
+              <video id="remote" autoplay controls playsinline></video>
+            </div>
+          </section>
+          <section class="status">
+            <div class="metric"><span class="label">State</span><span class="value" id="state">idle</span></div>
+            <div class="metric"><span class="label">Audio Packets</span><span class="value" id="audioPackets">0</span></div>
+            <div class="metric"><span class="label">Video Packets</span><span class="value" id="videoPackets">0</span></div>
+            <div class="metric"><span class="label">Video Frames</span><span class="value" id="videoFrames">0</span></div>
+          </section>
+          <pre id="log"></pre>
+        </main>
+        <script>
+        const mediaName = __MEDIA_NAME__;
+        const sourceStats = __SOURCE_STATS__;
+        const source = document.getElementById('source');
+        const remote = document.getElementById('remote');
+        const start = document.getElementById('start');
+        const state = document.getElementById('state');
+        const audioPackets = document.getElementById('audioPackets');
+        const videoPackets = document.getElementById('videoPackets');
+        const videoFrames = document.getElementById('videoFrames');
+        const log = document.getElementById('log');
+        source.src = mediaName;
+        remote.muted = true;
+
+        function writeLog(line) {
+          log.textContent += line + '\\n';
+        }
+
+        function waitForEvent(target, name, predicate) {
+          return new Promise((resolve, reject) => {
+            const handler = event => {
+              try {
+                if (!predicate || predicate(event)) {
+                  target.removeEventListener(name, handler);
+                  resolve(event);
+                }
+              } catch (error) {
+                target.removeEventListener(name, handler);
+                reject(error);
+              }
+            };
+            target.addEventListener(name, handler);
+          });
+        }
+
+        function waitForState(target, name, predicate) {
+          if (predicate()) {
+            return Promise.resolve();
+          }
+          return waitForEvent(target, name, () => predicate());
+        }
+
+        function makeIceRelay(sourcePc, sinkPc) {
+          const queue = [];
+          let ready = false;
+          sourcePc.addEventListener('icecandidate', event => {
+            if (!event.candidate) {
+              return;
+            }
+            if (ready) {
+              void sinkPc.addIceCandidate(event.candidate);
+            } else {
+              queue.push(event.candidate);
+            }
+          });
+          return {
+            async enable() {
+              ready = true;
+              for (const candidate of queue.splice(0)) {
+                await sinkPc.addIceCandidate(candidate);
+              }
+            }
+          };
+        }
+
+        function codecPreferences(kind, mimeType) {
+          const capabilities = RTCRtpSender.getCapabilities(kind);
+          if (!capabilities || !capabilities.codecs) {
+            return [];
+          }
+          const wanted = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase() === mimeType);
+          const helpers = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase().indexOf('rtx') >= 0);
+          return wanted.concat(helpers);
+        }
+
+        async function statsLoop(audioReceiver, videoReceiver) {
+          while (true) {
+            for (const stat of (await audioReceiver.getStats()).values()) {
+              if (stat.type === 'inbound-rtp' && (stat.kind === 'audio' || stat.mediaType === 'audio')) {
+                audioPackets.textContent = String(stat.packetsReceived || 0);
+              }
+            }
+            for (const stat of (await videoReceiver.getStats()).values()) {
+              if (stat.type === 'inbound-rtp' && (stat.kind === 'video' || stat.mediaType === 'video')) {
+                videoPackets.textContent = String(stat.packetsReceived || 0);
+                videoFrames.textContent = String(stat.framesDecoded || stat.framesReceived || 0);
+              }
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+        }
+
+        async function run() {
+          start.disabled = true;
+          state.textContent = 'starting';
+          writeLog('source=' + JSON.stringify(sourceStats));
+          await waitForState(source, 'loadedmetadata', () => source.readyState >= 1);
+          await source.play();
+
+          const capture = source.captureStream ? source.captureStream() : source.mozCaptureStream();
+          if (!capture) {
+            throw new Error('captureStream is unavailable');
+          }
+          const audioTrack = capture.getAudioTracks()[0];
+          const videoTrack = capture.getVideoTracks()[0];
+          if (!audioTrack || !videoTrack) {
+            throw new Error('captured stream is missing audio or video');
+          }
+
+          const pc1 = new RTCPeerConnection({iceServers: []});
+          const pc2 = new RTCPeerConnection({iceServers: []});
+          const relay12 = makeIceRelay(pc1, pc2);
+          const relay21 = makeIceRelay(pc2, pc1);
+          const remoteStream = new MediaStream();
+          remote.srcObject = remoteStream;
+
+          const audioEventPromise = waitForEvent(pc2, 'track', event => event.track.kind === 'audio');
+          const videoEventPromise = waitForEvent(pc2, 'track', event => event.track.kind === 'video');
+          pc2.addEventListener('track', event => {
+            remoteStream.addTrack(event.track);
+          });
+
+          const audioTransceiver = pc1.addTransceiver(audioTrack, {direction: 'sendonly'});
+          const opus = codecPreferences('audio', 'audio/opus');
+          if (opus.length > 0) {
+            audioTransceiver.setCodecPreferences(opus);
+          }
+          const videoTransceiver = pc1.addTransceiver(videoTrack, {direction: 'sendonly'});
+          const vp8 = codecPreferences('video', 'video/vp8');
+          if (vp8.length > 0) {
+            videoTransceiver.setCodecPreferences(vp8);
+          }
+
+          const offer = await pc1.createOffer();
+          await pc1.setLocalDescription(offer);
+          await pc2.setRemoteDescription(pc1.localDescription);
+          await relay12.enable();
+          const answer = await pc2.createAnswer();
+          await pc2.setLocalDescription(answer);
+          await pc1.setRemoteDescription(pc2.localDescription);
+          await relay21.enable();
+
+          const audioEvent = await audioEventPromise;
+          const videoEvent = await videoEventPromise;
+          await Promise.all([
+            waitForState(pc1, 'connectionstatechange', () => pc1.connectionState === 'connected'),
+            waitForState(pc2, 'connectionstatechange', () => pc2.connectionState === 'connected'),
+          ]);
+          const audioReceiver = pc2.getReceivers().find(receiver => receiver.track === audioEvent.track);
+          const videoReceiver = pc2.getReceivers().find(receiver => receiver.track === videoEvent.track);
+          if (!audioReceiver || !videoReceiver) {
+            throw new Error('receiver lookup failed');
+          }
+
+          state.textContent = 'connected';
+          writeLog('offer has audio=' + pc1.localDescription.sdp.includes('m=audio'));
+          writeLog('offer has video=' + pc1.localDescription.sdp.includes('m=video'));
+          void statsLoop(audioReceiver, videoReceiver);
+        }
+
+        start.addEventListener('click', () => {
+          run().catch(error => {
+            state.textContent = 'failed';
+            writeLog(error.stack || String(error));
+            start.disabled = false;
+          });
+        });
+        </script>
+        """
+    ).strip().replace("__MEDIA_NAME__", media_json).replace("__SOURCE_STATS__", stats_json)
+
+
 def wait_for_result(client: CDPClient, session_id: str) -> dict[str, Any]:
     deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -515,10 +831,46 @@ def run_flow(keep_temp: bool = False) -> str:
         )
 
 
-def main() -> int:
-    keep_temp = "--keep-temp" in set(sys.argv[1:])
+def write_preview(preview_dir: Path) -> str:
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    media_path, ffmpeg_stats = generate_ffmpeg_media(preview_dir)
+    page_path = preview_dir / "index.html"
+    page_path.write_text(make_preview_page(media_path.name, ffmpeg_stats), encoding="utf-8")
+    return f"ffmpeg chrome preview written: dir={preview_dir} page={page_path}"
+
+
+def serve_preview(preview_dir: Path) -> int:
+    server, thread, http_port = start_http_server(preview_dir)
+    url = f"http://127.0.0.1:{http_port}/"
+    print(f"ffmpeg chrome preview serving: {url}", flush=True)
+    print("press Ctrl-C to stop", flush=True)
     try:
-        print(run_flow(keep_temp))
+        while True:
+            time.sleep(3600.0)
+    except KeyboardInterrupt:
+        print("ffmpeg chrome preview stopped", flush=True)
+        return 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--keep-temp", action="store_true", help="copy generated headless-test artifacts to a retained temp directory")
+    parser.add_argument("--preview-dir", type=Path, help="write a manual Chrome preview page into this directory")
+    parser.add_argument("--serve-preview", action="store_true", help="serve the manual preview page and wait until Ctrl-C")
+    args = parser.parse_args()
+    try:
+        if args.preview_dir is not None or args.serve_preview:
+            preview_dir = args.preview_dir or Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-preview-"))
+            print(write_preview(preview_dir), flush=True)
+            if args.serve_preview:
+                return serve_preview(preview_dir)
+            return 0
+
+        print(run_flow(args.keep_temp))
         return 0
     except SkipFlow as exc:
         print(f"ffmpeg chrome call skipped: {exc}")
