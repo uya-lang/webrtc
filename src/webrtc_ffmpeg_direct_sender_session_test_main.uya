@@ -1,0 +1,101 @@
+use libc.printf;
+use webrtc.media.direct_session;
+
+fn bytes_contains_at(haystack: &[byte], offset: usize, needle: &[byte]) bool {
+    if offset + needle.len > haystack.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < needle.len {
+        if haystack[offset + index] != needle[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn bytes_contains(haystack: &[byte], needle: &[byte]) bool {
+    if needle.len == 0usize {
+        return true;
+    }
+    var index: usize = 0usize;
+    while index + needle.len <= haystack.len {
+        if bytes_contains_at(haystack, index, needle) {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+fn check_chrome_offer_parse_and_passive_answer() i32 {
+    const offer_sdp: &[byte] = "v=0\r\no=- 548391 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\na=extmap-allow-mixed\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111 63\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=ice-options:trickle\r\na=fingerprint:sha-256 00:11:22\r\na=setup:actpass\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=rtcp-fb:111 transport-cc\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host generation 0 ufrag chromeUfrag network-id 1\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 97\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=ice-options:trickle\r\na=fingerprint:sha-256 00:11:22\r\na=setup:actpass\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtcp-fb:96 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host generation 0 ufrag chromeUfrag network-id 1\r\n" as &[byte];
+
+    const parsed: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp(offer_sdp);
+    if parsed.error_id != 0 {
+        return 10i32;
+    }
+    if parsed.value.audio.payload_type != 111u8 || parsed.value.video.payload_type != 96u8 {
+        return 11i32;
+    }
+    if !parsed.value.audio.remote_candidate.present || parsed.value.audio.remote_candidate.port != 43123u16 {
+        return 12i32;
+    }
+    if !parsed.value.video.remote_candidate.present || parsed.value.video.remote_candidate.port != 43124u16 {
+        return 13i32;
+    }
+    if parsed.value.audio.mid_extension_id != 4u8 || parsed.value.video.mid_extension_id != 4u8 {
+        return 22i32;
+    }
+
+    var answer: [byte: 4096] = [];
+    const written: !usize = direct_session_write_passive_answer(
+        &parsed.value,
+        "127.0.0.1" as &[byte],
+        50555u16,
+        "uyaDirIce" as &[byte],
+        "uyaDirIcePwd012345678901234" as &[byte],
+        "AA:BB:CC:DD" as &[byte],
+        answer[0:4096],
+    );
+    if written.error_id != 0 {
+        return 14i32;
+    }
+    const answer_sdp: &[byte] = answer[0:written.value];
+    if !bytes_contains(answer_sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 111" as &[byte]) {
+        return 15i32;
+    }
+    if !bytes_contains(answer_sdp, "m=video 9 UDP/TLS/RTP/SAVPF 96" as &[byte]) {
+        return 16i32;
+    }
+    if !bytes_contains(answer_sdp, "a=setup:passive" as &[byte]) {
+        return 17i32;
+    }
+    if !bytes_contains(answer_sdp, "a=ice-lite" as &[byte]) {
+        return 18i32;
+    }
+    if !bytes_contains(answer_sdp, "a=candidate:1 1 UDP 2130706431 127.0.0.1 50555 typ host" as &[byte]) {
+        return 19i32;
+    }
+    if !bytes_contains(answer_sdp, "a=ssrc:1096107057 cname:uya-direct" as &[byte]) {
+        return 20i32;
+    }
+    if !bytes_contains(answer_sdp, "a=ssrc:1447642161 cname:uya-direct" as &[byte]) {
+        return 21i32;
+    }
+    if !bytes_contains(answer_sdp, "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid" as &[byte]) {
+        return 23i32;
+    }
+    return 0i32;
+}
+
+fn main() i32 {
+    const result: i32 = check_chrome_offer_parse_and_passive_answer();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender pure session tests failed: %d\n", result);
+        return 1i32;
+    }
+    printf("Uya FFmpeg direct sender pure session tests passed\n");
+    return 0i32;
+}

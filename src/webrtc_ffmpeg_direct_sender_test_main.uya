@@ -2,7 +2,12 @@ use libc.printf;
 use webrtc.media.direct_sender;
 use webrtc.media.model;
 use webrtc.media.vp8_rtp;
+use webrtc.rtcp.rtcp_packet;
 use webrtc.rtp.rtp_packet;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.srtp.srtcp;
 
 fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     if lhs.len != rhs.len {
@@ -27,8 +32,62 @@ fn sender_make() !UyaDirectSender {
     config.video_initial_sequence = 20u16;
     config.audio_initial_timestamp = 480u32;
     config.video_initial_timestamp = 900u32;
+    config.audio_mid_extension_id = 4u8;
+    config.audio_mid = "0" as &[byte];
+    config.video_mid_extension_id = 4u8;
+    config.video_mid = "1" as &[byte];
     try uya_direct_sender_init(&sender, config);
     return sender;
+}
+
+fn init_srtp_pair(tx: &SrtpContext, rx: &SrtpContext, ssrc: u32) i32 {
+    var key: [byte: SRTP_KEY_BYTES] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte,
+        0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+    ];
+    var salt: [byte: SRTP_SALT_BYTES] = [
+        0xa0 as byte, 0xa1 as byte, 0xa2 as byte, 0xa3 as byte,
+        0xa4 as byte, 0xa5 as byte, 0xa6 as byte, 0xa7 as byte,
+        0xa8 as byte, 0xa9 as byte, 0xaa as byte, 0xab as byte,
+        0xac as byte, 0xad as byte,
+    ];
+    if srtp_context_init(tx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 100i32;
+    }
+    if srtp_context_init(rx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 101i32;
+    }
+    if srtp_derive_session_keys(tx).error_id != 0 || srtp_derive_session_keys(rx).error_id != 0 {
+        return 102i32;
+    }
+    return 0i32;
+}
+
+fn init_srtcp_pair(tx: &SrtcpContext, rx: &SrtcpContext, ssrc: u32) i32 {
+    var key: [byte: SRTP_KEY_BYTES] = [
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte,
+        0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte,
+        0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+    ];
+    var salt: [byte: SRTP_SALT_BYTES] = [
+        0xb0 as byte, 0xb1 as byte, 0xb2 as byte, 0xb3 as byte,
+        0xb4 as byte, 0xb5 as byte, 0xb6 as byte, 0xb7 as byte,
+        0xb8 as byte, 0xb9 as byte, 0xba as byte, 0xbb as byte,
+        0xbc as byte, 0xbd as byte,
+    ];
+    if srtcp_context_init(tx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 110i32;
+    }
+    if srtcp_context_init(rx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 111i32;
+    }
+    if srtcp_derive_session_keys(tx).error_id != 0 || srtcp_derive_session_keys(rx).error_id != 0 {
+        return 112i32;
+    }
+    return 0i32;
 }
 
 fn check_opus_frame_packetize() i32 {
@@ -70,6 +129,14 @@ fn check_opus_frame_packetize() i32 {
     if parsed.value.header.payload_type != CODEC_DEFAULT_PT_OPUS {
         return 14i32;
     }
+    const audio_extension_data: &[byte] = parsed.value.header.extension_data;
+    if !parsed.value.header.extension
+        || parsed.value.header.extension_profile != 0xBEDEu16
+        || audio_extension_data.len != 4usize
+        || audio_extension_data[0] != 0x40 as byte
+        || audio_extension_data[1] != ('0' as byte) {
+        return 22i32;
+    }
     if !bytes_equal(parsed.value.header.payload, opus_payload[0:6]) {
         return 15i32;
     }
@@ -80,6 +147,29 @@ fn check_opus_frame_packetize() i32 {
     }
     if sender.audio_sender.next_sequence != 11u16 || sender.audio_sender.next_timestamp != 1440u32 {
         return 17i32;
+    }
+
+    var tx: SrtpContext = srtp_context_make();
+    var rx: SrtpContext = srtp_context_make();
+    const init_srtp: i32 = init_srtp_pair(&tx, &rx, 0x01020304u32);
+    if init_srtp != 0i32 {
+        return init_srtp;
+    }
+    var srtp_packet: [byte: 512] = [];
+    const srtp_len: !usize = direct_sender_protect_rtp_packet(&sender, &tx, packet[0:summary.value.rtp_len], srtp_packet[0:512]);
+    if srtp_len.error_id != 0 {
+        return 18i32;
+    }
+    var recovered_rtp: [byte: 512] = [];
+    const recovered_len: !usize = srtp_unprotect(&rx, srtp_packet[0:srtp_len.value], recovered_rtp[0:512]);
+    if recovered_len.error_id != 0 || recovered_len.value != summary.value.rtp_len {
+        return 19i32;
+    }
+    if !bytes_equal(recovered_rtp[0:recovered_len.value], packet[0:summary.value.rtp_len]) {
+        return 20i32;
+    }
+    if sender.diagnostics.srtp_packets != 1u64 {
+        return 21i32;
     }
     return 0i32;
 }
@@ -118,6 +208,14 @@ fn check_vp8_frame_packetize() i32 {
     const parsed: !RtpPacket = rtp_packet_parse(packet[0:summary.value.rtp_len]);
     if parsed.error_id != 0 {
         return 23i32;
+    }
+    const video_extension_data: &[byte] = parsed.value.header.extension_data;
+    if !parsed.value.header.extension
+        || parsed.value.header.extension_profile != 0xBEDEu16
+        || video_extension_data.len != 4usize
+        || video_extension_data[0] != 0x40 as byte
+        || video_extension_data[1] != ('1' as byte) {
+        return 28i32;
     }
     const descriptor: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(parsed.value.header.payload);
     if descriptor.error_id != 0 {
@@ -169,6 +267,94 @@ fn check_sender_limits_and_errors() i32 {
     return 0i32;
 }
 
+fn check_sender_reports_and_srtcp() i32 {
+    var sender_result: !UyaDirectSender = sender_make();
+    if sender_result.error_id != 0 {
+        return 40i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var opus_payload: [byte: 4] = [0xf8 as byte, 0x11 as byte, 0x22 as byte, 0x33 as byte];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_AUDIO;
+    frame.codec_id = CODEC_ID_OPUS;
+    frame.payload = opus_payload[0:4];
+    frame.duration_us = 20000u32;
+
+    var packet: [byte: 256] = [];
+    const summary: !DirectSenderPacket = rtp_packetize_encoded_frame(&sender, &frame, packet[0:256]);
+    if summary.error_id != 0 {
+        return 41i32;
+    }
+
+    var rtcp_packet: [byte: 128] = [];
+    const rtcp_len: !usize = direct_sender_write_sender_report(
+        &sender,
+        MEDIA_KIND_AUDIO,
+        0xe0000001u32,
+        0x80000000u32,
+        rtcp_packet[0:128],
+    );
+    if rtcp_len.error_id != 0 {
+        return 42i32;
+    }
+    const parsed_sr: !RtcpSenderReport = rtcp_sender_report_parse(rtcp_packet[0:rtcp_len.value]);
+    if parsed_sr.error_id != 0 {
+        return 43i32;
+    }
+    if parsed_sr.value.sender_ssrc != 0x01020304u32
+        || parsed_sr.value.ntp_msw != 0xe0000001u32
+        || parsed_sr.value.ntp_lsw != 0x80000000u32
+        || parsed_sr.value.rtp_timestamp != sender.audio_sender.next_timestamp
+        || parsed_sr.value.packet_count != 1u32
+        || parsed_sr.value.octet_count != 4u32 {
+        return 44i32;
+    }
+
+    var tx: SrtcpContext = srtcp_context_make();
+    var rx: SrtcpContext = srtcp_context_make();
+    const init_srtcp: i32 = init_srtcp_pair(&tx, &rx, 0x01020304u32);
+    if init_srtcp != 0i32 {
+        return init_srtcp;
+    }
+    var srtcp_packet: [byte: 256] = [];
+    const srtcp_len: !usize = direct_sender_protect_srtcp_packet(&sender, &tx, rtcp_packet[0:rtcp_len.value], srtcp_packet[0:256]);
+    if srtcp_len.error_id != 0 {
+        return 45i32;
+    }
+    var recovered: [byte: 128] = [];
+    const recovered_len: !usize = srtcp_unprotect(&rx, srtcp_packet[0:srtcp_len.value], recovered[0:128]);
+    if recovered_len.error_id != 0 || recovered_len.value != rtcp_len.value {
+        return 46i32;
+    }
+    if !bytes_equal(recovered[0:recovered_len.value], rtcp_packet[0:rtcp_len.value]) {
+        return 47i32;
+    }
+    if sender.diagnostics.rtcp_sender_reports_sent != 1u64 || sender.diagnostics.srtcp_packets != 1u64 {
+        return 48i32;
+    }
+
+    if direct_sender_record_srtcp_packet_received(&sender).error_id != 0 {
+        return 49i32;
+    }
+    if direct_sender_record_rtcp_feedback(&sender, MEDIA_KIND_AUDIO, 0x01020304u32, RTCP_PACKET_TYPE_RR, 0u8).error_id != 0 {
+        return 50i32;
+    }
+    if direct_sender_record_rtcp_feedback(&sender, MEDIA_KIND_VIDEO, 0x11223344u32, RTCP_PACKET_TYPE_PSFB, RTCP_PSFB_FMT_PLI).error_id != 0 {
+        return 51i32;
+    }
+    if sender.diagnostics.srtcp_packets_received != 1u64
+        || sender.diagnostics.rtcp_packets_received != 2u64
+        || sender.diagnostics.rtcp_receiver_reports_received != 1u64
+        || sender.diagnostics.rtcp_feedback_packets_received != 1u64
+        || sender.diagnostics.rtcp_pli_packets_received != 1u64
+        || sender.diagnostics.rtcp_last_media_ssrc != (0x11223344u32 as u64) {
+        return 52i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_opus_frame_packetize();
     if result != 0i32 {
@@ -188,6 +374,12 @@ fn main() i32 {
         return 1i32;
     }
 
-    printf("Uya FFmpeg direct sender RTP packetizer tests passed\n");
+    result = check_sender_reports_and_srtcp();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender SRTCP tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Uya FFmpeg direct sender RTP/SRTCP packetizer tests passed\n");
     return 0i32;
 }

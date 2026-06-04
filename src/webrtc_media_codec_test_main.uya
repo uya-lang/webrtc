@@ -33,6 +33,48 @@ fn make_encoded_frame(codec_id: u16, media_kind: u8, timestamp: u64, duration_us
     return frame;
 }
 
+fn check_codec_provider_selection() i32 {
+    const ffmpeg_provider: CodecProviderSelection = codec_provider_ffmpeg_make();
+    if ffmpeg_provider.provider_id != CODEC_PROVIDER_FFMPEG
+        || !ffmpeg_provider.uses_extern
+        || ffmpeg_provider.requires_codec_bridge
+        || !codec_provider_selection_ready(&ffmpeg_provider) {
+        return 5i32;
+    }
+    if ffmpeg_provider.audio_codec_id != CODEC_ID_OPUS || ffmpeg_provider.video_codec_id != CODEC_ID_VP8 {
+        return 6i32;
+    }
+
+    const uya_waiting: CodecProviderSelection = codec_provider_uya_make(false, true);
+    if uya_waiting.provider_id != CODEC_PROVIDER_UYA
+        || uya_waiting.uses_extern
+        || !uya_waiting.requires_codec_bridge
+        || codec_provider_selection_ready(&uya_waiting)
+        || uya_waiting.audio_encode_ready
+        || !uya_waiting.video_encode_ready {
+        return 7i32;
+    }
+
+    const uya_ready: !CodecProviderSelection = codec_provider_select_by_name("UYA" as &[byte], true, true);
+    if uya_ready.error_id != 0 {
+        return 8i32;
+    }
+    if uya_ready.value.provider_id != CODEC_PROVIDER_UYA || !codec_provider_selection_ready(&uya_ready.value) {
+        return 9i32;
+    }
+
+    const named_ffmpeg: !CodecProviderSelection = codec_provider_select_by_name("ffmpeg" as &[byte], false, false);
+    if named_ffmpeg.error_id != 0 || named_ffmpeg.value.provider_id != CODEC_PROVIDER_FFMPEG {
+        return 10i32;
+    }
+
+    const unknown: !CodecProviderSelection = codec_provider_select_by_name("bogus" as &[byte], false, false);
+    if unknown.error_id != @error_id(error.CodecProviderUnsupported) {
+        return 11i32;
+    }
+    return 0i32;
+}
+
 fn check_generic_wrappers() i32 {
     if codec_require_video_codec(CODEC_ID_VP8).error_id != 0 {
         return 10i32;
@@ -364,7 +406,13 @@ fn check_video_push_pull_flow() i32 {
 }
 
 fn main() i32 {
-    var result: i32 = check_generic_wrappers();
+    var result: i32 = check_codec_provider_selection();
+    if result != 0i32 {
+        printf("media codec provider selection tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_generic_wrappers();
     if result != 0i32 {
         printf("media codec generic wrapper tests failed: %d\n", result);
         return 1i32;

@@ -545,7 +545,7 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
 - [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
   - blocked: 现有 Phase 17 video interop 使用浏览器 canvas/内部 VP8 发送，不能作为本仓库直接发送 encoded VP8 或通过 VP8 bridge 编码的示例；`../vp8` encoder、library API 与 RTP reassembly 仍未实现，暂无真实 bridge encode 路径可验证。
-- [~] 打通 Uya 进程直连 Chrome 的 FFmpeg codec 音视频通话：FFmpeg raw/encoded frame -> WebRTC RTP payload packetizer -> SRTP/SRTCP -> UDP -> Chrome inbound RTP，且不经浏览器内部 `pc1`/`pc2` loopback。
+- [x] 打通 Uya 进程直连 Chrome 的 FFmpeg codec 音视频通话：FFmpeg raw/encoded frame -> WebRTC RTP payload packetizer -> SRTP -> UDP -> Chrome inbound RTP，且不经浏览器内部 `pc1`/`pc2` loopback。
   - [x] 建立 `test-ffmpeg-chrome-call` 的 Uya direct sender 验收壳：Chrome 只做 recvonly inbound peer，测试禁止 `captureStream`、浏览器内部 `pc1`/`pc2` loopback 和 Pion/aiortc/wrtc 等外部 WebRTC sender。
   - [x] 增加 Uya sender CLI 入口 `uya_ffmpeg_direct_sender`，dry-run 可读取 Chrome offer / media 参数并输出诊断 JSON；非 dry-run 在 DTLS-SRTP 未接通前拒绝写假 SDP answer。
   - [x] 在 Uya sender 中实现 `EncodedFrame` -> Opus/VP8 RTP payload packetizer，并覆盖 timestamp、payload type、SSRC、marker、单包 MTU guard。
@@ -554,9 +554,24 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
     - [x] 接入 FFmpeg Opus encoder：PCM/s16le -> Opus packet -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
     - [x] 接入 FFmpeg VP8 encoder：I420 -> VP8 frame -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
     - [x] 接入 FFmpeg decoder 验证路径：Opus/VP8 `EncodedFrame` -> decoded PCM/I420，用于后续 Uya 自研 encoder/decoder A/B 验证。
-  - [ ] 在 Uya sender 中接通 Chrome host ICE/STUN 和 DTLS-SRTP exporter，生成真实 SRTP/SRTCP key。
-  - [ ] 在 Uya sender 中将 RTP/RTCP 经 SRTP/SRTCP protect 后通过 UDP 发给 Chrome selected pair。
-  - [ ] 通过 Chrome inbound-rtp stats 和 decoded audio/video frames 验证观看成功，并记录 FFmpeg packet、RTP packet、SRTP packet、UDP packet 计数。
+  - [x] 建立 FFmpeg/Uya codec provider 可切换入口：direct sender CLI 支持 `--codec ffmpeg|uya`，FFmpeg provider 继续走已验证的 extern codec ingest，Uya provider 通过纯 `codec_bridge` ready 位保留切换入口；当前 Uya sibling encoder/decoder 尚未接入时 dry-run 诊断明确报告 `codecProviderReady=false`。
+    - verified 2026-06-04: `bash tests/check_phase11_media.sh`、`bash tests/check_phase21_ffmpeg_codec_extern.sh`、`bash tests/check_phase21_ffmpeg_direct_sender_cli.sh`、`bash tests/check_phase21_ffmpeg_direct_sender.sh`、`bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过；Chrome E2E 使用 `--codec ffmpeg`，`chrome_audio_packets=235`、`chrome_video_packets=141`、`chrome_video_frames=141`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=6`、`sender_rtcp_receiver_reports=6`、`sender_udp_packets=491`。
+  - [x] 在 Uya sender 中接通 Chrome host ICE/STUN 和 DTLS-SRTP exporter，生成真实 SRTP/SRTCP key。
+    - [x] 约束 direct sender 新增 session / DTLS identity 路径保持纯 Uya；FFmpeg codec 是唯一允许的 extern codec 边界。
+    - [x] 解析 Chrome recvonly Opus/VP8 offer，并生成带纯 Uya 静态 P-256 identity fingerprint 的 `setup:passive` SDP answer。
+    - [x] 嵌入 DTLS identity 证书 DER，验证 fingerprint、私钥派生公钥和 ECDSA sign/verify。
+    - [x] 实现纯 Uya DTLS server first flight：解析 ClientHello，协商 `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` / `SRTP_AES128_CM_SHA1_80`，写出 ServerHello / Certificate / ServerKeyExchange / ServerHelloDone。
+    - [x] 实现纯 Uya ClientKeyExchange -> ECDH premaster -> TLS master secret -> DTLS-SRTP exporter key material，并验证 server-role SRTP context 方向。
+    - [x] 实现纯 Uya DTLS AES-128-GCM record key expansion、nonce/AAD 组装和 encrypted Finished 解密/verify_data 校验 roundtrip。
+    - [x] 实现纯 Uya DTLS server handshake，协商 `SRTP_AES128_CM_SHA1_80` 并通过 exporter 生成 SRTP/SRTCP key。
+  - [x] 在 Uya sender 中将 RTP 经 SRTP protect 后通过 UDP 发给 Chrome selected pair。
+    - [x] 将 `rtp_packetize_encoded_frame` 输出接入 SRTP protect，并用 unprotect roundtrip 验证 protected RTP 包可还原。
+    - [x] 将 protected SRTP 包通过 UDP 发给 Chrome selected pair。
+    - [x] 补齐 SRTCP Sender Report/Receiver feedback 发送与统计；当前不阻塞 Chrome inbound RTP/VP8 解码验收。
+      - verified 2026-06-04: `bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过，Uya sender 发送 `sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`，并解析 Chrome 回传 `sender_srtcp_packets_received=5`、`sender_rtcp_packets_received=5`、`sender_rtcp_receiver_reports=5`。
+  - [x] 通过 Chrome inbound-rtp stats 和 decoded audio/video frames 验证观看成功，并记录 FFmpeg packet、RTP packet、SRTP packet、UDP packet 计数。
+    - verified 2026-06-03: `python3 tests/ffmpeg_chrome_call.py --keep-temp` 通过，`source_audio_packets=201`、`source_video_packets=120`、`chrome_audio_packets=10`、`chrome_video_packets=6`、`chrome_video_frames=6`、`sender_ffmpegFrames=321`、`sender_rtpPackets=321`、`sender_srtpPackets=321`、`sender_udpPackets=321`。
+    - verified 2026-06-04: `bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过，`source_audio_packets=201`、`source_video_packets=120`、`chrome_audio_packets=238`、`chrome_video_packets=143`、`chrome_video_frames=143`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=5`、`sender_rtcp_packets_received=5`、`sender_rtcp_receiver_reports=5`、`sender_udp_packets=491`。
 - [x] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
 - [x] AV1 仅保留 OBU/RTP 工具，编解码另行评估。
 

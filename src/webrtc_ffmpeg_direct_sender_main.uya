@@ -1,19 +1,64 @@
-use libc.FILE;
-use libc.fclose;
-use libc.fopen;
-use libc.fread;
-use libc.fwrite;
-use libc.printf;
+use libc.CLOCKS_PER_SEC;
+use libc.O_CREAT;
+use libc.O_RDONLY;
+use libc.O_TRUNC;
+use libc.O_WRONLY;
+use libc.clock;
 use libc.strcmp;
 use libc.strlen;
+use libc.sys_close;
+use libc.sys_open;
+use libc.sys_read;
+use libc.sys_write;
+use webrtc.binary;
+use webrtc.dtls.identity;
+use webrtc.media.codec;
+use webrtc.media.direct_runtime;
+use webrtc.media.direct_sender;
+use webrtc.media.direct_session;
+use webrtc.media.ffmpeg_codec;
+use webrtc.media.ffmpeg_direct_ingest;
+use webrtc.media.model;
+use webrtc.net.udp;
 
 export error DirectSenderCliInvalidArgs;
 export error DirectSenderCliFileOpenFailed;
 export error DirectSenderCliFileReadFailed;
 export error DirectSenderCliFileWriteFailed;
 export error DirectSenderCliOfferInvalid;
+export error DirectSenderCliJsonInvalid;
+export error DirectSenderCliSdpTooLarge;
+export error DirectSenderCliAnswerTooLarge;
+export error DirectSenderCliRuntimeFailed;
 
 const CLI_MAX_OFFER_BYTES: usize = 65536usize;
+const CLI_MAX_SDP_BYTES: usize = 65536usize;
+const CLI_MAX_ANSWER_SDP_BYTES: usize = 8192usize;
+const CLI_MAX_ANSWER_JSON_BYTES: usize = 16384usize;
+const CLI_LOCAL_UDP_PORT: u16 = 49999u16;
+const CLI_LIVE_TIMEOUT_US: u64 = 15_000_000u64;
+const CLI_LIVE_MEDIA_DURATION_US: u64 = 6_000_000u64;
+const CLI_AUDIO_FRAME_DURATION_US: u32 = 20_000u32;
+const CLI_VIDEO_FRAME_DURATION_US: u32 = 33_333u32;
+const CLI_AUDIO_SAMPLES_PER_CHANNEL: usize = 960usize;
+const CLI_AUDIO_PCM_BYTES: usize = 1920usize;
+const CLI_VIDEO_WIDTH: u32 = 16u32;
+const CLI_VIDEO_HEIGHT: u32 = 16u32;
+const CLI_VIDEO_I420_BYTES: usize = 384usize;
+const CLI_ENCODED_PACKET_BYTES: usize = 4096usize;
+const CLI_RTP_PACKET_BYTES: usize = 2048usize;
+const CLI_SRTP_PACKET_BYTES: usize = 2048usize;
+const CLI_RTCP_PACKET_BYTES: usize = 512usize;
+const CLI_SRTCP_PACKET_BYTES: usize = 2048usize;
+const CLI_RTCP_REPORT_INTERVAL_US: u64 = 1_000_000u64;
+const CLI_NTP_UNIX_EPOCH_SECONDS: u64 = 2_208_988_800u64;
+
+fn cli_write_stderr(message: &[byte]) void {
+    if message.len == 0usize {
+        return;
+    }
+    _ = sys_write(2i32, &message[0] as *const byte, message.len) catch { -1 as isize; };
+}
 
 fn cstr_eq(lhs: &byte, rhs: &byte) bool {
     if lhs == null || rhs == null {
@@ -58,37 +103,42 @@ fn read_file_bytes(path: &byte, out: &[byte], out_len: &usize) !void {
         return error.DirectSenderCliInvalidArgs;
     }
 
-    const fp: &FILE = fopen(path as *byte, "rb\0" as &byte);
-    if fp == null {
+    const fd: !i32 = sys_open(path as *const byte, O_RDONLY as i32, 0i32);
+    if fd.error_id != 0 {
         return error.DirectSenderCliFileOpenFailed;
     }
     const max_read: usize = out.len - 1usize;
-    const read_count: usize = fread(&out[0], 1usize, max_read, fp);
-    if fclose(fp) != 0 {
+    const read_count: !isize = sys_read(fd.value, &out[0], max_read);
+    if read_count.error_id != 0 || read_count.value < 0 {
+        _ = sys_close(fd.value) catch {};
         return error.DirectSenderCliFileReadFailed;
     }
-    out[read_count] = 0 as byte;
-    *out_len = read_count;
+    _ = sys_close(fd.value) catch {};
+    const count: usize = read_count.value as usize;
+    out[count] = 0 as byte;
+    *out_len = count;
 }
 
-fn write_cstring_file(path: &byte, text: &byte) !void {
-    if path == null || text == null {
+fn write_bytes_file(path: &byte, bytes: &[byte]) !void {
+    if path == null {
         return error.DirectSenderCliInvalidArgs;
     }
 
-    const fp: &FILE = fopen(path as *byte, "wb\0" as &byte);
-    if fp == null {
+    const flags: i32 = ((O_WRONLY | O_CREAT | O_TRUNC) as i32);
+    const fd: !i32 = sys_open(path as *const byte, flags, 0o644i32);
+    if fd.error_id != 0 {
         return error.DirectSenderCliFileOpenFailed;
     }
-    const text_len: usize = strlen(text as *const byte);
-    const written: usize = fwrite(text as *const byte, 1usize, text_len, fp);
-    if fclose(fp) != 0 || written != text_len {
+    const written: !isize = sys_write(fd.value, &bytes[0] as *const byte, bytes.len);
+    if written.error_id != 0 || written.value < 0 || (written.value as usize) != bytes.len {
+        _ = sys_close(fd.value) catch {};
         return error.DirectSenderCliFileWriteFailed;
     }
+    _ = sys_close(fd.value) catch {};
 }
 
 fn print_usage() void {
-    _ = printf("uya_ffmpeg_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--dry-run]\n");
+    cli_write_stderr("uya_ffmpeg_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--codec ffmpeg|uya] [--dry-run]\n" as &[byte]);
 }
 
 fn parse_args(
@@ -99,8 +149,9 @@ fn parse_args(
     answer_path: &&byte,
     diagnostics_path: &&byte,
     dry_run: &bool,
+    codec_provider_id: &u8,
 ) !void {
-    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || dry_run == null {
+    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || dry_run == null || codec_provider_id == null {
         return error.DirectSenderCliInvalidArgs;
     }
 
@@ -112,6 +163,19 @@ fn parse_args(
         } else if cstr_eq(arg, "--dry-run\0" as &byte) {
             *dry_run = true;
             index = index + 1;
+        } else if cstr_eq(arg, "--codec\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            const provider_arg: &byte = argv[index + 1];
+            if cstr_eq(provider_arg, "ffmpeg\0" as &byte) {
+                *codec_provider_id = CODEC_PROVIDER_FFMPEG;
+            } else if cstr_eq(provider_arg, "uya\0" as &byte) {
+                *codec_provider_id = CODEC_PROVIDER_UYA;
+            } else {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            index = index + 2;
         } else if cstr_eq(arg, "--offer-json\0" as &byte) {
             if index + 1 >= argc {
                 return error.DirectSenderCliInvalidArgs;
@@ -161,10 +225,768 @@ fn validate_offer(offer: &[byte]) !void {
     }
 }
 
-fn write_diagnostics(path: &byte) !void {
-    const diagnostics: &byte =
-        "{\"sender\":\"uya_ffmpeg_direct_sender\",\"offerParsed\":true,\"audioMLine\":true,\"videoMLine\":true,\"ffmpegMediaPathSeen\":true,\"rtpPacketizer\":\"rtp_packetize_encoded_frame\",\"dtlsSrtpReady\":false,\"answerReady\":false,\"rtpPackets\":0,\"udpPackets\":0}\n";
-    try write_cstring_file(path, diagnostics);
+fn json_skip_ws(json: &[byte], cursor: &usize) void {
+    while *cursor < json.len {
+        const ch: byte = json[*cursor];
+        if ch != (' ' as byte) && ch != (9 as byte) && ch != (10 as byte) && ch != (13 as byte) {
+            return;
+        }
+        *cursor = *cursor + 1usize;
+    }
+}
+
+fn json_copy_unescaped_byte(out: &[byte], out_len: &usize, value: byte) !void {
+    if *out_len >= out.len {
+        return error.DirectSenderCliSdpTooLarge;
+    }
+    out[*out_len] = value;
+    *out_len = *out_len + 1usize;
+}
+
+fn extract_offer_sdp_json(json: &[byte], out: &[byte], out_len: &usize) !void {
+    if out.len == 0usize || out_len == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+
+    var key_offset: usize = 0usize;
+    var found: bool = false;
+    while key_offset + 5usize <= json.len {
+        if bytes_equal_at(json, key_offset, "\"sdp\"" as &[byte]) {
+            found = true;
+            break;
+        }
+        key_offset = key_offset + 1usize;
+    }
+    if !found {
+        return error.DirectSenderCliJsonInvalid;
+    }
+
+    var cursor: usize = key_offset + 5usize;
+    json_skip_ws(json, &cursor);
+    if cursor >= json.len || json[cursor] != (':' as byte) {
+        return error.DirectSenderCliJsonInvalid;
+    }
+    cursor = cursor + 1usize;
+    json_skip_ws(json, &cursor);
+    if cursor >= json.len || json[cursor] != ('"' as byte) {
+        return error.DirectSenderCliJsonInvalid;
+    }
+    cursor = cursor + 1usize;
+
+    *out_len = 0usize;
+    while cursor < json.len {
+        const ch: byte = json[cursor];
+        if ch == ('"' as byte) {
+            return;
+        }
+        if ch == ('\\' as byte) {
+            cursor = cursor + 1usize;
+            if cursor >= json.len {
+                return error.DirectSenderCliJsonInvalid;
+            }
+            const escaped: byte = json[cursor];
+            if escaped == ('r' as byte) {
+                try json_copy_unescaped_byte(out, out_len, 13 as byte);
+            } else if escaped == ('n' as byte) {
+                try json_copy_unescaped_byte(out, out_len, 10 as byte);
+            } else if escaped == ('t' as byte) {
+                try json_copy_unescaped_byte(out, out_len, 9 as byte);
+            } else if escaped == ('b' as byte) {
+                try json_copy_unescaped_byte(out, out_len, 8 as byte);
+            } else if escaped == ('f' as byte) {
+                try json_copy_unescaped_byte(out, out_len, 12 as byte);
+            } else if escaped == ('"' as byte) || escaped == ('\\' as byte) || escaped == ('/' as byte) {
+                try json_copy_unescaped_byte(out, out_len, escaped);
+            } else {
+                return error.DirectSenderCliJsonInvalid;
+            }
+        } else {
+            try json_copy_unescaped_byte(out, out_len, ch);
+        }
+        cursor = cursor + 1usize;
+    }
+    return error.DirectSenderCliJsonInvalid;
+}
+
+fn answer_json_append(out: &[byte], cursor: &usize, value: &[byte]) !void {
+    if *cursor + value.len > out.len {
+        return error.DirectSenderCliAnswerTooLarge;
+    }
+    var index: usize = 0usize;
+    while index < value.len {
+        out[*cursor + index] = value[index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + value.len;
+}
+
+fn answer_json_append_byte(out: &[byte], cursor: &usize, value: byte) !void {
+    if *cursor + 1usize > out.len {
+        return error.DirectSenderCliAnswerTooLarge;
+    }
+    out[*cursor] = value;
+    *cursor = *cursor + 1usize;
+}
+
+fn answer_json_append_escaped_sdp(out: &[byte], cursor: &usize, sdp: &[byte]) !void {
+    var index: usize = 0usize;
+    while index < sdp.len {
+        const ch: byte = sdp[index];
+        if ch == ('"' as byte) {
+            try answer_json_append(out, cursor, "\\\"" as &[byte]);
+        } else if ch == ('\\' as byte) {
+            try answer_json_append(out, cursor, "\\\\" as &[byte]);
+        } else if ch == (13 as byte) {
+            try answer_json_append(out, cursor, "\\r" as &[byte]);
+        } else if ch == (10 as byte) {
+            try answer_json_append(out, cursor, "\\n" as &[byte]);
+        } else {
+            try answer_json_append_byte(out, cursor, ch);
+        }
+        index = index + 1usize;
+    }
+}
+
+fn write_answer_json(path: &byte, sdp: &[byte]) !void {
+    var json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
+    var cursor: usize = 0usize;
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "{\"type\":\"answer\",\"sdp\":\"" as &[byte]);
+    try answer_json_append_escaped_sdp(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, sdp);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "\"}\n" as &[byte]);
+    try write_bytes_file(path, json[0:cursor]);
+}
+
+fn json_append_u64(out: &[byte], cursor: &usize, value: u64) !void {
+    var digits: [byte: 32] = [];
+    var count: usize = 0usize;
+    var remaining: u64 = value;
+    if remaining == 0u64 {
+        try answer_json_append_byte(out, cursor, '0' as byte);
+        return;
+    }
+    while remaining > 0u64 {
+        digits[count] = ('0' as byte) + ((remaining % 10u64) as byte);
+        count = count + 1usize;
+        remaining = remaining / 10u64;
+    }
+    while count > 0usize {
+        count = count - 1usize;
+        try answer_json_append_byte(out, cursor, digits[count]);
+    }
+}
+
+fn json_append_bool(out: &[byte], cursor: &usize, value: bool) !void {
+    if value {
+        try answer_json_append(out, cursor, "true" as &[byte]);
+    } else {
+        try answer_json_append(out, cursor, "false" as &[byte]);
+    }
+}
+
+fn cli_codec_provider_make(provider_id: u8) CodecProviderSelection {
+    if provider_id == CODEC_PROVIDER_UYA {
+        return codec_provider_uya_make(false, false);
+    }
+    if provider_id == CODEC_PROVIDER_FFMPEG {
+        return codec_provider_ffmpeg_make();
+    }
+    return CodecProviderSelection{};
+}
+
+fn write_diagnostics_counts(
+    path: &byte,
+    diagnostics: &UyaDirectSenderDiagnostics,
+    dtls_srtp_ready: bool,
+    answer_ready: bool,
+    codec_provider_id: u8,
+) !void {
+    const provider: CodecProviderSelection = cli_codec_provider_make(codec_provider_id);
+    var json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
+    var cursor: usize = 0usize;
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "{\"sender\":\"uya_ffmpeg_direct_sender\",\"offerParsed\":true,\"audioMLine\":true,\"videoMLine\":true,\"codecProvider\":\"" as &[byte]);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, codec_provider_name(provider.provider_id));
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "\",\"codecProviderSwitchable\":true,\"codecProviderReady\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, codec_provider_selection_ready(&provider));
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"codecProviderUsesExtern\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.uses_extern);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"codecBridgeRequired\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.requires_codec_bridge);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"ffmpegMediaPathSeen\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.provider_id == CODEC_PROVIDER_FFMPEG);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"uyaCodecPathReady\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.provider_id == CODEC_PROVIDER_UYA && codec_provider_selection_ready(&provider));
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpPacketizer\":\"rtp_packetize_encoded_frame\",\"dtlsIdentityReady\":true,\"dtlsSrtpReady\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, dtls_srtp_ready);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"answerReady\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, answer_ready);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"ffmpegFrames\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.ffmpeg_encoded_frames);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpPackets\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_packets);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtpPackets\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtp_packets);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtcpPackets\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtcp_packets);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpSenderReports\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_sender_reports_sent);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtcpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtcp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpReceiverReportsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_receiver_reports_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpFeedbackPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_feedback_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpNackPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_nack_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpPliPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_pli_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpFirPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_fir_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpTransportCcPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_transport_cc_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtcpUnprotectErrors\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtcp_unprotect_errors);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpLastPacketType\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_last_packet_type);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpLastFeedbackFormat\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_last_feedback_format);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpLastMediaKind\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_last_media_kind);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpLastMediaSsrc\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtcp_last_media_ssrc);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"udpPackets\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.udp_packets);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"udpDatagramsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.udp_datagrams_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"stunPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.stun_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"stunResponsesSent\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.stun_responses_sent);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsResponsesSent\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_responses_sent);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"unknownPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.unknown_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"runtimeErrors\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.runtime_errors);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastContentType\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_content_type);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastVersion\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_version);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastEpoch\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_epoch);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastRecordLength\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_record_length);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastDatagramLength\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_datagram_length);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastHandshakeType\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_handshake_type);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastHandshakeSequence\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_handshake_sequence);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsAlertPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_alert_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastAlertLevel\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_alert_level);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"dtlsLastAlertDescription\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.dtls_last_alert_description);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "}\n" as &[byte]);
+    try write_bytes_file(path, json[0:cursor]);
+}
+
+fn cli_sockaddr_port(addr: &[byte]) !u16 {
+    if addr.len < UDP_SOCKADDR_BYTES {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    return read_be_u16(addr[2:2]);
+}
+
+fn cli_sockaddr_ipv4(addr: &[byte], out: &[byte]) !void {
+    if addr.len < UDP_SOCKADDR_BYTES || out.len < 4usize {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    out[0] = addr[4];
+    out[1] = addr[5];
+    out[2] = addr[6];
+    out[3] = addr[7];
+}
+
+fn cli_copy_sockaddr(dst: &[byte], src: &[byte]) !void {
+    if dst.len < UDP_SOCKADDR_BYTES || src.len < UDP_SOCKADDR_BYTES {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    var index: usize = 0usize;
+    while index < UDP_SOCKADDR_BYTES {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn cli_packet_kind(payload: &[byte]) u8 {
+    if payload.len == 0usize {
+        return DIRECT_RUNTIME_OUTPUT_KIND_NONE;
+    }
+    const first: u8 = payload[0] as u8;
+    if first < 4u8 {
+        return DIRECT_RUNTIME_OUTPUT_KIND_STUN;
+    }
+    if first >= 20u8 && first <= 63u8 {
+        return DIRECT_RUNTIME_OUTPUT_KIND_DTLS;
+    }
+    if payload.len >= 2usize && first >= 128u8 && first <= 191u8 {
+        const packet_type: u8 = payload[1] as u8;
+        if packet_type >= 192u8 && packet_type <= 223u8 {
+            return DIRECT_RUNTIME_OUTPUT_KIND_SRTCP;
+        }
+    }
+    return DIRECT_RUNTIME_OUTPUT_KIND_NONE;
+}
+
+fn cli_record_dtls_header_diagnostics(diagnostics: &UyaDirectSenderDiagnostics, payload: &[byte]) void {
+    if diagnostics == null || payload.len < 13usize {
+        return;
+    }
+    diagnostics.dtls_last_content_type = payload[0] as u64;
+    const version: !u16 = read_be_u16(payload[1:2]);
+    if version.error_id == 0 {
+        diagnostics.dtls_last_version = version.value as u64;
+    }
+    const epoch: !u16 = read_be_u16(payload[3:2]);
+    if epoch.error_id == 0 {
+        diagnostics.dtls_last_epoch = epoch.value as u64;
+    }
+    const record_length: !u16 = read_be_u16(payload[11:2]);
+    if record_length.error_id == 0 {
+        diagnostics.dtls_last_record_length = record_length.value as u64;
+    }
+    diagnostics.dtls_last_datagram_length = payload.len as u64;
+    if payload.len >= 25usize && payload[0] == 22 as byte {
+        diagnostics.dtls_last_handshake_type = payload[13] as u64;
+        const sequence: !u16 = read_be_u16(payload[17:2]);
+        if sequence.error_id == 0 {
+            diagnostics.dtls_last_handshake_sequence = sequence.value as u64;
+        }
+    } else if payload.len >= 15usize && payload[0] == 21 as byte {
+        diagnostics.dtls_alert_packets_received = diagnostics.dtls_alert_packets_received + 1u64;
+        diagnostics.dtls_last_alert_level = payload[13] as u64;
+        diagnostics.dtls_last_alert_description = payload[14] as u64;
+    }
+}
+
+fn cli_now_us() u64 {
+    const ticks: u64 = clock() as u64;
+    return (ticks * 1_000_000u64) / (CLOCKS_PER_SEC as u64);
+}
+
+fn cli_ntp_msw(now_us: u64) u32 {
+    return (CLI_NTP_UNIX_EPOCH_SECONDS + (now_us / 1_000_000u64)) as u32;
+}
+
+fn cli_ntp_lsw(now_us: u64) u32 {
+    const fraction_us: u64 = now_us % 1_000_000u64;
+    return ((fraction_us << 32i32) / 1_000_000u64) as u32;
+}
+
+fn cli_send_udp_payload(socket: &UdpSocket, addr: &[byte], addr_len: u32, payload: &[byte]) !void {
+    if payload.len == 0usize || addr_len == 0u32 {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    var slot: UdpSendSlot = UdpSendSlot{};
+    try cli_copy_sockaddr(slot.addr[0:UDP_SOCKADDR_BYTES], addr);
+    slot.addr_len = addr_len;
+    slot.payload = payload;
+    slot.payload_len = payload.len;
+    const sent: usize = try udp_socket_send_fallback(socket, &slot);
+    if sent != payload.len {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+}
+
+fn cli_audio_config_make() FfmpegCodecEncoderConfig {
+    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
+    config.media_kind = MEDIA_KIND_AUDIO;
+    config.codec_id = CODEC_ID_OPUS;
+    config.sample_rate_hz = FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ;
+    config.channels = 1u8;
+    config.bitrate_bps = 80000u32;
+    return config;
+}
+
+fn cli_video_config_make() FfmpegCodecEncoderConfig {
+    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
+    config.media_kind = MEDIA_KIND_VIDEO;
+    config.codec_id = CODEC_ID_VP8;
+    config.width = CLI_VIDEO_WIDTH;
+    config.height = CLI_VIDEO_HEIGHT;
+    config.bitrate_bps = 128000u32;
+    config.fps_num = 30u32;
+    config.fps_den = 1u32;
+    return config;
+}
+
+fn cli_fill_pcm(pcm: &[byte], frame_index: u64) void {
+    var index: usize = 0usize;
+    while index + 1usize < pcm.len {
+        const sample_index: usize = ((index / 2usize) + ((frame_index as usize) * CLI_AUDIO_SAMPLES_PER_CHANNEL)) & 0x3fusize;
+        var sample: u16 = 0x1800u16;
+        if sample_index >= 32usize {
+            sample = 0xe800u16;
+        }
+        pcm[index] = (sample & 0xffu16) as byte;
+        pcm[index + 1usize] = ((sample >> 8i32) & 0xffu16) as byte;
+        index = index + 2usize;
+    }
+}
+
+fn cli_fill_i420(i420: &[byte], frame_index: u64) void {
+    const y_len: usize = (CLI_VIDEO_WIDTH as usize) * (CLI_VIDEO_HEIGHT as usize);
+    const uv_len: usize = y_len / 4usize;
+    var index: usize = 0usize;
+    while index < y_len {
+        i420[index] = ((index * 13usize + (frame_index as usize) * 7usize + 31usize) & 0xffusize) as byte;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < uv_len {
+        i420[y_len + index] = 96 as byte;
+        i420[y_len + uv_len + index] = 160 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn cli_send_audio_frame(
+    socket: &UdpSocket,
+    selected_addr: &[byte],
+    selected_addr_len: u32,
+    sender: &UyaDirectSender,
+    runtime: &DirectRuntime,
+    encoder: &FfmpegCodecEncoder,
+    frame_index: u64,
+) !void {
+    var pcm: [byte: CLI_AUDIO_PCM_BYTES] = [];
+    cli_fill_pcm(pcm[0:CLI_AUDIO_PCM_BYTES], frame_index);
+    const timestamp_us: u64 = frame_index * (CLI_AUDIO_FRAME_DURATION_US as u64);
+    const raw: FfmpegCodecRawAudioView = try ffmpeg_codec_raw_audio_view_make(
+        pcm[0:CLI_AUDIO_PCM_BYTES],
+        timestamp_us,
+        CLI_AUDIO_FRAME_DURATION_US,
+        FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ,
+        1u8,
+        CLI_AUDIO_SAMPLES_PER_CHANNEL,
+    );
+    var encoded_packet: [byte: CLI_ENCODED_PACKET_BYTES] = [];
+    var rtp_packet: [byte: CLI_RTP_PACKET_BYTES] = [];
+    const packetized: FfmpegDirectSenderIngestResult = try ffmpeg_direct_sender_encode_opus_rtp(
+        sender,
+        encoder,
+        &raw,
+        encoded_packet[0:CLI_ENCODED_PACKET_BYTES],
+        rtp_packet[0:CLI_RTP_PACKET_BYTES],
+    );
+    var srtp_packet: [byte: CLI_SRTP_PACKET_BYTES] = [];
+    const srtp_len: usize = try direct_sender_protect_rtp_packet(
+        sender,
+        &runtime.audio_srtp_send,
+        rtp_packet[0:packetized.rtp.rtp_len],
+        srtp_packet[0:CLI_SRTP_PACKET_BYTES],
+    );
+    try cli_send_udp_payload(socket, selected_addr, selected_addr_len, srtp_packet[0:srtp_len]);
+    sender.diagnostics.udp_packets = sender.diagnostics.udp_packets + 1u64;
+}
+
+fn cli_send_video_frame(
+    socket: &UdpSocket,
+    selected_addr: &[byte],
+    selected_addr_len: u32,
+    sender: &UyaDirectSender,
+    runtime: &DirectRuntime,
+    encoder: &FfmpegCodecEncoder,
+    frame_index: u64,
+) !void {
+    var i420: [byte: CLI_VIDEO_I420_BYTES] = [];
+    cli_fill_i420(i420[0:CLI_VIDEO_I420_BYTES], frame_index);
+    const timestamp_us: u64 = frame_index * (CLI_VIDEO_FRAME_DURATION_US as u64);
+    const raw: FfmpegCodecRawVideoI420View = try ffmpeg_codec_raw_video_i420_view_make(
+        i420[0:CLI_VIDEO_I420_BYTES],
+        timestamp_us,
+        CLI_VIDEO_FRAME_DURATION_US,
+        CLI_VIDEO_WIDTH,
+        CLI_VIDEO_HEIGHT,
+    );
+    var encoded_packet: [byte: CLI_ENCODED_PACKET_BYTES] = [];
+    var rtp_packet: [byte: CLI_RTP_PACKET_BYTES] = [];
+    const packetized: FfmpegDirectSenderIngestResult = try ffmpeg_direct_sender_encode_vp8_rtp(
+        sender,
+        encoder,
+        &raw,
+        encoded_packet[0:CLI_ENCODED_PACKET_BYTES],
+        rtp_packet[0:CLI_RTP_PACKET_BYTES],
+    );
+    var srtp_packet: [byte: CLI_SRTP_PACKET_BYTES] = [];
+    const srtp_len: usize = try direct_sender_protect_rtp_packet(
+        sender,
+        &runtime.video_srtp_send,
+        rtp_packet[0:packetized.rtp.rtp_len],
+        srtp_packet[0:CLI_SRTP_PACKET_BYTES],
+    );
+    try cli_send_udp_payload(socket, selected_addr, selected_addr_len, srtp_packet[0:srtp_len]);
+    sender.diagnostics.udp_packets = sender.diagnostics.udp_packets + 1u64;
+}
+
+fn cli_send_sender_report(
+    socket: &UdpSocket,
+    selected_addr: &[byte],
+    selected_addr_len: u32,
+    sender: &UyaDirectSender,
+    runtime: &DirectRuntime,
+    media_kind: u8,
+    now_us: u64,
+) !void {
+    var rtcp_packet: [byte: CLI_RTCP_PACKET_BYTES] = [];
+    const rtcp_len: usize = try direct_sender_write_sender_report(
+        sender,
+        media_kind,
+        cli_ntp_msw(now_us),
+        cli_ntp_lsw(now_us),
+        rtcp_packet[0:CLI_RTCP_PACKET_BYTES],
+    );
+
+    var srtcp_packet: [byte: CLI_SRTCP_PACKET_BYTES] = [];
+    var srtcp_len: usize = 0usize;
+    if media_kind == MEDIA_KIND_AUDIO {
+        srtcp_len = try direct_sender_protect_srtcp_packet(
+            sender,
+            &runtime.audio_srtcp_send,
+            rtcp_packet[0:rtcp_len],
+            srtcp_packet[0:CLI_SRTCP_PACKET_BYTES],
+        );
+    } else if media_kind == MEDIA_KIND_VIDEO {
+        srtcp_len = try direct_sender_protect_srtcp_packet(
+            sender,
+            &runtime.video_srtcp_send,
+            rtcp_packet[0:rtcp_len],
+            srtcp_packet[0:CLI_SRTCP_PACKET_BYTES],
+        );
+    } else {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+
+    try cli_send_udp_payload(socket, selected_addr, selected_addr_len, srtcp_packet[0:srtcp_len]);
+    sender.diagnostics.udp_packets = sender.diagnostics.udp_packets + 1u64;
+}
+
+fn cli_process_control_datagram(
+    socket: &UdpSocket,
+    sender: &UyaDirectSender,
+    runtime: &DirectRuntime,
+    local_ice_pwd: &[byte],
+    recv_slot: &UdpRecvSlot,
+    selected_addr: &[byte],
+    selected_addr_len: &u32,
+) !DirectRuntimeOutput {
+    if recv_slot == null || recv_slot.payload_len == 0usize {
+        return DirectRuntimeOutput{};
+    }
+    try cli_copy_sockaddr(selected_addr, recv_slot.addr[0:UDP_SOCKADDR_BYTES]);
+    *selected_addr_len = recv_slot.addr_len;
+
+    const payload: &[byte] = recv_slot.payload[0:recv_slot.payload_len];
+    const kind: u8 = cli_packet_kind(payload);
+    var out: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
+
+    if kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
+        var mapped_ipv4: [byte: 4] = [];
+        try cli_sockaddr_ipv4(recv_slot.addr[0:UDP_SOCKADDR_BYTES], mapped_ipv4[0:4]);
+        const mapped_port: u16 = try cli_sockaddr_port(recv_slot.addr[0:UDP_SOCKADDR_BYTES]);
+        const stun_out: DirectRuntimeOutput = try direct_runtime_write_stun_binding_response(
+            payload,
+            local_ice_pwd,
+            mapped_port,
+            mapped_ipv4[0:4],
+            out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+        );
+        try cli_send_udp_payload(socket, selected_addr, *selected_addr_len, out[0:stun_out.bytes_written]);
+        return stun_out;
+    }
+
+    if kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS {
+        const dtls_out: DirectRuntimeOutput = try direct_runtime_process_dtls_datagram(
+            runtime,
+            payload,
+            out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+        );
+        if dtls_out.bytes_written > 0usize {
+            try cli_send_udp_payload(socket, selected_addr, *selected_addr_len, out[0:dtls_out.bytes_written]);
+        }
+        return dtls_out;
+    }
+
+    if kind == DIRECT_RUNTIME_OUTPUT_KIND_SRTCP {
+        if sender == null {
+            return error.DirectSenderCliRuntimeFailed;
+        }
+        var rtcp_packet: [byte: CLI_RTCP_PACKET_BYTES] = [];
+        const feedback: !DirectRuntimeRtcpFeedback = direct_runtime_process_srtcp_feedback(
+            runtime,
+            payload,
+            rtcp_packet[0:CLI_RTCP_PACKET_BYTES],
+        );
+        if feedback.error_id == 0 {
+            try direct_sender_record_rtcp_feedback(
+                sender,
+                feedback.value.media_kind,
+                feedback.value.media_ssrc,
+                feedback.value.packet_type,
+                feedback.value.feedback_format,
+            );
+        } else {
+            try direct_sender_record_srtcp_unprotect_error(sender);
+        }
+        return DirectRuntimeOutput{
+            kind: DIRECT_RUNTIME_OUTPUT_KIND_SRTCP,
+            bytes_written: 0usize,
+            dtls_srtp_ready: runtime.dtls_state == DIRECT_RUNTIME_DTLS_STATE_READY,
+        };
+    }
+
+    return DirectRuntimeOutput{};
+}
+
+fn run_live_sender(
+    socket: &UdpSocket,
+    offer: &DirectSessionOffer,
+    diagnostics_path: &byte,
+    codec_provider_id: u8,
+) !UyaDirectSenderDiagnostics {
+    var sender: UyaDirectSender = uya_direct_sender_make();
+    var sender_config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    const audio_ssrc: u32 = DIRECT_SENDER_DEFAULT_AUDIO_SSRC;
+    const video_ssrc: u32 = DIRECT_SENDER_DEFAULT_VIDEO_SSRC;
+    sender_config.audio_ssrc = audio_ssrc;
+    sender_config.video_ssrc = video_ssrc;
+    sender_config.audio_payload_type = offer.audio.payload_type;
+    sender_config.video_payload_type = offer.video.payload_type;
+    sender_config.audio_mid_extension_id = offer.audio.mid_extension_id;
+    sender_config.video_mid_extension_id = offer.video.mid_extension_id;
+    sender_config.audio_mid = offer.audio.mid;
+    sender_config.video_mid = offer.video.mid;
+    try uya_direct_sender_init(&sender, sender_config);
+
+    var runtime: DirectRuntime = direct_runtime_make();
+    try direct_runtime_init(&runtime, audio_ssrc, video_ssrc);
+
+    if codec_provider_id != CODEC_PROVIDER_FFMPEG {
+        _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, false, true, codec_provider_id) catch {};
+        return error.DirectSenderCliRuntimeFailed;
+    }
+
+    var audio_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_audio_config_make());
+    if audio_encoder_result.error_id != 0 {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    var audio_encoder: FfmpegCodecEncoder = audio_encoder_result.value;
+
+    var video_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_video_config_make());
+    if video_encoder_result.error_id != 0 {
+        ffmpeg_codec_encoder_close(&audio_encoder);
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    var video_encoder: FfmpegCodecEncoder = video_encoder_result.value;
+
+    var selected_addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    var selected_addr_len: u32 = 0u32;
+    var recv_slot: UdpRecvSlot = UdpRecvSlot{};
+    const start_us: u64 = cli_now_us();
+    var dtls_ready: bool = false;
+    var media_start_us: u64 = 0u64;
+    var next_audio_us: u64 = 0u64;
+    var next_video_us: u64 = 0u64;
+    var next_rtcp_us: u64 = 0u64;
+    var audio_frames_sent: u64 = 0u64;
+    var video_frames_sent: u64 = 0u64;
+
+    while true {
+        const now_us: u64 = cli_now_us();
+        if now_us > start_us && now_us - start_us > CLI_LIVE_TIMEOUT_US {
+            _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, dtls_ready, true, codec_provider_id) catch {};
+            ffmpeg_codec_encoder_close(&video_encoder);
+            ffmpeg_codec_encoder_close(&audio_encoder);
+            return error.DirectSenderCliRuntimeFailed;
+        }
+
+        const recv_result: !usize = udp_socket_recv_fallback(socket, &recv_slot);
+        if recv_result.error_id == 0 && recv_result.value > 0usize {
+            sender.diagnostics.udp_datagrams_received = sender.diagnostics.udp_datagrams_received + 1u64;
+            const payload_for_kind: &[byte] = recv_slot.payload[0:recv_slot.payload_len];
+            const received_kind: u8 = cli_packet_kind(payload_for_kind);
+            if received_kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
+                sender.diagnostics.stun_packets_received = sender.diagnostics.stun_packets_received + 1u64;
+            } else if received_kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS {
+                sender.diagnostics.dtls_packets_received = sender.diagnostics.dtls_packets_received + 1u64;
+                cli_record_dtls_header_diagnostics(&sender.diagnostics, payload_for_kind);
+            } else if received_kind == DIRECT_RUNTIME_OUTPUT_KIND_SRTCP {
+                _ = direct_sender_record_srtcp_packet_received(&sender) catch {};
+            } else {
+                sender.diagnostics.unknown_packets_received = sender.diagnostics.unknown_packets_received + 1u64;
+            }
+            const control_out: !DirectRuntimeOutput = cli_process_control_datagram(
+                socket,
+                &sender,
+                &runtime,
+                "uyaDirectPwd012345678901234" as &[byte],
+                &recv_slot,
+                selected_addr[0:UDP_SOCKADDR_BYTES],
+                &selected_addr_len,
+            );
+            if control_out.error_id == 0 {
+                if control_out.value.bytes_written > 0usize {
+                    if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
+                        sender.diagnostics.stun_responses_sent = sender.diagnostics.stun_responses_sent + 1u64;
+                    } else if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS {
+                        sender.diagnostics.dtls_responses_sent = sender.diagnostics.dtls_responses_sent + 1u64;
+                    }
+                }
+                if control_out.value.dtls_srtp_ready && !dtls_ready {
+                    dtls_ready = true;
+                    media_start_us = now_us;
+                    next_audio_us = now_us;
+                    next_video_us = now_us;
+                    next_rtcp_us = now_us + CLI_RTCP_REPORT_INTERVAL_US;
+                }
+            } else {
+                sender.diagnostics.runtime_errors = sender.diagnostics.runtime_errors + 1u64;
+            }
+        }
+
+        if dtls_ready && selected_addr_len != 0u32 {
+            const media_elapsed_us: u64 = if now_us > media_start_us { now_us - media_start_us } else { 0u64 };
+            if media_elapsed_us <= CLI_LIVE_MEDIA_DURATION_US {
+                if now_us >= next_audio_us {
+                    try cli_send_audio_frame(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, &audio_encoder, audio_frames_sent);
+                    audio_frames_sent = audio_frames_sent + 1u64;
+                    next_audio_us = next_audio_us + (CLI_AUDIO_FRAME_DURATION_US as u64);
+                }
+                if now_us >= next_video_us {
+                    try cli_send_video_frame(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, &video_encoder, video_frames_sent);
+                    video_frames_sent = video_frames_sent + 1u64;
+                    next_video_us = next_video_us + (CLI_VIDEO_FRAME_DURATION_US as u64);
+                }
+                if now_us >= next_rtcp_us {
+                    try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_AUDIO, now_us);
+                    try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_VIDEO, now_us);
+                    next_rtcp_us = next_rtcp_us + CLI_RTCP_REPORT_INTERVAL_US;
+                }
+            } else if audio_frames_sent > 0u64 && video_frames_sent > 0u64 {
+                break;
+            }
+        }
+    }
+
+    ffmpeg_codec_encoder_close(&video_encoder);
+    ffmpeg_codec_encoder_close(&audio_encoder);
+    try write_diagnostics_counts(diagnostics_path, &sender.diagnostics, true, true, codec_provider_id);
+    return sender.diagnostics;
 }
 
 export extern fn main(argc: i32, argv: & &byte) i32 {
@@ -173,6 +995,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var answer_path: &byte = null;
     var diagnostics_path: &byte = null;
     var dry_run: bool = false;
+    var codec_provider_id: u8 = CODEC_PROVIDER_FFMPEG;
 
     const args_result: !void = parse_args(
         argc,
@@ -182,6 +1005,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         &answer_path,
         &diagnostics_path,
         &dry_run,
+        &codec_provider_id,
     );
     if args_result.error_id != 0 {
         print_usage();
@@ -192,28 +1016,95 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var offer_len: usize = 0usize;
     const read_result: !void = read_file_bytes(offer_path, offer_buf[0:CLI_MAX_OFFER_BYTES], &offer_len);
     if read_result.error_id != 0 {
-        _ = printf("uya_ffmpeg_direct_sender: failed to read offer JSON\n");
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to read offer JSON\n" as &[byte]);
         return 3;
     }
     const offer_result: !void = validate_offer(offer_buf[0:offer_len]);
     if offer_result.error_id != 0 {
-        _ = printf("uya_ffmpeg_direct_sender: Chrome offer missing Opus/VP8 audio/video media\n");
+        cli_write_stderr("uya_ffmpeg_direct_sender: Chrome offer missing Opus/VP8 audio/video media\n" as &[byte]);
         return 4;
     }
 
-    const diagnostics_result: !void = write_diagnostics(diagnostics_path);
+    var offer_sdp: [byte: CLI_MAX_SDP_BYTES] = [];
+    var offer_sdp_len: usize = 0usize;
+    const extract_result: !void = extract_offer_sdp_json(offer_buf[0:offer_len], offer_sdp[0:CLI_MAX_SDP_BYTES], &offer_sdp_len);
+    if extract_result.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to extract Chrome offer SDP JSON string\n" as &[byte]);
+        return 4;
+    }
+    const session_result: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp(offer_sdp[0:offer_sdp_len]);
+    if session_result.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: Chrome offer SDP is not a recvonly Opus/VP8 host-ICE offer\n" as &[byte]);
+        return 4;
+    }
+
+    var live_socket: UdpSocket = UdpSocket{};
+    var local_udp_port: u16 = CLI_LOCAL_UDP_PORT;
+    if !dry_run {
+        var socket_config: UdpSocketConfig = UdpSocketConfig{};
+        socket_config.bind_port = 0u16;
+        socket_config.connect_port = 0u16;
+        socket_config.nonblocking = true;
+        socket_config.reuse_port = false;
+        const socket_result: !UdpSocket = udp_socket_open(socket_config);
+        if socket_result.error_id != 0 {
+            cli_write_stderr("uya_ffmpeg_direct_sender: failed to open UDP socket\n" as &[byte]);
+            return 5;
+        }
+        live_socket = socket_result.value;
+        local_udp_port = live_socket.local_port;
+    }
+
+    var answer_sdp: [byte: CLI_MAX_ANSWER_SDP_BYTES] = [];
+    const answer_len: !usize = direct_session_write_passive_answer(
+        &session_result.value,
+        "127.0.0.1" as &[byte],
+        local_udp_port,
+        "uyaDirect" as &[byte],
+        "uyaDirectPwd012345678901234" as &[byte],
+        dtls_identity_fingerprint_sha256_text(),
+        answer_sdp[0:CLI_MAX_ANSWER_SDP_BYTES],
+    );
+    if answer_len.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to build Uya passive SDP answer\n" as &[byte]);
+        if !dry_run {
+            udp_socket_close(&live_socket);
+        }
+        return 5;
+    }
+    const answer_result: !void = write_answer_json(answer_path, answer_sdp[0:answer_len.value]);
+    if answer_result.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to write answer JSON\n" as &[byte]);
+        if !dry_run {
+            udp_socket_close(&live_socket);
+        }
+        return 5;
+    }
+
+    var empty_diagnostics: UyaDirectSenderDiagnostics = uya_direct_sender_diagnostics_make();
+    const diagnostics_result: !void = write_diagnostics_counts(diagnostics_path, &empty_diagnostics, false, true, codec_provider_id);
     if diagnostics_result.error_id != 0 {
-        _ = printf("uya_ffmpeg_direct_sender: failed to write diagnostics JSON\n");
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to write diagnostics JSON\n" as &[byte]);
+        if !dry_run {
+            udp_socket_close(&live_socket);
+        }
         return 5;
     }
 
     _ = media_path;
     _ = answer_path;
     if dry_run {
-        _ = printf("uya_ffmpeg_direct_sender dry-run diagnostics written\n");
+        cli_write_stderr("uya_ffmpeg_direct_sender dry-run diagnostics written\n" as &[byte]);
         return 0;
     }
 
-    _ = printf("uya_ffmpeg_direct_sender: DTLS-SRTP runtime is not wired yet; refusing to write a fake SDP answer\n");
-    return 6;
+    const live_result: !UyaDirectSenderDiagnostics = run_live_sender(&live_socket, &session_result.value, diagnostics_path, codec_provider_id);
+    udp_socket_close(&live_socket);
+    if live_result.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: live Chrome send failed before media completed\n" as &[byte]);
+        return 6;
+    }
+
+    cli_write_stderr("uya_ffmpeg_direct_sender: live Chrome media send completed\n" as &[byte]);
+    return 0;
 }

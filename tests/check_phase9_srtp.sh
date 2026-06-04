@@ -52,6 +52,7 @@ rg -q "export fn srtp_index_guess" src/webrtc/srtp/srtp.uya
 rg -q "export fn srtp_replay_check" src/webrtc/srtp/srtp.uya
 rg -q "export fn srtp_protect" src/webrtc/srtp/protect.uya
 rg -q "export fn srtp_unprotect" src/webrtc/srtp/protect.uya
+rg -q "export fn srtcp_protect_encrypted" src/webrtc/srtp/srtcp.uya
 rg -q "export fn srtp_dtls_exporter_init_contexts" src/webrtc/srtp/dtls_keys.uya
 rg -q "export fn srtp_demux_unprotect_packet" src/webrtc/srtp/demux.uya
 

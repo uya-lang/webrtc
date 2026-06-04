@@ -2,6 +2,7 @@
 // 模块路径：src/webrtc/srtp/srtcp.uya → use webrtc.srtp.srtcp;
 
 use webrtc.binary;
+use webrtc.crypto.aes;
 use webrtc.crypto.hmac;
 use webrtc.srtp.model;
 use webrtc.errors;
@@ -9,6 +10,7 @@ use webrtc.errors;
 const RTCP_MIN_PACKET_BYTES: usize = 4usize;
 const SRTCP_INDEX_BYTES: usize = 4usize;
 const SRTCP_MAX_PACKET_BYTES: usize = 2048usize;
+const SRTCP_CLEAR_HEADER_BYTES: usize = 8usize;
 const SRTCP_INDEX_MASK: u32 = 0x7fffffffu32;
 const SRTCP_ENCRYPT_FLAG: u32 = 0x80000000u32;
 
@@ -71,7 +73,38 @@ fn srtcp_authenticate(auth_key: &[byte], data: &[byte], out: &[byte]) !void {
     try crypto_hmac_sha1_digest(auth_key, data, out);
 }
 
-export fn srtcp_protect(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: &[byte]) !usize {
+fn srtcp_generate_iv(salt: &[byte], ssrc: u32, index: u32, iv: &[byte]) !void {
+    if salt.len != SRTP_SALT_BYTES || iv.len != 16usize {
+        return error.InvalidPacket;
+    }
+
+    var i: usize = 0usize;
+    while i < 16usize {
+        iv[i] = 0 as byte;
+        i = i + 1usize;
+    }
+
+    i = 0usize;
+    while i < SRTP_SALT_BYTES {
+        iv[i] = salt[i];
+        i = i + 1usize;
+    }
+
+    iv[4usize] = iv[4usize] ^ (((ssrc >> 24i32) & 0xffu32) as byte);
+    iv[5usize] = iv[5usize] ^ (((ssrc >> 16i32) & 0xffu32) as byte);
+    iv[6usize] = iv[6usize] ^ (((ssrc >> 8i32) & 0xffu32) as byte);
+    iv[7usize] = iv[7usize] ^ ((ssrc & 0xffu32) as byte);
+
+    const index64: u64 = index as u64;
+    iv[8usize] = iv[8usize] ^ (((index64 >> 40i32) & 0xffu64) as byte);
+    iv[9usize] = iv[9usize] ^ (((index64 >> 32i32) & 0xffu64) as byte);
+    iv[10usize] = iv[10usize] ^ (((index64 >> 24i32) & 0xffu64) as byte);
+    iv[11usize] = iv[11usize] ^ (((index64 >> 16i32) & 0xffu64) as byte);
+    iv[12usize] = iv[12usize] ^ (((index64 >> 8i32) & 0xffu64) as byte);
+    iv[13usize] = iv[13usize] ^ ((index64 & 0xffu64) as byte);
+}
+
+fn srtcp_protect_inner(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: &[byte], encrypt: bool) !usize {
     if ctx == null {
         return error.InvalidPacket;
     }
@@ -82,6 +115,9 @@ export fn srtcp_protect(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: 
     if rtcp_packet.len < RTCP_MIN_PACKET_BYTES {
         return error.PacketTooShort;
     }
+    if encrypt && rtcp_packet.len < SRTCP_CLEAR_HEADER_BYTES {
+        return error.PacketTooShort;
+    }
 
     const total_len: usize = rtcp_packet.len + SRTCP_INDEX_BYTES + tag_len;
     if total_len > srtcp_packet.len {
@@ -89,12 +125,34 @@ export fn srtcp_protect(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: 
     }
 
     var i: usize = 0usize;
-    while i < rtcp_packet.len {
+    var clear_len: usize = rtcp_packet.len;
+    if encrypt {
+        clear_len = SRTCP_CLEAR_HEADER_BYTES;
+    }
+    while i < clear_len {
         srtcp_packet[i] = rtcp_packet[i];
         i = i + 1usize;
     }
 
-    const index_word: u32 = ctx.srtcp_index & SRTCP_INDEX_MASK;
+    const index_value: u32 = ctx.srtcp_index & SRTCP_INDEX_MASK;
+    if encrypt {
+        const ssrc: u32 = try read_be_u32(rtcp_packet[4:4]);
+        var iv: [byte: 16] = [];
+        try srtcp_generate_iv(ctx.cipher_salt[0:SRTP_SALT_BYTES], ssrc, index_value, iv[0:16]);
+        var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+        try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
+        try crypto_aes_ctr_xor(
+            &schedule,
+            iv[0:16],
+            rtcp_packet[SRTCP_CLEAR_HEADER_BYTES:rtcp_packet.len - SRTCP_CLEAR_HEADER_BYTES],
+            srtcp_packet[SRTCP_CLEAR_HEADER_BYTES:rtcp_packet.len - SRTCP_CLEAR_HEADER_BYTES],
+        );
+    }
+
+    var index_word: u32 = index_value;
+    if encrypt {
+        index_word = index_word | SRTCP_ENCRYPT_FLAG;
+    }
     try write_be_u32(srtcp_packet[rtcp_packet.len:4], index_word);
 
     var digest: [byte: 20] = [];
@@ -114,6 +172,14 @@ export fn srtcp_protect(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: 
     return total_len;
 }
 
+export fn srtcp_protect(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: &[byte]) !usize {
+    return srtcp_protect_inner(ctx, rtcp_packet, srtcp_packet, false);
+}
+
+export fn srtcp_protect_encrypted(ctx: &SrtcpContext, rtcp_packet: &[byte], srtcp_packet: &[byte]) !usize {
+    return srtcp_protect_inner(ctx, rtcp_packet, srtcp_packet, true);
+}
+
 export fn srtcp_unprotect(ctx: &SrtcpContext, srtcp_packet: &[byte], rtcp_packet: &[byte]) !usize {
     if ctx == null {
         return error.InvalidPacket;
@@ -129,9 +195,7 @@ export fn srtcp_unprotect(ctx: &SrtcpContext, srtcp_packet: &[byte], rtcp_packet
     const auth_end: usize = srtcp_packet.len - tag_len;
     const index_offset: usize = auth_end - SRTCP_INDEX_BYTES;
     const index_word: u32 = try read_be_u32(srtcp_packet[index_offset:4]);
-    if (index_word & SRTCP_ENCRYPT_FLAG) != 0u32 {
-        return error.UnsupportedCapability;
-    }
+    const encrypted: bool = (index_word & SRTCP_ENCRYPT_FLAG) != 0u32;
 
     const index: u32 = index_word & SRTCP_INDEX_MASK;
     if !srtcp_replay_check(ctx, index) {
@@ -151,11 +215,32 @@ export fn srtcp_unprotect(ctx: &SrtcpContext, srtcp_packet: &[byte], rtcp_packet
     if index_offset > rtcp_packet.len {
         return error.InvalidPacket;
     }
+    if encrypted && index_offset < SRTCP_CLEAR_HEADER_BYTES {
+        return error.InvalidPacket;
+    }
 
     var i: usize = 0usize;
-    while i < index_offset {
+    var clear_len: usize = index_offset;
+    if encrypted {
+        clear_len = SRTCP_CLEAR_HEADER_BYTES;
+    }
+    while i < clear_len {
         rtcp_packet[i] = srtcp_packet[i];
         i = i + 1usize;
+    }
+
+    if encrypted {
+        const ssrc: u32 = try read_be_u32(srtcp_packet[4:4]);
+        var iv: [byte: 16] = [];
+        try srtcp_generate_iv(ctx.cipher_salt[0:SRTP_SALT_BYTES], ssrc, index, iv[0:16]);
+        var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+        try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
+        try crypto_aes_ctr_xor(
+            &schedule,
+            iv[0:16],
+            srtcp_packet[SRTCP_CLEAR_HEADER_BYTES:index_offset - SRTCP_CLEAR_HEADER_BYTES],
+            rtcp_packet[SRTCP_CLEAR_HEADER_BYTES:index_offset - SRTCP_CLEAR_HEADER_BYTES],
+        );
     }
 
     srtcp_replay_accept(ctx, index);

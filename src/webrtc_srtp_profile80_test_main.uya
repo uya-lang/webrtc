@@ -17,6 +17,108 @@ fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     return true;
 }
 
+fn check_header_extension_stays_clear(master_key: &[byte], master_salt: &[byte]) i32 {
+    var tx: SrtpContext = srtp_context_make();
+    var rx: SrtpContext = srtp_context_make();
+    if srtp_context_init(
+        &tx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x10203040u32,
+        master_key,
+        master_salt,
+    ).error_id != 0 {
+        printf("SRTP extension tx init failed\n");
+        return 30i32;
+    }
+    if srtp_context_init(
+        &rx,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x10203040u32,
+        master_key,
+        master_salt,
+    ).error_id != 0 {
+        printf("SRTP extension rx init failed\n");
+        return 31i32;
+    }
+    if srtp_derive_session_keys(&tx).error_id != 0 || srtp_derive_session_keys(&rx).error_id != 0 {
+        printf("SRTP extension kdf failed\n");
+        return 32i32;
+    }
+
+    var rtp_packet: [byte: 36] = [];
+    rtp_packet[0] = 0x90 as byte;
+    rtp_packet[1] = 0x60 as byte;
+    rtp_packet[2] = 0x00 as byte;
+    rtp_packet[3] = 0x01 as byte;
+    rtp_packet[4] = 0x00 as byte;
+    rtp_packet[5] = 0x00 as byte;
+    rtp_packet[6] = 0x00 as byte;
+    rtp_packet[7] = 0x01 as byte;
+    rtp_packet[8] = 0x10 as byte;
+    rtp_packet[9] = 0x20 as byte;
+    rtp_packet[10] = 0x30 as byte;
+    rtp_packet[11] = 0x40 as byte;
+    rtp_packet[12] = 0xBE as byte;
+    rtp_packet[13] = 0xDE as byte;
+    rtp_packet[14] = 0x00 as byte;
+    rtp_packet[15] = 0x01 as byte;
+    rtp_packet[16] = 0x40 as byte;
+    rtp_packet[17] = '1' as byte;
+    rtp_packet[18] = 0x00 as byte;
+    rtp_packet[19] = 0x00 as byte;
+
+    var i: usize = 20usize;
+    while i < 36usize {
+        rtp_packet[i] = (i & 0xffusize) as byte;
+        i = i + 1usize;
+    }
+
+    var srtp_packet: [byte: 48] = [];
+    const protected_len: !usize = srtp_protect(&tx, rtp_packet[0:36], srtp_packet[0:48]);
+    if protected_len.error_id != 0 || protected_len.value != 46usize {
+        printf("SRTP extension protect failed\n");
+        return 33i32;
+    }
+    var expected_protected: [byte: 46] = [
+        0x90 as byte, 0x60 as byte, 0x00 as byte, 0x01 as byte,
+        0x00 as byte, 0x00 as byte, 0x00 as byte, 0x01 as byte,
+        0x10 as byte, 0x20 as byte, 0x30 as byte, 0x40 as byte,
+        0xbe as byte, 0xde as byte, 0x00 as byte, 0x01 as byte,
+        0x40 as byte, 0x31 as byte, 0x00 as byte, 0x00 as byte,
+        0xcd as byte, 0x17 as byte, 0xad as byte, 0x8b as byte,
+        0x53 as byte, 0x29 as byte, 0x5e as byte, 0xd3 as byte,
+        0x4e as byte, 0xaa as byte, 0xd5 as byte, 0x5b as byte,
+        0x3a as byte, 0x19 as byte, 0x5c as byte, 0x0e as byte,
+        0xaf as byte, 0xc5 as byte, 0x45 as byte, 0x81 as byte,
+        0xed as byte, 0x6f as byte, 0xf2 as byte, 0x05 as byte,
+        0x64 as byte, 0xd2 as byte,
+    ];
+    if !bytes_equal(srtp_packet[0:46], expected_protected[0:46]) {
+        printf("SRTP extension libsrtp vector mismatch\n");
+        return 34i32;
+    }
+    if !bytes_equal(srtp_packet[0:20], rtp_packet[0:20]) {
+        printf("SRTP extension header should stay clear\n");
+        return 35i32;
+    }
+    if bytes_equal(srtp_packet[20:16], rtp_packet[20:16]) {
+        printf("SRTP extension payload should be encrypted\n");
+        return 36i32;
+    }
+
+    var recovered: [byte: 36] = [];
+    const unprotected_len: !usize = srtp_unprotect(&rx, srtp_packet[0:46], recovered[0:36]);
+    if unprotected_len.error_id != 0 || unprotected_len.value != 36usize {
+        printf("SRTP extension unprotect failed\n");
+        return 37i32;
+    }
+    if !bytes_equal(recovered[0:36], rtp_packet[0:36]) {
+        printf("SRTP extension roundtrip mismatch\n");
+        return 38i32;
+    }
+    return 0i32;
+}
+
 fn main() i32 {
     var master_key: [byte: SRTP_KEY_BYTES] = [
         0xe1 as byte, 0xf9 as byte, 0x7a as byte, 0x0d as byte,
@@ -114,6 +216,11 @@ fn main() i32 {
     if replay.error_id == 0 {
         printf("SRTP profile80 replay should be rejected\n");
         return 19i32;
+    }
+
+    const extension_result: i32 = check_header_extension_stays_clear(master_key[0:SRTP_KEY_BYTES], master_salt[0:SRTP_SALT_BYTES]);
+    if extension_result != 0i32 {
+        return extension_result;
     }
 
     printf("SRTP profile80 tests passed\n");

@@ -1,0 +1,861 @@
+// webrtc.dtls.server - pure Uya DTLS server first-flight builder
+// Module: src/webrtc/dtls/server.uya -> use webrtc.dtls.server;
+
+use webrtc.binary;
+use webrtc.crypto.aes;
+use webrtc.crypto.gcm;
+use webrtc.crypto.hash;
+use webrtc.crypto.kdf;
+use webrtc.crypto.p256;
+use webrtc.dtls.handshake;
+use webrtc.dtls.identity;
+use webrtc.dtls.model;
+use webrtc.errors;
+
+export error DtlsServerUnsupportedClientHello;
+export error DtlsServerFlightTooSmall;
+
+export const DTLS_HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1u8;
+export const DTLS_HANDSHAKE_TYPE_SERVER_HELLO: u8 = 2u8;
+export const DTLS_HANDSHAKE_TYPE_CERTIFICATE: u8 = 11u8;
+export const DTLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE: u8 = 12u8;
+export const DTLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE: u8 = 14u8;
+export const DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: u16 = 0xc02bu16;
+export const DTLS_SERVER_FIRST_FLIGHT_MAX_BODY_BYTES: usize = 1024usize;
+export const DTLS_SERVER_ECDSA_DER_SIGNATURE_MAX_BYTES: usize = 72usize;
+export const DTLS_SERVER_MASTER_SECRET_LABEL_BYTES: usize = 13usize;
+export const DTLS_SERVER_EXPORTER_SRTP_LABEL_BYTES: usize = 19usize;
+export const DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES: usize = 60usize;
+export const DTLS_HANDSHAKE_TYPE_FINISHED: u8 = 20u8;
+export const DTLS_SERVER_KEY_EXPANSION_LABEL_BYTES: usize = 13usize;
+export const DTLS_SERVER_AES_GCM_KEY_BYTES: usize = 16usize;
+export const DTLS_SERVER_AES_GCM_FIXED_IV_BYTES: usize = 4usize;
+export const DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES: usize = 8usize;
+export const DTLS_SERVER_AES_GCM_KEY_BLOCK_BYTES: usize =
+    (2usize * DTLS_SERVER_AES_GCM_KEY_BYTES) + (2usize * DTLS_SERVER_AES_GCM_FIXED_IV_BYTES);
+export const DTLS_SERVER_AEAD_AAD_BYTES: usize = 13usize;
+export const DTLS_EXTENSION_EC_POINT_FORMATS: u16 = 0x000bu16;
+export const DTLS_EXTENSION_RENEGOTIATION_INFO: u16 = 0xff01u16;
+export const DTLS_CIPHER_TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ffu16;
+
+export struct DtlsServerFirstFlightConfig {
+    server_random: &[byte] = [],
+    ecdhe_private_key: &[byte] = [],
+    signature_nonce: &[byte] = [],
+    first_record_sequence: u64 = 0u64,
+    first_handshake_sequence: u16 = 1u16,
+}
+
+export struct DtlsServerFirstFlight {
+    bytes_written: usize = 0usize,
+    record_count: usize = 0usize,
+    selected_cipher_suite: u16 = 0u16,
+    selected_srtp_profile: u16 = 0u16,
+    next_record_sequence: u64 = 0u64,
+    next_handshake_sequence: u16 = 0u16,
+}
+
+export struct DtlsServerKeyMaterial {
+    selected_srtp_profile: u16 = 0u16,
+    master_secret: [byte: DTLS_MASTER_SECRET_BYTES] = [],
+    srtp_key_material: [byte: DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES] = [],
+}
+
+export struct DtlsServerRecordKeys {
+    client_write_key: [byte: DTLS_SERVER_AES_GCM_KEY_BYTES] = [],
+    server_write_key: [byte: DTLS_SERVER_AES_GCM_KEY_BYTES] = [],
+    client_write_iv: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES] = [],
+    server_write_iv: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES] = [],
+}
+
+export struct DtlsServerDecryptedRecord {
+    content_type: u8 = 0u8,
+    epoch: u16 = 0u16,
+    sequence_number: u64 = 0u64,
+    plaintext_len: usize = 0usize,
+}
+
+fn dtls_server_write_u24(dst: &[byte], value: usize) !void {
+    if dst.len < 3usize {
+        return error.ByteWriterOutOfBounds;
+    }
+    if value > 0xffffffusize {
+        return error.InvalidPacket;
+    }
+    dst[0] = ((value >> 16i32) & 0xffusize) as byte;
+    dst[1] = ((value >> 8i32) & 0xffusize) as byte;
+    dst[2] = (value & 0xffusize) as byte;
+}
+
+fn dtls_server_copy(dst: &[byte], src: &[byte]) !void {
+    if dst.len < src.len {
+        return error.ByteWriterOutOfBounds;
+    }
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn dtls_server_client_supports_cipher(hello: &DtlsClientHello, cipher_suite: u16) bool {
+    if hello == null || (hello.cipher_suites.len & 1usize) != 0usize {
+        return false;
+    }
+    var cursor: usize = 0usize;
+    while cursor + 2usize <= hello.cipher_suites.len {
+        const offered: !u16 = read_be_u16(hello.cipher_suites[cursor:2]);
+        if offered.error_id != 0 {
+            return false;
+        }
+        if offered.value == cipher_suite {
+            return true;
+        }
+        cursor = cursor + 2usize;
+    }
+    return false;
+}
+
+fn dtls_server_client_offered_extension(extensions: &[byte], wanted_extension_type: u16) !bool {
+    var cursor: usize = 0usize;
+    while cursor < extensions.len {
+        if cursor + 4usize > extensions.len {
+            return error.InvalidPacket;
+        }
+        const extension_type: u16 = try read_be_u16(extensions[cursor:2]);
+        const extension_length: usize = (try read_be_u16(extensions[cursor + 2usize:2])) as usize;
+        cursor = cursor + 4usize;
+        if cursor + extension_length > extensions.len {
+            return error.InvalidPacket;
+        }
+        if extension_type == wanted_extension_type {
+            return true;
+        }
+        cursor = cursor + extension_length;
+    }
+    return false;
+}
+
+fn dtls_server_client_supports_null_compression(hello: &DtlsClientHello) bool {
+    if hello == null {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < hello.compression_methods.len {
+        if hello.compression_methods[index] == 0 as byte {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+fn dtls_server_client_offered_renegotiation_info(hello: &DtlsClientHello) !bool {
+    if hello == null || (hello.cipher_suites.len & 1usize) != 0usize {
+        return error.InvalidPacket;
+    }
+    var cursor: usize = 0usize;
+    while cursor + 2usize <= hello.cipher_suites.len {
+        const offered: u16 = try read_be_u16(hello.cipher_suites[cursor:2]);
+        if offered == DTLS_CIPHER_TLS_EMPTY_RENEGOTIATION_INFO_SCSV {
+            return true;
+        }
+        cursor = cursor + 2usize;
+    }
+    return dtls_server_client_offered_extension(hello.extensions, DTLS_EXTENSION_RENEGOTIATION_INFO);
+}
+
+fn dtls_server_client_use_srtp_offer(extensions: &[byte]) !DtlsUseSrtpExtension {
+    var cursor: usize = 0usize;
+    while cursor < extensions.len {
+        if cursor + 4usize > extensions.len {
+            return error.InvalidPacket;
+        }
+        const extension_type: u16 = try read_be_u16(extensions[cursor:2]);
+        const extension_length: usize = (try read_be_u16(extensions[cursor + 2usize:2])) as usize;
+        cursor = cursor + 4usize;
+        if cursor + extension_length > extensions.len {
+            return error.InvalidPacket;
+        }
+        if extension_type == DTLS_EXTENSION_USE_SRTP {
+            return dtls_use_srtp_extension_parse(extensions[cursor:extension_length]);
+        }
+        cursor = cursor + extension_length;
+    }
+    return error.UnsupportedProfile;
+}
+
+fn dtls_server_negotiate_srtp(hello: &DtlsClientHello) !DtlsUseSrtpExtension {
+    const offer: DtlsUseSrtpExtension = try dtls_server_client_use_srtp_offer(hello.extensions);
+    var supported: DtlsUseSrtpExtension = dtls_use_srtp_extension_make();
+    supported.profile_count = 1usize;
+    supported.profiles[0] = DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80;
+    return dtls_use_srtp_negotiate(&offer, &supported);
+}
+
+fn dtls_server_write_extension(out: &[byte], cursor: &usize, extension_type: u16, body: &[byte]) !void {
+    if *cursor + 4usize + body.len > out.len {
+        return error.ByteWriterOutOfBounds;
+    }
+    try write_be_u16(out[*cursor:2], extension_type);
+    *cursor = *cursor + 2usize;
+    try write_be_u16(out[*cursor:2], body.len as u16);
+    *cursor = *cursor + 2usize;
+    try dtls_server_copy(out[*cursor:body.len], body);
+    *cursor = *cursor + body.len;
+}
+
+fn dtls_server_write_selected_use_srtp_extension(selected: &DtlsUseSrtpExtension, out: &[byte]) !usize {
+    var body: [byte: 16] = [];
+    const body_len: usize = try dtls_use_srtp_extension_write(selected, body[0:16]);
+    var cursor: usize = 0usize;
+    try dtls_server_write_extension(out, &cursor, DTLS_EXTENSION_USE_SRTP, body[0:body_len]);
+    return cursor;
+}
+
+fn dtls_server_trim_integer(src: &[byte], start_out: &usize, len_out: &usize) void {
+    var start: usize = 0usize;
+    while start + 1usize < src.len && src[start] == 0 as byte {
+        start = start + 1usize;
+    }
+    var len: usize = src.len - start;
+    if len == 0usize {
+        start = src.len - 1usize;
+        len = 1usize;
+    }
+    *start_out = start;
+    *len_out = len;
+}
+
+fn dtls_server_der_integer_encoded_len(src: &[byte]) usize {
+    var start: usize = 0usize;
+    var len: usize = 0usize;
+    dtls_server_trim_integer(src, &start, &len);
+    if src[start] >= 0x80 as byte {
+        return len + 1usize;
+    }
+    return len;
+}
+
+fn dtls_server_write_der_integer(out: &[byte], cursor: &usize, src: &[byte]) !void {
+    var start: usize = 0usize;
+    var len: usize = 0usize;
+    dtls_server_trim_integer(src, &start, &len);
+    const encoded_len: usize = dtls_server_der_integer_encoded_len(src);
+    if *cursor + 2usize + encoded_len > out.len {
+        return error.ByteWriterOutOfBounds;
+    }
+    out[*cursor] = 0x02 as byte;
+    *cursor = *cursor + 1usize;
+    out[*cursor] = encoded_len as byte;
+    *cursor = *cursor + 1usize;
+    if encoded_len > len {
+        out[*cursor] = 0 as byte;
+        *cursor = *cursor + 1usize;
+    }
+    var index: usize = 0usize;
+    while index < len {
+        out[*cursor + index] = src[start + index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + len;
+}
+
+fn dtls_server_encode_ecdsa_der_signature(r: &[byte], s: &[byte], out: &[byte]) !usize {
+    if r.len != CRYPTO_P256_FIELD_BYTES || s.len != CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    const r_len: usize = dtls_server_der_integer_encoded_len(r);
+    const s_len: usize = dtls_server_der_integer_encoded_len(s);
+    const sequence_len: usize = 2usize + r_len + 2usize + s_len;
+    if sequence_len > 127usize || out.len < 2usize + sequence_len {
+        return error.ByteWriterOutOfBounds;
+    }
+    var cursor: usize = 0usize;
+    out[cursor] = 0x30 as byte;
+    cursor = cursor + 1usize;
+    out[cursor] = sequence_len as byte;
+    cursor = cursor + 1usize;
+    try dtls_server_write_der_integer(out, &cursor, r);
+    try dtls_server_write_der_integer(out, &cursor, s);
+    return cursor;
+}
+
+fn dtls_server_make_ecdhe_params(public_key: &[byte], out: &[byte]) !usize {
+    if public_key.len != CRYPTO_P256_PUBLIC_KEY_BYTES || out.len < 68usize {
+        return error.InvalidPacket;
+    }
+    out[0] = DTLS_ECDHE_CURVE_TYPE_NAMED_CURVE as byte;
+    try write_be_u16(out[1:2], DTLS_NAMED_CURVE_SECP256R1);
+    out[3] = public_key.len as byte;
+    try dtls_server_copy(out[4:public_key.len], public_key);
+    const params_len: usize = 4usize + public_key.len;
+    return params_len;
+}
+
+fn dtls_server_make_signed_server_key_exchange(
+    hello: &DtlsClientHello,
+    config: &DtlsServerFirstFlightConfig,
+    out: &[byte],
+) !usize {
+    var ecdhe_public: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
+    try crypto_p256_public_from_private(config.ecdhe_private_key, ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES]);
+
+    var params: [byte: 68] = [];
+    const params_len: usize = try dtls_server_make_ecdhe_params(ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES], params[0:68]);
+
+    var hash: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var empty: [byte: 1] = [];
+    try crypto_sha256_digest4(
+        hello.random,
+        config.server_random,
+        params[0:params_len],
+        empty[0:0],
+        hash[0:CRYPTO_P256_FIELD_BYTES],
+    );
+
+    var identity_private: [byte: DTLS_IDENTITY_PRIVATE_KEY_BYTES] = [];
+    try dtls_identity_private_key(identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES]);
+
+    var r: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var s: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    try crypto_p256_ecdsa_sign_with_k(
+        identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
+        hash[0:CRYPTO_P256_FIELD_BYTES],
+        config.signature_nonce,
+        r[0:CRYPTO_P256_FIELD_BYTES],
+        s[0:CRYPTO_P256_FIELD_BYTES],
+    );
+
+    var der_signature: [byte: DTLS_SERVER_ECDSA_DER_SIGNATURE_MAX_BYTES] = [];
+    const der_len: usize = try dtls_server_encode_ecdsa_der_signature(
+        r[0:CRYPTO_P256_FIELD_BYTES],
+        s[0:CRYPTO_P256_FIELD_BYTES],
+        der_signature[0:DTLS_SERVER_ECDSA_DER_SIGNATURE_MAX_BYTES],
+    );
+
+    var message: DtlsServerKeyExchange = DtlsServerKeyExchange{
+        named_curve: DTLS_NAMED_CURVE_SECP256R1,
+        public_key: ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+        signature_hash_algorithm: DTLS_HASH_ALGORITHM_SHA256,
+        signature_algorithm: DTLS_SIGNATURE_ALGORITHM_ECDSA,
+        signature: der_signature[0:der_len],
+    };
+    return dtls_server_key_exchange_write(&message, out);
+}
+
+fn dtls_server_write_handshake_record(
+    handshake_type: u8,
+    message_sequence: u16,
+    body: &[byte],
+    record_sequence: u64,
+    out: &[byte],
+    cursor: &usize,
+) !void {
+    const payload_len: usize = DTLS_HANDSHAKE_HEADER_BYTES + body.len;
+    const record_len: usize = DTLS_RECORD_HEADER_BYTES + payload_len;
+    if body.len > DTLS_SERVER_FIRST_FLIGHT_MAX_BODY_BYTES || payload_len > 0xffffusize {
+        return error.UnsupportedCapability;
+    }
+    if *cursor + record_len > out.len {
+        return error.DtlsServerFlightTooSmall;
+    }
+
+    const record_start: usize = *cursor;
+    out[record_start] = DTLS_CONTENT_TYPE_HANDSHAKE as byte;
+    try write_be_u16(out[record_start + 1usize:2], DTLS_VERSION_1_0_COMPAT);
+    try write_be_u16(out[record_start + 3usize:2], 0u16);
+    out[record_start + 5usize] = ((record_sequence >> 40i32) & 0xffu64) as byte;
+    out[record_start + 6usize] = ((record_sequence >> 32i32) & 0xffu64) as byte;
+    out[record_start + 7usize] = ((record_sequence >> 24i32) & 0xffu64) as byte;
+    out[record_start + 8usize] = ((record_sequence >> 16i32) & 0xffu64) as byte;
+    out[record_start + 9usize] = ((record_sequence >> 8i32) & 0xffu64) as byte;
+    out[record_start + 10usize] = (record_sequence & 0xffu64) as byte;
+    try write_be_u16(out[record_start + 11usize:2], payload_len as u16);
+
+    const handshake_start: usize = record_start + DTLS_RECORD_HEADER_BYTES;
+    out[handshake_start] = handshake_type as byte;
+    try dtls_server_write_u24(out[handshake_start + 1usize:3], body.len);
+    try write_be_u16(out[handshake_start + 4usize:2], message_sequence);
+    try dtls_server_write_u24(out[handshake_start + 6usize:3], 0usize);
+    try dtls_server_write_u24(out[handshake_start + 9usize:3], body.len);
+    try dtls_server_copy(out[handshake_start + DTLS_HANDSHAKE_HEADER_BYTES:body.len], body);
+
+    *cursor = *cursor + record_len;
+}
+
+fn dtls_server_write_epoch_sequence(epoch: u16, sequence_number: u64, out: &[byte]) !void {
+    if out.len < DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES || sequence_number > 0xffffffffffffu64 {
+        return error.InvalidPacket;
+    }
+    try write_be_u16(out[0:2], epoch);
+    out[2] = ((sequence_number >> 40i32) & 0xffu64) as byte;
+    out[3] = ((sequence_number >> 32i32) & 0xffu64) as byte;
+    out[4] = ((sequence_number >> 24i32) & 0xffu64) as byte;
+    out[5] = ((sequence_number >> 16i32) & 0xffu64) as byte;
+    out[6] = ((sequence_number >> 8i32) & 0xffu64) as byte;
+    out[7] = (sequence_number & 0xffu64) as byte;
+}
+
+fn dtls_server_write_aead_aad(
+    epoch: u16,
+    sequence_number: u64,
+    content_type: u8,
+    plaintext_len: usize,
+    out: &[byte],
+) !void {
+    if out.len < DTLS_SERVER_AEAD_AAD_BYTES || plaintext_len > 0xffffusize {
+        return error.InvalidPacket;
+    }
+    try dtls_server_write_epoch_sequence(epoch, sequence_number, out[0:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES]);
+    out[8] = content_type as byte;
+    try write_be_u16(out[9:2], DTLS_VERSION_1_2);
+    try write_be_u16(out[11:2], plaintext_len as u16);
+}
+
+fn dtls_server_make_gcm_nonce(fixed_iv: &[byte], explicit_nonce: &[byte], out: &[byte]) !void {
+    if fixed_iv.len != DTLS_SERVER_AES_GCM_FIXED_IV_BYTES
+        || explicit_nonce.len != DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES
+        || out.len < DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES {
+        return error.InvalidPacket;
+    }
+    var index: usize = 0usize;
+    while index < DTLS_SERVER_AES_GCM_FIXED_IV_BYTES {
+        out[index] = fixed_iv[index];
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES {
+        out[DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + index] = explicit_nonce[index];
+        index = index + 1usize;
+    }
+}
+
+fn dtls_server_record_key_for_direction(keys: &DtlsServerRecordKeys, server_writes: bool) &[byte] {
+    if server_writes {
+        return keys.server_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES];
+    }
+    return keys.client_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES];
+}
+
+fn dtls_server_record_iv_for_direction(keys: &DtlsServerRecordKeys, server_writes: bool) &[byte] {
+    if server_writes {
+        return keys.server_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES];
+    }
+    return keys.client_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES];
+}
+
+export fn dtls_server_write_first_flight(
+    hello: &DtlsClientHello,
+    config: &DtlsServerFirstFlightConfig,
+    out: &[byte],
+) !DtlsServerFirstFlight {
+    if hello == null
+        || config == null
+        || config.server_random.len != DTLS_HELLO_RANDOM_BYTES
+        || config.ecdhe_private_key.len != CRYPTO_P256_FIELD_BYTES
+        || config.signature_nonce.len != CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    if !dtls_server_client_supports_cipher(hello, DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+        || !dtls_server_client_supports_null_compression(hello) {
+        return error.DtlsServerUnsupportedClientHello;
+    }
+
+    const selected_srtp: DtlsUseSrtpExtension = try dtls_server_negotiate_srtp(hello);
+
+    var server_extensions: [byte: 48] = [];
+    var server_extensions_len: usize = 0usize;
+    const renegotiation_info: [byte: 1] = [0 as byte];
+    if try dtls_server_client_offered_renegotiation_info(hello) {
+        try dtls_server_write_extension(
+            server_extensions[0:48],
+            &server_extensions_len,
+            DTLS_EXTENSION_RENEGOTIATION_INFO,
+            renegotiation_info[0:1],
+        );
+    }
+    const uncompressed_point_format: [byte: 2] = [1 as byte, 0 as byte];
+    if try dtls_server_client_offered_extension(hello.extensions, DTLS_EXTENSION_EC_POINT_FORMATS) {
+        try dtls_server_write_extension(
+            server_extensions[0:48],
+            &server_extensions_len,
+            DTLS_EXTENSION_EC_POINT_FORMATS,
+            uncompressed_point_format[0:2],
+        );
+    }
+    const use_srtp_len: usize = try dtls_server_write_selected_use_srtp_extension(
+        &selected_srtp,
+        server_extensions[server_extensions_len:48usize - server_extensions_len],
+    );
+    server_extensions_len = server_extensions_len + use_srtp_len;
+
+    var server_hello: DtlsServerHello = DtlsServerHello{
+        version: DTLS_VERSION_1_2,
+        random: config.server_random,
+        session_id: hello.session_id,
+        cipher_suite: DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        compression_method: 0u8,
+        extensions: server_extensions[0:server_extensions_len],
+    };
+    var server_hello_body: [byte: 128] = [];
+    const server_hello_len: usize = try dtls_server_hello_write(&server_hello, server_hello_body[0:128]);
+
+    var cert_der: [byte: DTLS_IDENTITY_CERTIFICATE_DER_BYTES] = [];
+    const cert_der_len: usize = try dtls_identity_certificate_der(cert_der[0:DTLS_IDENTITY_CERTIFICATE_DER_BYTES]);
+    var certificate: DtlsCertificateMessage = dtls_certificate_message_make();
+    certificate.certificate_count = 1usize;
+    certificate.certificates[0] = DtlsCertificateEntry{
+        der: cert_der[0:cert_der_len],
+    };
+    var certificate_body: [byte: 512] = [];
+    const certificate_len: usize = try dtls_certificate_write(&certificate, certificate_body[0:512]);
+
+    var key_exchange_body: [byte: 256] = [];
+    const key_exchange_len: usize = try dtls_server_make_signed_server_key_exchange(
+        hello,
+        config,
+        key_exchange_body[0:256],
+    );
+
+    var empty_body: [byte: 1] = [];
+    var cursor: usize = 0usize;
+    var record_sequence: u64 = config.first_record_sequence;
+    var handshake_sequence: u16 = config.first_handshake_sequence;
+
+    try dtls_server_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_SERVER_HELLO,
+        handshake_sequence,
+        server_hello_body[0:server_hello_len],
+        record_sequence,
+        out,
+        &cursor,
+    );
+    record_sequence = record_sequence + 1u64;
+    handshake_sequence = handshake_sequence + 1u16;
+
+    try dtls_server_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_CERTIFICATE,
+        handshake_sequence,
+        certificate_body[0:certificate_len],
+        record_sequence,
+        out,
+        &cursor,
+    );
+    record_sequence = record_sequence + 1u64;
+    handshake_sequence = handshake_sequence + 1u16;
+
+    try dtls_server_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE,
+        handshake_sequence,
+        key_exchange_body[0:key_exchange_len],
+        record_sequence,
+        out,
+        &cursor,
+    );
+    record_sequence = record_sequence + 1u64;
+    handshake_sequence = handshake_sequence + 1u16;
+
+    try dtls_server_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE,
+        handshake_sequence,
+        empty_body[0:0],
+        record_sequence,
+        out,
+        &cursor,
+    );
+    record_sequence = record_sequence + 1u64;
+    handshake_sequence = handshake_sequence + 1u16;
+
+    return DtlsServerFirstFlight{
+        bytes_written: cursor,
+        record_count: 4usize,
+        selected_cipher_suite: DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        selected_srtp_profile: selected_srtp.profiles[0],
+        next_record_sequence: record_sequence,
+        next_handshake_sequence: handshake_sequence,
+    };
+}
+
+export fn dtls_server_master_secret_from_pre_master(
+    pre_master_secret: &[byte],
+    client_random: &[byte],
+    server_random: &[byte],
+    out: &[byte],
+) !void {
+    if pre_master_secret.len == 0usize
+        || client_random.len != DTLS_HELLO_RANDOM_BYTES
+        || server_random.len != DTLS_HELLO_RANDOM_BYTES
+        || out.len < DTLS_MASTER_SECRET_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var label: [byte: DTLS_SERVER_MASTER_SECRET_LABEL_BYTES] = [
+        'm' as byte, 'a' as byte, 's' as byte, 't' as byte, 'e' as byte, 'r' as byte,
+        ' ' as byte,
+        's' as byte, 'e' as byte, 'c' as byte, 'r' as byte, 'e' as byte, 't' as byte,
+    ];
+    var seed: [byte: 2usize * DTLS_HELLO_RANDOM_BYTES] = [];
+    var cursor: usize = 0usize;
+    var index: usize = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        seed[cursor] = client_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        seed[cursor] = server_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+
+    try crypto_tls12_prf_sha256(
+        pre_master_secret,
+        label[0:DTLS_SERVER_MASTER_SECRET_LABEL_BYTES],
+        seed[0:cursor],
+        out[0:DTLS_MASTER_SECRET_BYTES],
+    );
+}
+
+export fn dtls_server_key_material_make() DtlsServerKeyMaterial {
+    var master_secret: [byte: DTLS_MASTER_SECRET_BYTES] = [];
+    var srtp_key_material: [byte: DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES] = [];
+    return DtlsServerKeyMaterial{
+        selected_srtp_profile: 0u16,
+        master_secret: master_secret,
+        srtp_key_material: srtp_key_material,
+    };
+}
+
+export fn dtls_server_derive_srtp_key_material(
+    client_key_exchange_body: &[byte],
+    server_ecdhe_private_key: &[byte],
+    client_random: &[byte],
+    server_random: &[byte],
+    selected_srtp_profile: u16,
+    out: &DtlsServerKeyMaterial,
+) !void {
+    if out == null
+        || server_ecdhe_private_key.len != CRYPTO_P256_FIELD_BYTES
+        || client_random.len != DTLS_HELLO_RANDOM_BYTES
+        || server_random.len != DTLS_HELLO_RANDOM_BYTES
+        || selected_srtp_profile != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return error.InvalidPacket;
+    }
+
+    const client_key_exchange: DtlsClientKeyExchange = try dtls_client_key_exchange_parse(client_key_exchange_body);
+    var pre_master_secret: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    try dtls_ecdhe_p256_shared_secret(
+        server_ecdhe_private_key,
+        client_key_exchange.public_key,
+        pre_master_secret[0:CRYPTO_P256_FIELD_BYTES],
+    );
+
+    try dtls_server_master_secret_from_pre_master(
+        pre_master_secret[0:CRYPTO_P256_FIELD_BYTES],
+        client_random,
+        server_random,
+        out.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+    );
+
+    var label: [byte: DTLS_SERVER_EXPORTER_SRTP_LABEL_BYTES] = [
+        'E' as byte, 'X' as byte, 'T' as byte, 'R' as byte, 'A' as byte, 'C' as byte, 'T' as byte, 'O' as byte, 'R' as byte,
+        '-' as byte, 'd' as byte, 't' as byte, 'l' as byte, 's' as byte, '_' as byte, 's' as byte, 'r' as byte, 't' as byte, 'p' as byte,
+    ];
+    try dtls_exporter_compute(
+        out.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        label[0:DTLS_SERVER_EXPORTER_SRTP_LABEL_BYTES],
+        client_random,
+        server_random,
+        out.srtp_key_material[0:DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES],
+    );
+    out.selected_srtp_profile = selected_srtp_profile;
+}
+
+export fn dtls_server_record_keys_make() DtlsServerRecordKeys {
+    var client_write_key: [byte: DTLS_SERVER_AES_GCM_KEY_BYTES] = [];
+    var server_write_key: [byte: DTLS_SERVER_AES_GCM_KEY_BYTES] = [];
+    var client_write_iv: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES] = [];
+    var server_write_iv: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES] = [];
+    return DtlsServerRecordKeys{
+        client_write_key: client_write_key,
+        server_write_key: server_write_key,
+        client_write_iv: client_write_iv,
+        server_write_iv: server_write_iv,
+    };
+}
+
+export fn dtls_server_record_keys_from_master(
+    master_secret: &[byte],
+    client_random: &[byte],
+    server_random: &[byte],
+    out: &DtlsServerRecordKeys,
+) !void {
+    if out == null
+        || master_secret.len != DTLS_MASTER_SECRET_BYTES
+        || client_random.len != DTLS_HELLO_RANDOM_BYTES
+        || server_random.len != DTLS_HELLO_RANDOM_BYTES {
+        return error.InvalidPacket;
+    }
+
+    var label: [byte: DTLS_SERVER_KEY_EXPANSION_LABEL_BYTES] = [
+        'k' as byte, 'e' as byte, 'y' as byte,
+        ' ' as byte,
+        'e' as byte, 'x' as byte, 'p' as byte, 'a' as byte, 'n' as byte, 's' as byte, 'i' as byte, 'o' as byte, 'n' as byte,
+    ];
+    var seed: [byte: 2usize * DTLS_HELLO_RANDOM_BYTES] = [];
+    var cursor: usize = 0usize;
+    var index: usize = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        seed[cursor] = server_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+    index = 0usize;
+    while index < DTLS_HELLO_RANDOM_BYTES {
+        seed[cursor] = client_random[index];
+        cursor = cursor + 1usize;
+        index = index + 1usize;
+    }
+
+    var key_block: [byte: DTLS_SERVER_AES_GCM_KEY_BLOCK_BYTES] = [];
+    try crypto_tls12_prf_sha256(
+        master_secret,
+        label[0:DTLS_SERVER_KEY_EXPANSION_LABEL_BYTES],
+        seed[0:cursor],
+        key_block[0:DTLS_SERVER_AES_GCM_KEY_BLOCK_BYTES],
+    );
+
+    try dtls_server_copy(out.client_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES], key_block[0usize:DTLS_SERVER_AES_GCM_KEY_BYTES]);
+    try dtls_server_copy(out.server_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES], key_block[DTLS_SERVER_AES_GCM_KEY_BYTES:DTLS_SERVER_AES_GCM_KEY_BYTES]);
+    try dtls_server_copy(
+        out.client_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES],
+        key_block[(2usize * DTLS_SERVER_AES_GCM_KEY_BYTES):DTLS_SERVER_AES_GCM_FIXED_IV_BYTES],
+    );
+    try dtls_server_copy(
+        out.server_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES],
+        key_block[(2usize * DTLS_SERVER_AES_GCM_KEY_BYTES + DTLS_SERVER_AES_GCM_FIXED_IV_BYTES):DTLS_SERVER_AES_GCM_FIXED_IV_BYTES],
+    );
+}
+
+export fn dtls_server_encrypt_aes_gcm_record(
+    keys: &DtlsServerRecordKeys,
+    server_writes: bool,
+    content_type: u8,
+    epoch: u16,
+    sequence_number: u64,
+    plaintext: &[byte],
+    out: &[byte],
+) !usize {
+    if keys == null || plaintext.len > 0xffffusize {
+        return error.InvalidPacket;
+    }
+    const encrypted_len: usize = DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES + plaintext.len + CRYPTO_AES_GCM_TAG_BYTES;
+    if encrypted_len > 0xffffusize || out.len < DTLS_RECORD_HEADER_BYTES + encrypted_len {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    var explicit_nonce: [byte: DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES] = [];
+    var nonce: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES] = [];
+    var aad: [byte: DTLS_SERVER_AEAD_AAD_BYTES] = [];
+    try dtls_server_write_epoch_sequence(epoch, sequence_number, explicit_nonce[0:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES]);
+    try dtls_server_make_gcm_nonce(
+        dtls_server_record_iv_for_direction(keys, server_writes),
+        explicit_nonce[0:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+        nonce[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+    );
+    try dtls_server_write_aead_aad(epoch, sequence_number, content_type, plaintext.len, aad[0:DTLS_SERVER_AEAD_AAD_BYTES]);
+
+    out[0] = content_type as byte;
+    try write_be_u16(out[1:2], DTLS_VERSION_1_2);
+    try write_be_u16(out[3:2], epoch);
+    out[5] = ((sequence_number >> 40i32) & 0xffu64) as byte;
+    out[6] = ((sequence_number >> 32i32) & 0xffu64) as byte;
+    out[7] = ((sequence_number >> 24i32) & 0xffu64) as byte;
+    out[8] = ((sequence_number >> 16i32) & 0xffu64) as byte;
+    out[9] = ((sequence_number >> 8i32) & 0xffu64) as byte;
+    out[10] = (sequence_number & 0xffu64) as byte;
+    try write_be_u16(out[11:2], encrypted_len as u16);
+    try dtls_server_copy(
+        out[DTLS_RECORD_HEADER_BYTES:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+        explicit_nonce[0:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+    );
+
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+    try crypto_aes_key_schedule_init(&schedule, dtls_server_record_key_for_direction(keys, server_writes));
+    try crypto_aes_gcm_encrypt(
+        &schedule,
+        nonce[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+        aad[0:DTLS_SERVER_AEAD_AAD_BYTES],
+        plaintext,
+        out[DTLS_RECORD_HEADER_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES:plaintext.len],
+        out[DTLS_RECORD_HEADER_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES + plaintext.len:CRYPTO_AES_GCM_TAG_BYTES],
+    );
+    return DTLS_RECORD_HEADER_BYTES + encrypted_len;
+}
+
+export fn dtls_server_decrypt_aes_gcm_record(
+    keys: &DtlsServerRecordKeys,
+    client_wrote: bool,
+    packet: &[byte],
+    plaintext_out: &[byte],
+) !DtlsServerDecryptedRecord {
+    if keys == null || packet.len < DTLS_RECORD_HEADER_BYTES {
+        return error.InvalidPacket;
+    }
+    const content_type: u8 = packet[0] as u8;
+    const version: u16 = try read_be_u16(packet[1:2]);
+    if version != DTLS_VERSION_1_2 {
+        return error.UnsupportedCapability;
+    }
+    const epoch: u16 = try read_be_u16(packet[3:2]);
+    const sequence_number: u64 =
+        ((packet[5] as u64) << 40i32)
+        | ((packet[6] as u64) << 32i32)
+        | ((packet[7] as u64) << 24i32)
+        | ((packet[8] as u64) << 16i32)
+        | ((packet[9] as u64) << 8i32)
+        | (packet[10] as u64);
+    const record_len: usize = (try read_be_u16(packet[11:2])) as usize;
+    if DTLS_RECORD_HEADER_BYTES + record_len != packet.len
+        || record_len < DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES + CRYPTO_AES_GCM_TAG_BYTES {
+        return error.InvalidPacket;
+    }
+    const ciphertext_len: usize = record_len - DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES - CRYPTO_AES_GCM_TAG_BYTES;
+    if plaintext_out.len < ciphertext_len {
+        return error.ByteWriterOutOfBounds;
+    }
+
+    const explicit_nonce: &[byte] = packet[DTLS_RECORD_HEADER_BYTES:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES];
+    const ciphertext_offset: usize = DTLS_RECORD_HEADER_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES;
+    const tag_offset: usize = ciphertext_offset + ciphertext_len;
+    const ciphertext: &[byte] = packet[ciphertext_offset:ciphertext_len];
+    const tag: &[byte] = packet[tag_offset:CRYPTO_AES_GCM_TAG_BYTES];
+    var nonce: [byte: DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES] = [];
+    var aad: [byte: DTLS_SERVER_AEAD_AAD_BYTES] = [];
+    try dtls_server_make_gcm_nonce(
+        dtls_server_record_iv_for_direction(keys, !client_wrote),
+        explicit_nonce,
+        nonce[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+    );
+    try dtls_server_write_aead_aad(epoch, sequence_number, content_type, ciphertext_len, aad[0:DTLS_SERVER_AEAD_AAD_BYTES]);
+
+    var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
+    try crypto_aes_key_schedule_init(&schedule, dtls_server_record_key_for_direction(keys, !client_wrote));
+    try crypto_aes_gcm_decrypt_and_verify(
+        &schedule,
+        nonce[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES + DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES],
+        aad[0:DTLS_SERVER_AEAD_AAD_BYTES],
+        ciphertext,
+        tag,
+        plaintext_out[0:ciphertext_len],
+    );
+
+    return DtlsServerDecryptedRecord{
+        content_type: content_type,
+        epoch: epoch,
+        sequence_number: sequence_number,
+        plaintext_len: ciphertext_len,
+    };
+}

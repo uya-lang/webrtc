@@ -8,7 +8,8 @@ use webrtc.srtp.core;
 use webrtc.srtp.model;
 use webrtc.errors;
 
-const RTP_HEADER_MIN_BYTES: usize = 12usize;
+const SRTP_RTP_HEADER_MIN_BYTES: usize = 12usize;
+const SRTP_RTP_EXTENSION_HEADER_BYTES: usize = 4usize;
 const SRTP_MAX_PACKET_BYTES: usize = 2048usize;
 
 fn srtp_context_profile_supported(ctx: &SrtpContext) bool {
@@ -24,6 +25,32 @@ fn srtp_index_from_sender_state(ctx: &SrtpContext, seq: u16) u64 {
     }
     ctx.send_sequence = seq;
     return ((roc as u64) << 16i32) | (seq as u64);
+}
+
+fn srtp_rtp_payload_offset(packet: &[byte]) !usize {
+    if packet.len < SRTP_RTP_HEADER_MIN_BYTES {
+        return error.PacketTooShort;
+    }
+    const first_byte: u8 = packet[0] as u8;
+    const csrc_count: usize = (first_byte & 0x0fu8) as usize;
+    var offset: usize = SRTP_RTP_HEADER_MIN_BYTES + (csrc_count * 4usize);
+    if offset > packet.len {
+        return error.InvalidPacket;
+    }
+    const has_extension: bool = (first_byte & 0x10u8) != 0u8;
+    if has_extension {
+        if offset + SRTP_RTP_EXTENSION_HEADER_BYTES > packet.len {
+            return error.InvalidPacket;
+        }
+        const extension_words: usize = (try read_be_u16(packet[offset + 2usize:2])) as usize;
+        const extension_bytes: usize = extension_words * 4usize;
+        offset = offset + SRTP_RTP_EXTENSION_HEADER_BYTES;
+        if offset + extension_bytes > packet.len {
+            return error.InvalidPacket;
+        }
+        offset = offset + extension_bytes;
+    }
+    return offset;
 }
 
 fn srtp_generate_iv(salt: &[byte], ssrc: u32, index: u64, iv: &[byte]) !void {
@@ -98,7 +125,7 @@ export fn srtp_protect(ctx: &SrtpContext, rtp_packet: &[byte], srtp_packet: &[by
     if !srtp_context_profile_supported(ctx) {
         return error.UnsupportedProfile;
     }
-    if rtp_packet.len < RTP_HEADER_MIN_BYTES {
+    if rtp_packet.len < SRTP_RTP_HEADER_MIN_BYTES {
         return error.PacketTooShort;
     }
 
@@ -121,18 +148,20 @@ export fn srtp_protect(ctx: &SrtpContext, rtp_packet: &[byte], srtp_packet: &[by
     var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
     try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
 
+    const payload_offset: usize = try srtp_rtp_payload_offset(rtp_packet);
+
     var i: usize = 0usize;
-    while i < RTP_HEADER_MIN_BYTES {
+    while i < payload_offset {
         srtp_packet[i] = rtp_packet[i];
         i = i + 1usize;
     }
 
-    const payload_len: usize = rtp_packet.len - RTP_HEADER_MIN_BYTES;
+    const payload_len: usize = rtp_packet.len - payload_offset;
     try crypto_aes_ctr_xor(
         &schedule,
         iv[0:16],
-        rtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
-        srtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
+        rtp_packet[payload_offset:payload_len],
+        srtp_packet[payload_offset:payload_len],
     );
 
     const packet_len: usize = rtp_packet.len;
@@ -165,7 +194,7 @@ export fn srtp_unprotect(ctx: &SrtpContext, srtp_packet: &[byte], rtp_packet: &[
     if tag_len == 0usize {
         return error.UnsupportedProfile;
     }
-    if srtp_packet.len < RTP_HEADER_MIN_BYTES + tag_len {
+    if srtp_packet.len < SRTP_RTP_HEADER_MIN_BYTES + tag_len {
         return error.PacketTooShort;
     }
 
@@ -205,18 +234,20 @@ export fn srtp_unprotect(ctx: &SrtpContext, srtp_packet: &[byte], rtp_packet: &[
     var schedule: CryptoAesKeySchedule = crypto_aes_key_schedule_make();
     try crypto_aes_key_schedule_init(&schedule, ctx.cipher_key[0:SRTP_KEY_BYTES]);
 
+    const payload_offset: usize = try srtp_rtp_payload_offset(srtp_packet[0:packet_len]);
+
     var i: usize = 0usize;
-    while i < RTP_HEADER_MIN_BYTES {
+    while i < payload_offset {
         rtp_packet[i] = srtp_packet[i];
         i = i + 1usize;
     }
 
-    const payload_len: usize = packet_len - RTP_HEADER_MIN_BYTES;
+    const payload_len: usize = packet_len - payload_offset;
     try crypto_aes_ctr_xor(
         &schedule,
         iv[0:16],
-        srtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
-        rtp_packet[RTP_HEADER_MIN_BYTES:payload_len],
+        srtp_packet[payload_offset:payload_len],
+        rtp_packet[payload_offset:payload_len],
     );
 
     try srtp_replay_accept(ctx, index);

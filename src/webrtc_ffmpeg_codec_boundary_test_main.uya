@@ -1,9 +1,3 @@
-@c_import(
-    "../tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c",
-    "-I.uyacache/ffmpeg-dev/usr/include/x86_64-linux-gnu",
-    "-L.uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu -lavcodec -lavutil"
-);
-
 use webrtc.media.direct_sender;
 use webrtc.media.ffmpeg_direct_ingest;
 use webrtc.media.ffmpeg_codec;

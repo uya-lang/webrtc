@@ -6,3 +6,4 @@ build/benchmarks/
 
 .agent/state*.json
 .uyacache/
+build/

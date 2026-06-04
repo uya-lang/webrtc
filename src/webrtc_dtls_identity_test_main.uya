@@ -1,0 +1,103 @@
+use libc.printf;
+use webrtc.crypto.hash;
+use webrtc.crypto.p256;
+use webrtc.dtls.handshake;
+use webrtc.dtls.identity;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn check_dtls_identity_material() i32 {
+    var private_key: [byte: DTLS_IDENTITY_PRIVATE_KEY_BYTES] = [];
+    var public_key: [byte: DTLS_IDENTITY_PUBLIC_KEY_BYTES] = [];
+    var derived_public_key: [byte: DTLS_IDENTITY_PUBLIC_KEY_BYTES] = [];
+
+    if dtls_identity_private_key(private_key[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES]).error_id != 0 {
+        return 10;
+    }
+    if dtls_identity_public_key(public_key[0:DTLS_IDENTITY_PUBLIC_KEY_BYTES]).error_id != 0 {
+        return 11;
+    }
+    if crypto_p256_public_from_private(
+        private_key[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
+        derived_public_key[0:DTLS_IDENTITY_PUBLIC_KEY_BYTES],
+    ).error_id != 0 {
+        return 12;
+    }
+    if !bytes_equal(public_key[0:DTLS_IDENTITY_PUBLIC_KEY_BYTES], derived_public_key[0:DTLS_IDENTITY_PUBLIC_KEY_BYTES]) {
+        return 13;
+    }
+
+    var certificate_der: [byte: DTLS_IDENTITY_CERTIFICATE_DER_BYTES] = [];
+    const certificate_len: !usize = dtls_identity_certificate_der(certificate_der[0:DTLS_IDENTITY_CERTIFICATE_DER_BYTES]);
+    if certificate_len.error_id != 0 {
+        return 14;
+    }
+    if certificate_len.value != DTLS_IDENTITY_CERTIFICATE_DER_BYTES {
+        return 15;
+    }
+    if dtls_certificate_fingerprint_verify(
+        certificate_der[0:certificate_len.value],
+        "sha-256" as &[byte],
+        dtls_identity_fingerprint_sha256_text(),
+    ).error_id != 0 {
+        return 16;
+    }
+
+    var message_digest: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    if crypto_sha256_digest("uya dtls identity signing proof" as &[byte], message_digest[0:CRYPTO_P256_FIELD_BYTES]).error_id != 0 {
+        return 17;
+    }
+    var nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte,
+        0x05 as byte, 0x06 as byte, 0x07 as byte, 0x08 as byte,
+        0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte,
+        0x0d as byte, 0x0e as byte, 0x0f as byte, 0x10 as byte,
+        0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte,
+        0x15 as byte, 0x16 as byte, 0x17 as byte, 0x18 as byte,
+        0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte,
+        0x1d as byte, 0x1e as byte, 0x1f as byte, 0x20 as byte,
+    ];
+    var r: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var s: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    if crypto_p256_ecdsa_sign_with_k(
+        private_key[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
+        message_digest[0:CRYPTO_P256_FIELD_BYTES],
+        nonce[0:CRYPTO_P256_FIELD_BYTES],
+        r[0:CRYPTO_P256_FIELD_BYTES],
+        s[0:CRYPTO_P256_FIELD_BYTES],
+    ).error_id != 0 {
+        return 18;
+    }
+    if crypto_p256_ecdsa_verify(
+        public_key[0:DTLS_IDENTITY_PUBLIC_KEY_BYTES],
+        message_digest[0:CRYPTO_P256_FIELD_BYTES],
+        r[0:CRYPTO_P256_FIELD_BYTES],
+        s[0:CRYPTO_P256_FIELD_BYTES],
+    ).error_id != 0 {
+        return 19;
+    }
+
+    return 0;
+}
+
+fn main() i32 {
+    const result: i32 = check_dtls_identity_material();
+    if result != 0 {
+        printf("Uya DTLS identity tests failed: %d\n", result);
+        return 1;
+    }
+    printf("Uya DTLS identity tests passed\n");
+    return 0;
+}

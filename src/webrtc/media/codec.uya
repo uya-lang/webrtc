@@ -12,13 +12,30 @@ export error CodecInvalidVideoFrame;
 export error CodecInvalidEncodedFrame;
 export error CodecFrameQueueFull;
 export error CodecFrameQueueEmpty;
+export error CodecProviderUnsupported;
 
 export const CODEC_RAW_VIDEO_FORMAT_UNKNOWN: u8 = 0u8;
 export const CODEC_RAW_VIDEO_FORMAT_I420: u8 = 1u8;
 export const CODEC_RAW_AUDIO_FORMAT_S16: u8 = 1u8;
 export const CODEC_FRAME_QUEUE_MAX_DEPTH: usize = 64usize;
+export const CODEC_PROVIDER_UNKNOWN: u8 = 0u8;
+export const CODEC_PROVIDER_FFMPEG: u8 = 1u8;
+export const CODEC_PROVIDER_UYA: u8 = 2u8;
 
 const CODEC_MAX_USIZE: usize = ~(0 as usize);
+
+export struct CodecProviderSelection {
+    provider_id: u8 = CODEC_PROVIDER_UNKNOWN,
+    name: &[byte] = [],
+    audio_codec_id: u16 = CODEC_ID_OPUS,
+    video_codec_id: u16 = CODEC_ID_VP8,
+    uses_extern: bool = false,
+    requires_codec_bridge: bool = false,
+    audio_encode_ready: bool = false,
+    audio_decode_ready: bool = false,
+    video_encode_ready: bool = false,
+    video_decode_ready: bool = false,
+}
 
 export struct RawAudioFrame {
     format: u8 = CODEC_RAW_AUDIO_FORMAT_S16,
@@ -102,6 +119,91 @@ fn codec_is_video_codec(codec_id: u16) bool {
 
 fn codec_is_audio_codec(codec_id: u16) bool {
     return codec_id == CODEC_ID_OPUS;
+}
+
+fn codec_ascii_lower(ch: byte) byte {
+    if ch >= ('A' as byte) && ch <= ('Z' as byte) {
+        return ch + 32u8;
+    }
+    return ch;
+}
+
+fn codec_bytes_equal_case_insensitive(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if codec_ascii_lower(lhs[index]) != codec_ascii_lower(rhs[index]) {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+export fn codec_provider_name(provider_id: u8) &[byte] {
+    if provider_id == CODEC_PROVIDER_FFMPEG {
+        return "ffmpeg" as &[byte];
+    }
+    if provider_id == CODEC_PROVIDER_UYA {
+        return "uya" as &[byte];
+    }
+    return "unknown" as &[byte];
+}
+
+export fn codec_provider_ffmpeg_make() CodecProviderSelection {
+    return CodecProviderSelection{
+        provider_id: CODEC_PROVIDER_FFMPEG,
+        name: "ffmpeg" as &[byte],
+        audio_codec_id: CODEC_ID_OPUS,
+        video_codec_id: CODEC_ID_VP8,
+        uses_extern: true,
+        requires_codec_bridge: false,
+        audio_encode_ready: true,
+        audio_decode_ready: true,
+        video_encode_ready: true,
+        video_decode_ready: true,
+    };
+}
+
+export fn codec_provider_uya_make(opus_bridge_ready: bool, vp8_bridge_ready: bool) CodecProviderSelection {
+    return CodecProviderSelection{
+        provider_id: CODEC_PROVIDER_UYA,
+        name: "uya" as &[byte],
+        audio_codec_id: CODEC_ID_OPUS,
+        video_codec_id: CODEC_ID_VP8,
+        uses_extern: false,
+        requires_codec_bridge: true,
+        audio_encode_ready: opus_bridge_ready,
+        audio_decode_ready: opus_bridge_ready,
+        video_encode_ready: vp8_bridge_ready,
+        video_decode_ready: vp8_bridge_ready,
+    };
+}
+
+export fn codec_provider_selection_ready(selection: &CodecProviderSelection) bool {
+    if selection == null {
+        return false;
+    }
+    return selection.audio_encode_ready
+        && selection.audio_decode_ready
+        && selection.video_encode_ready
+        && selection.video_decode_ready;
+}
+
+export fn codec_provider_select_by_name(
+    name: &[byte],
+    uya_opus_bridge_ready: bool,
+    uya_vp8_bridge_ready: bool,
+) !CodecProviderSelection {
+    if codec_bytes_equal_case_insensitive(name, "ffmpeg" as &[byte]) {
+        return codec_provider_ffmpeg_make();
+    }
+    if codec_bytes_equal_case_insensitive(name, "uya" as &[byte]) {
+        return codec_provider_uya_make(uya_opus_bridge_ready, uya_vp8_bridge_ready);
+    }
+    return error.CodecProviderUnsupported;
 }
 
 export fn codec_require_video_codec(codec_id: u16) !void {

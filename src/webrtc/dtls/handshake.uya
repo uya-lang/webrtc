@@ -330,11 +330,15 @@ fn dtls_alert_description_supported(description: u8) bool {
         || description == DTLS_ALERT_DESCRIPTION_INTERNAL_ERROR;
 }
 
+fn dtls_client_hello_version_supported(version: u16) bool {
+    return version == DTLS_VERSION_1_2 || version == DTLS_VERSION_1_0_COMPAT;
+}
+
 fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
     if hello == null {
         return error.InvalidPacket;
     }
-    if hello.legacy_version != DTLS_VERSION_1_2 {
+    if !dtls_client_hello_version_supported(hello.legacy_version) {
         return error.UnsupportedCapability;
     }
     if hello.random.len != DTLS_HELLO_RANDOM_BYTES {
@@ -559,7 +563,7 @@ export fn dtls_client_hello_parse(body: &[byte]) !DtlsClientHello {
     }
 
     const legacy_version: u16 = try read_be_u16(body[0:2]);
-    if legacy_version != DTLS_VERSION_1_2 {
+    if !dtls_client_hello_version_supported(legacy_version) {
         return error.UnsupportedCapability;
     }
 

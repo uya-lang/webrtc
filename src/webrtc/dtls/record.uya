@@ -12,6 +12,10 @@ fn dtls_record_content_type_supported(content_type: u8) bool {
         || content_type == DTLS_CONTENT_TYPE_APPLICATION_DATA;
 }
 
+fn dtls_record_version_supported(version: u16) bool {
+    return version == DTLS_VERSION_1_2 || version == DTLS_VERSION_1_0_COMPAT;
+}
+
 fn dtls_record_parse_handshake_payload(payload: &[byte]) !void {
     if payload.len < DTLS_HANDSHAKE_HEADER_BYTES {
         return error.InvalidPacket;
@@ -55,7 +59,7 @@ export fn dtls_record_parse(packet: &[byte]) !DtlsRecord {
     }
 
     const version: u16 = try read_be_u16(packet[1:2]);
-    if version != DTLS_VERSION_1_2 {
+    if !dtls_record_version_supported(version) {
         return error.UnsupportedCapability;
     }
 
@@ -99,7 +103,7 @@ export fn dtls_record_write(header: &DtlsRecordHeader, payload: &[byte], out: &[
     if !dtls_record_content_type_supported(header.content_type) {
         return error.UnsupportedCapability;
     }
-    if header.version != DTLS_VERSION_1_2 {
+    if !dtls_record_version_supported(header.version) {
         return error.UnsupportedCapability;
     }
     if header.sequence_number > 0xffffffffffffu64 {

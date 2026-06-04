@@ -14,6 +14,7 @@ receiver. The WebRTC sender must be the Uya process named
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import subprocess
 import sys
@@ -39,6 +40,15 @@ from ffmpeg_codec_flow import SkipFlow, probe_packets, require_ffmpeg_codec, req
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UYA_DIRECT_SENDER_MAIN = REPO_ROOT / "src" / "webrtc_ffmpeg_direct_sender_main.uya"
 UYA_BIN = REPO_ROOT.parent / "uya" / "bin" / "uya"
+
+
+@dataclass
+class UyaDirectSenderHandle:
+    proc: subprocess.Popen[str]
+    answer_sdp: str
+    diagnostics_path: Path
+    stdout_path: Path
+    stderr_path: Path
 
 
 def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
@@ -128,6 +138,7 @@ def make_call_page() -> str:
         <title>Uya FFmpeg Direct Chrome Receiver</title>
         <script>
         window.__uyaDirectOffer = null;
+        window.__uyaDirectPeer = null;
         window.__ffmpegChromeCallResult = null;
         window.__ffmpegChromeCallProgress = [];
 
@@ -217,10 +228,14 @@ def make_call_page() -> str:
         async function runReceiver() {
           mark('start');
           const receiver = new RTCPeerConnection({iceServers: []});
+          window.__uyaDirectPeer = receiver;
           const states = [];
           const tracks = [];
           receiver.addEventListener('connectionstatechange', () => {
             states.push('receiver:' + receiver.connectionState);
+          });
+          receiver.addEventListener('iceconnectionstatechange', () => {
+            states.push('ice:' + receiver.iceConnectionState);
           });
           receiver.addEventListener('track', event => {
             tracks.push(event.track.kind);
@@ -268,6 +283,10 @@ def make_call_page() -> str:
               throw new Error('Chrome decoded no Uya-originated VP8 frames');
             }
             mark('media-received');
+            await delay(4500);
+            mark('rtcp-feedback-window');
+            const finalAudioStats = await waitForInbound('audio', audio);
+            const finalVideoStats = await waitForInbound('video', video);
             receiver.close();
             await delay(25);
             window.__ffmpegChromeCallResult = {
@@ -276,11 +295,11 @@ def make_call_page() -> str:
               states,
               tracks,
               receiverConnectionState: receiver.connectionState,
-              audioPacketsReceived: audioStats.packetsReceived,
-              audioCodecMimeType: audioStats.codecMimeType,
-              videoPacketsReceived: videoStats.packetsReceived,
-              videoFramesDecoded: videoStats.framesDecoded,
-              videoCodecMimeType: videoStats.codecMimeType,
+              audioPacketsReceived: finalAudioStats.packetsReceived,
+              audioCodecMimeType: finalAudioStats.codecMimeType,
+              videoPacketsReceived: finalVideoStats.packetsReceived,
+              videoFramesDecoded: finalVideoStats.framesDecoded,
+              videoCodecMimeType: finalVideoStats.codecMimeType,
               offerSdp: window.__uyaDirectOffer.sdp,
               answerSdp: typeof answer === 'string' ? answer : String(answer.sdp || ''),
               progress: window.__ffmpegChromeCallProgress.slice()
@@ -410,15 +429,56 @@ def wait_for_offer(client: CDPClient, session_id: str) -> dict[str, str]:
 
 def apply_answer(client: CDPClient, session_id: str, answer_sdp: str) -> None:
     answer_json = json.dumps({"sdp": answer_sdp})
-    client.command(
+    response = client.command(
         "Runtime.evaluate",
         {
-            "expression": f"window.__uyaDirectApplyAnswer({answer_json}).catch(error => {{ throw error; }})",
-            "awaitPromise": True,
+            "expression": (
+                "(() => {"
+                "if (typeof window.__uyaDirectApplyAnswer !== 'function') {"
+                "fail('Chrome answer/media receive failed', new Error('apply-answer function missing'));"
+                "return false;"
+                "}"
+                f"window.__uyaDirectApplyAnswer({answer_json})"
+                ".catch(error => fail('Chrome answer/media receive failed', error));"
+                "return true;"
+                "})()"
+            ),
             "returnByValue": True,
         },
         session_id=session_id,
     )
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("value") is not True:
+        raise AssertionError(f"Chrome did not start applying the Uya answer: {response}")
+
+
+def read_chrome_debug_state(client: CDPClient, session_id: str) -> dict[str, Any]:
+    state = evaluate_json(
+        client,
+        session_id,
+        textwrap.dedent(
+            """
+            JSON.stringify((() => {
+              const peer = window.__uyaDirectPeer || null;
+              return {
+                progress: window.__ffmpegChromeCallProgress || [],
+                result: window.__ffmpegChromeCallResult || null,
+                hasOffer: !!window.__uyaDirectOffer,
+                hasApplyAnswer: typeof window.__uyaDirectApplyAnswer === 'function',
+                signalingState: peer ? peer.signalingState : '',
+                connectionState: peer ? peer.connectionState : '',
+                iceConnectionState: peer ? peer.iceConnectionState : '',
+                iceGatheringState: peer ? peer.iceGatheringState : '',
+                localDescriptionType: peer && peer.localDescription ? peer.localDescription.type : '',
+                remoteDescriptionType: peer && peer.remoteDescription ? peer.remoteDescription.type : ''
+              };
+            })())
+            """
+        ),
+    )
+    if isinstance(state, dict):
+        return state
+    return {}
 
 
 def wait_for_result(client: CDPClient, session_id: str) -> dict[str, Any]:
@@ -432,10 +492,66 @@ def wait_for_result(client: CDPClient, session_id: str) -> dict[str, Any]:
         if isinstance(result, dict):
             return result
         time.sleep(0.2)
-    raise TimeoutError("Chrome did not publish inbound RTP result")
+    raise TimeoutError(f"Chrome did not publish inbound RTP result; state={read_chrome_debug_state(client, session_id)}")
 
 
-def run_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Path) -> dict[str, Any]:
+def read_text_tail(path: Path, limit: int = 12000) -> str:
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if len(content) <= limit:
+        return content
+    return content[-limit:]
+
+
+def sender_failure_message(message: str, handle: UyaDirectSenderHandle | None, stdout_path: Path, stderr_path: Path) -> str:
+    return (
+        f"{message}\n"
+        f"returncode={handle.proc.poll() if handle is not None else 'not-started'}\n"
+        f"stdout:\n{read_text_tail(stdout_path)}\n"
+        f"stderr:\n{read_text_tail(stderr_path)}"
+    )
+
+
+def wait_for_answer(
+    proc: subprocess.Popen[str],
+    answer_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> str:
+    deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
+    last_json_error: json.JSONDecodeError | None = None
+    while time.monotonic() < deadline:
+        if answer_path.exists():
+            try:
+                answer = json.loads(answer_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                last_json_error = exc
+            else:
+                if isinstance(answer, dict) and isinstance(answer.get("sdp"), str):
+                    if proc.poll() is not None:
+                        raise AssertionError(
+                            "uya_ffmpeg_direct_sender exited before Chrome could apply its answer\n"
+                            f"returncode={proc.returncode}\n"
+                            f"stdout:\n{read_text_tail(stdout_path)}\n"
+                            f"stderr:\n{read_text_tail(stderr_path)}"
+                        )
+                    return str(answer["sdp"])
+                raise AssertionError(f"invalid Uya answer JSON: {answer!r}")
+        if proc.poll() is not None:
+            raise AssertionError(
+                "uya_ffmpeg_direct_sender exited before writing an SDP answer\n"
+                f"returncode={proc.returncode}\n"
+                f"stdout:\n{read_text_tail(stdout_path)}\n"
+                f"stderr:\n{read_text_tail(stderr_path)}"
+            )
+        time.sleep(0.1)
+    if last_json_error is not None:
+        raise TimeoutError(f"Uya answer JSON was not complete before timeout: {last_json_error}")
+    raise TimeoutError("uya_ffmpeg_direct_sender did not write an SDP answer before timeout")
+
+
+def start_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Path) -> UyaDirectSenderHandle:
     if not UYA_DIRECT_SENDER_MAIN.exists():
         raise AssertionError(
             "Uya direct sender CLI is not implemented yet: expected "
@@ -447,45 +563,97 @@ def run_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Path
     offer_path = workdir / "chrome_offer.json"
     answer_path = workdir / "uya_answer.json"
     diagnostics_path = workdir / "uya_direct_sender_diagnostics.json"
+    stdout_path = workdir / "uya_direct_sender.stdout.log"
+    stderr_path = workdir / "uya_direct_sender.stderr.log"
     offer_path.write_text(json.dumps(offer), encoding="utf-8")
 
-    completed = subprocess.run(
-        [
-            str(UYA_BIN),
-            "run",
-            str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
-            "--",
-            "--offer-json",
-            str(offer_path),
-            "--media",
-            str(media_path),
-            "--answer-json",
-            str(answer_path),
-            "--diagnostics-json",
-            str(diagnostics_path),
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(
-            "uya_ffmpeg_direct_sender failed\n"
-            f"stdout:\n{completed.stdout}\n"
-            f"stderr:\n{completed.stderr}"
+    stdout_file = stdout_path.open("w", encoding="utf-8")
+    stderr_file = stderr_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [
+                str(UYA_BIN),
+                "run",
+                str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
+                "--",
+                "--offer-json",
+                str(offer_path),
+                "--media",
+                str(media_path),
+                "--answer-json",
+                str(answer_path),
+                "--diagnostics-json",
+                str(diagnostics_path),
+                "--codec",
+                "ffmpeg",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            stdout=stdout_file,
+            stderr=stderr_file,
         )
-    if not answer_path.exists():
-        raise AssertionError("uya_ffmpeg_direct_sender did not write an SDP answer")
-    answer = json.loads(answer_path.read_text(encoding="utf-8"))
-    if not isinstance(answer, dict) or not isinstance(answer.get("sdp"), str):
-        raise AssertionError(f"invalid Uya answer JSON: {answer!r}")
+    finally:
+        stdout_file.close()
+        stderr_file.close()
+
+    answer_sdp = wait_for_answer(proc, answer_path, stdout_path, stderr_path)
+    return UyaDirectSenderHandle(
+        proc=proc,
+        answer_sdp=answer_sdp,
+        diagnostics_path=diagnostics_path,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+
+def read_sender_diagnostics(path: Path) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {}
-    if diagnostics_path.exists():
-        parsed = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    if path.exists():
+        parsed = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(parsed, dict):
             diagnostics = parsed
-    return {"answerSdp": str(answer["sdp"]), "diagnostics": diagnostics}
+    return diagnostics
+
+
+def wait_for_uya_direct_sender(handle: UyaDirectSenderHandle) -> dict[str, Any]:
+    try:
+        returncode = handle.proc.wait(timeout=DEFAULT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        handle.proc.terminate()
+        try:
+            handle.proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            handle.proc.kill()
+            handle.proc.wait(timeout=5.0)
+        raise AssertionError(
+            sender_failure_message(
+                "uya_ffmpeg_direct_sender did not exit after Chrome received media",
+                handle,
+                handle.stdout_path,
+                handle.stderr_path,
+            )
+        ) from exc
+    if returncode != 0:
+        raise AssertionError(
+            sender_failure_message(
+                "uya_ffmpeg_direct_sender failed while Chrome was receiving media",
+                handle,
+                handle.stdout_path,
+                handle.stderr_path,
+            )
+        )
+    return read_sender_diagnostics(handle.diagnostics_path)
+
+
+def stop_uya_direct_sender(handle: UyaDirectSenderHandle | None) -> None:
+    if handle is None or handle.proc.poll() is not None:
+        return
+    handle.proc.terminate()
+    try:
+        handle.proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        handle.proc.kill()
+        handle.proc.wait(timeout=5.0)
 
 
 def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
@@ -526,6 +694,7 @@ def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
 
         client = CDPClient(browser_ws_url)
         client.connect()
+        sender_handle: UyaDirectSenderHandle | None = None
         try:
             target = client.command("Target.createTarget", {"url": "about:blank"})
             target_id = str(target["targetId"])
@@ -535,12 +704,13 @@ def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
             client.command("Page.enable", session_id=session_id)
             client.command("Page.navigate", {"url": f"http://127.0.0.1:{http_port}/index.html"}, session_id=session_id)
             offer = wait_for_offer(client, session_id)
-            sender_result = run_uya_direct_sender(offer, media_path, tempdir_path)
-            apply_answer(client, session_id, sender_result["answerSdp"])
+            sender_handle = start_uya_direct_sender(offer, media_path, tempdir_path)
+            apply_answer(client, session_id, sender_handle.answer_sdp)
             result = wait_for_result(client, session_id)
-            result["senderDiagnostics"] = sender_result.get("diagnostics", {})
+            result["senderDiagnostics"] = wait_for_uya_direct_sender(sender_handle)
             return result
         finally:
+            stop_uya_direct_sender(sender_handle)
             client.close()
     finally:
         proc.terminate()
@@ -571,7 +741,20 @@ def validate_browser_result(result: dict[str, Any]) -> None:
     require("vp8/90000" in offer_sdp or "vp8/90000" in answer_sdp, "SDP missing VP8 negotiation")
     diagnostics = result.get("senderDiagnostics")
     require(isinstance(diagnostics, dict), "Uya sender diagnostics missing")
+    require(diagnostics.get("codecProvider") == "ffmpeg", "Uya sender did not select the FFmpeg codec provider")
+    require(diagnostics.get("codecProviderSwitchable") is True, "Uya sender codec provider is not switchable")
+    require(diagnostics.get("codecProviderReady") is True, "Uya sender FFmpeg codec provider is not ready")
+    require(diagnostics.get("codecProviderUsesExtern") is True, "FFmpeg codec provider should be the only extern provider")
+    require(diagnostics.get("codecBridgeRequired") is False, "FFmpeg direct sender should not require the Uya codec bridge")
+    require(diagnostics.get("ffmpegMediaPathSeen") is True, "Uya sender did not report the FFmpeg media path")
     require(int(diagnostics.get("rtpPackets", 0)) > 0, "Uya sender reported no RTP packets")
+    require(int(diagnostics.get("srtcpPackets", 0)) > 0, "Uya sender reported no SRTCP packets")
+    require(int(diagnostics.get("rtcpSenderReports", 0)) > 0, "Uya sender reported no RTCP Sender Reports")
+    require(int(diagnostics.get("srtcpPacketsReceived", 0)) > 0, "Uya sender received no SRTCP feedback packets from Chrome")
+    require(int(diagnostics.get("rtcpPacketsReceived", 0)) > 0, "Uya sender parsed no RTCP receiver feedback from Chrome")
+    receiver_reports = int(diagnostics.get("rtcpReceiverReportsReceived", 0))
+    feedback_packets = int(diagnostics.get("rtcpFeedbackPacketsReceived", 0))
+    require(receiver_reports + feedback_packets > 0, "Uya sender parsed neither RTCP Receiver Reports nor RTP/PS feedback")
     require(int(diagnostics.get("udpPackets", 0)) > 0, "Uya sender reported no UDP packets")
 
 
@@ -582,6 +765,8 @@ def assert_contract() -> str:
         "uya_ffmpeg_direct_sender",
         "rtp_packetize_encoded_frame",
         "SRTP/SRTCP -> UDP",
+        "rtcpSenderReports",
+        "rtcpPacketsReceived",
         "recvonly",
     ]
     missing = [item for item in required if item not in source]
@@ -598,6 +783,9 @@ def run_flow(keep_temp: bool = False) -> str:
         page_path.write_text(make_call_page(), encoding="utf-8")
         result = run_chrome_page(tempdir_path, media_path)
         validate_browser_result(result)
+        diagnostics = result.get("senderDiagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
 
         if keep_temp:
             kept = Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-direct-kept-"))
@@ -617,6 +805,16 @@ def run_flow(keep_temp: bool = False) -> str:
             f"chrome_audio_packets={result.get('audioPacketsReceived')} "
             f"chrome_video_packets={result.get('videoPacketsReceived')} "
             f"chrome_video_frames={result.get('videoFramesDecoded')}"
+            f" sender_ffmpeg_frames={diagnostics.get('ffmpegFrames')} "
+            f"sender_rtp_packets={diagnostics.get('rtpPackets')} "
+            f"sender_srtp_packets={diagnostics.get('srtpPackets')} "
+            f"sender_srtcp_packets={diagnostics.get('srtcpPackets')} "
+            f"sender_rtcp_sender_reports={diagnostics.get('rtcpSenderReports')} "
+            f"sender_srtcp_packets_received={diagnostics.get('srtcpPacketsReceived')} "
+            f"sender_rtcp_packets_received={diagnostics.get('rtcpPacketsReceived')} "
+            f"sender_rtcp_receiver_reports={diagnostics.get('rtcpReceiverReportsReceived')} "
+            f"sender_rtcp_feedback_packets_received={diagnostics.get('rtcpFeedbackPacketsReceived')} "
+            f"sender_udp_packets={diagnostics.get('udpPackets')}"
             f"{temp_note}"
         )
 

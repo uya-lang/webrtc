@@ -93,6 +93,50 @@ fn main() i32 {
         return 17i32;
     }
 
+    var tx_encrypted: SrtcpContext = srtcp_context_make();
+    var rx_encrypted: SrtcpContext = srtcp_context_make();
+    if srtcp_context_init(
+        &tx_encrypted,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 18i32;
+    }
+    if srtcp_context_init(
+        &rx_encrypted,
+        SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        0x22334455u32,
+        master_key[0:SRTP_KEY_BYTES],
+        master_salt[0:SRTP_SALT_BYTES],
+    ).error_id != 0 {
+        return 19i32;
+    }
+    if srtcp_derive_session_keys(&tx_encrypted).error_id != 0 {
+        return 20i32;
+    }
+    if srtcp_derive_session_keys(&rx_encrypted).error_id != 0 {
+        return 21i32;
+    }
+
+    var encrypted_srtcp_packet: [byte: 64] = [];
+    const encrypted_len: !usize = srtcp_protect_encrypted(&tx_encrypted, rtcp_packet[0:32], encrypted_srtcp_packet[0:64]);
+    if encrypted_len.error_id != 0 || encrypted_len.value != 46usize {
+        return 22i32;
+    }
+    if encrypted_srtcp_packet[32] != 0x80 as byte {
+        return 23i32;
+    }
+    var encrypted_recovered: [byte: 32] = [];
+    const encrypted_unprotected_len: !usize = srtcp_unprotect(&rx_encrypted, encrypted_srtcp_packet[0:46], encrypted_recovered[0:32]);
+    if encrypted_unprotected_len.error_id != 0 || encrypted_unprotected_len.value != 32usize {
+        return 24i32;
+    }
+    if !bytes_equal(encrypted_recovered[0:32], rtcp_packet[0:32]) {
+        return 25i32;
+    }
+
     printf("SRTCP protect/unprotect tests passed\n");
     return 0i32;
 }

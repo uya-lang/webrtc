@@ -4,8 +4,12 @@
 use webrtc.media.model;
 use webrtc.media.opus_rtp;
 use webrtc.media.vp8_rtp;
+use webrtc.rtcp.rtcp_packet;
 use webrtc.rtp.rtp_packet;
 use webrtc.rtp.rtp_sender;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.srtp.srtcp;
 
 export error DirectSenderInvalidConfig;
 export error DirectSenderUnsupportedCodec;
@@ -15,12 +19,16 @@ export error DirectSenderPacketTooLarge;
 
 export const DIRECT_SENDER_DEFAULT_MTU_BYTES: usize = 1200usize;
 export const DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES: usize = 1400usize;
+export const DIRECT_SENDER_MAX_RTCP_PACKET_BYTES: usize = 512usize;
 export const DIRECT_SENDER_DEFAULT_AUDIO_SSRC: u32 = 0x41554431u32;
 export const DIRECT_SENDER_DEFAULT_VIDEO_SSRC: u32 = 0x56494431u32;
 export const DIRECT_SENDER_DEFAULT_AUDIO_SEQUENCE: u16 = 1000u16;
 export const DIRECT_SENDER_DEFAULT_VIDEO_SEQUENCE: u16 = 2000u16;
 export const DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ: u32 = 48000u32;
 export const DIRECT_SENDER_VIDEO_CLOCK_RATE_HZ: u32 = 90000u32;
+export const DIRECT_SENDER_RTP_ONE_BYTE_EXTENSION_PROFILE: u16 = 0xBEDEu16;
+export const DIRECT_SENDER_RTP_MID_MAX_BYTES: usize = 16usize;
+export const DIRECT_SENDER_RTP_EXTENSION_MAX_BYTES: usize = 20usize;
 
 export struct UyaDirectSenderConfig {
     mtu_bytes: usize = DIRECT_SENDER_DEFAULT_MTU_BYTES,
@@ -28,6 +36,10 @@ export struct UyaDirectSenderConfig {
     video_ssrc: u32 = DIRECT_SENDER_DEFAULT_VIDEO_SSRC,
     audio_payload_type: u8 = CODEC_DEFAULT_PT_OPUS,
     video_payload_type: u8 = CODEC_DEFAULT_PT_VP8,
+    audio_mid_extension_id: u8 = 0u8,
+    video_mid_extension_id: u8 = 0u8,
+    audio_mid: &[byte] = [],
+    video_mid: &[byte] = [],
     audio_initial_sequence: u16 = DIRECT_SENDER_DEFAULT_AUDIO_SEQUENCE,
     video_initial_sequence: u16 = DIRECT_SENDER_DEFAULT_VIDEO_SEQUENCE,
     audio_initial_timestamp: u32 = 0u32,
@@ -38,8 +50,44 @@ export struct UyaDirectSenderDiagnostics {
     ffmpeg_encoded_frames: u64 = 0u64,
     rtp_packets: u64 = 0u64,
     rtp_payload_bytes: u64 = 0u64,
+    audio_rtp_packets: u64 = 0u64,
+    video_rtp_packets: u64 = 0u64,
+    audio_rtp_payload_bytes: u64 = 0u64,
+    video_rtp_payload_bytes: u64 = 0u64,
     srtp_packets: u64 = 0u64,
+    srtcp_packets: u64 = 0u64,
+    rtcp_sender_reports_sent: u64 = 0u64,
+    srtcp_packets_received: u64 = 0u64,
+    rtcp_packets_received: u64 = 0u64,
+    rtcp_receiver_reports_received: u64 = 0u64,
+    rtcp_feedback_packets_received: u64 = 0u64,
+    rtcp_nack_packets_received: u64 = 0u64,
+    rtcp_pli_packets_received: u64 = 0u64,
+    rtcp_fir_packets_received: u64 = 0u64,
+    rtcp_transport_cc_packets_received: u64 = 0u64,
+    srtcp_unprotect_errors: u64 = 0u64,
+    rtcp_last_packet_type: u64 = 0u64,
+    rtcp_last_feedback_format: u64 = 0u64,
+    rtcp_last_media_kind: u64 = 0u64,
+    rtcp_last_media_ssrc: u64 = 0u64,
     udp_packets: u64 = 0u64,
+    udp_datagrams_received: u64 = 0u64,
+    stun_packets_received: u64 = 0u64,
+    stun_responses_sent: u64 = 0u64,
+    dtls_packets_received: u64 = 0u64,
+    dtls_responses_sent: u64 = 0u64,
+    unknown_packets_received: u64 = 0u64,
+    runtime_errors: u64 = 0u64,
+    dtls_last_content_type: u64 = 0u64,
+    dtls_last_version: u64 = 0u64,
+    dtls_last_epoch: u64 = 0u64,
+    dtls_last_record_length: u64 = 0u64,
+    dtls_last_datagram_length: u64 = 0u64,
+    dtls_last_handshake_type: u64 = 0u64,
+    dtls_last_handshake_sequence: u64 = 0u64,
+    dtls_alert_packets_received: u64 = 0u64,
+    dtls_last_alert_level: u64 = 0u64,
+    dtls_last_alert_description: u64 = 0u64,
 }
 
 export struct UyaDirectSender {
@@ -81,6 +129,15 @@ fn direct_sender_validate_config(config: &UyaDirectSenderConfig) !void {
         return error.DirectSenderInvalidConfig;
     }
     if config.audio_payload_type == 0u8 || config.video_payload_type == 0u8 {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.audio_mid_extension_id > 14u8 || config.video_mid_extension_id > 14u8 {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.audio_mid_extension_id != 0u8 && (config.audio_mid.len == 0usize || config.audio_mid.len > DIRECT_SENDER_RTP_MID_MAX_BYTES) {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.video_mid_extension_id != 0u8 && (config.video_mid.len == 0usize || config.video_mid.len > DIRECT_SENDER_RTP_MID_MAX_BYTES) {
         return error.DirectSenderInvalidConfig;
     }
 }
@@ -178,6 +235,32 @@ fn direct_sender_marker_for_frame(frame: &EncodedFrame) bool {
     return frame.marker;
 }
 
+fn direct_sender_write_mid_extension(extension_id: u8, mid: &[byte], out: &[byte]) !usize {
+    if extension_id == 0u8 || extension_id > 14u8 || mid.len == 0usize || mid.len > DIRECT_SENDER_RTP_MID_MAX_BYTES {
+        return error.DirectSenderInvalidConfig;
+    }
+    var total_len: usize = 1usize + mid.len;
+    while (total_len % 4usize) != 0usize {
+        total_len = total_len + 1usize;
+    }
+    if out.len < total_len {
+        return error.DirectSenderPacketTooLarge;
+    }
+
+    out[0] = (((extension_id & 0x0fu8) << 4i32) | (((mid.len - 1usize) as u8) & 0x0fu8)) as byte;
+    var index: usize = 0usize;
+    while index < mid.len {
+        out[1usize + index] = mid[index];
+        index = index + 1usize;
+    }
+    index = 1usize + mid.len;
+    while index < total_len {
+        out[index] = 0 as byte;
+        index = index + 1usize;
+    }
+    return total_len;
+}
+
 export fn rtp_packetize_encoded_frame(
     sender: &UyaDirectSender,
     frame: &EncodedFrame,
@@ -209,10 +292,40 @@ export fn rtp_packetize_encoded_frame(
     header.ssrc = stamp.ssrc;
     header.marker = marker;
 
+    var extension_data: [byte: DIRECT_SENDER_RTP_EXTENSION_MAX_BYTES] = [];
+    if frame.media_kind == MEDIA_KIND_AUDIO && sender.config.audio_mid_extension_id != 0u8 {
+        const extension_len: usize = try direct_sender_write_mid_extension(
+            sender.config.audio_mid_extension_id,
+            sender.config.audio_mid,
+            extension_data[0:DIRECT_SENDER_RTP_EXTENSION_MAX_BYTES],
+        );
+        header.extension = true;
+        header.extension_profile = DIRECT_SENDER_RTP_ONE_BYTE_EXTENSION_PROFILE;
+        header.extension_data = extension_data[0:extension_len];
+    }
+    if frame.media_kind == MEDIA_KIND_VIDEO && sender.config.video_mid_extension_id != 0u8 {
+        const extension_len: usize = try direct_sender_write_mid_extension(
+            sender.config.video_mid_extension_id,
+            sender.config.video_mid,
+            extension_data[0:DIRECT_SENDER_RTP_EXTENSION_MAX_BYTES],
+        );
+        header.extension = true;
+        header.extension_profile = DIRECT_SENDER_RTP_ONE_BYTE_EXTENSION_PROFILE;
+        header.extension_data = extension_data[0:extension_len];
+    }
+
     const written: usize = try rtp_packet_write(&header, rtp_payload[0:payload_len], out_packet);
     sender.diagnostics.ffmpeg_encoded_frames = sender.diagnostics.ffmpeg_encoded_frames + 1u64;
     sender.diagnostics.rtp_packets = sender.diagnostics.rtp_packets + 1u64;
     sender.diagnostics.rtp_payload_bytes = sender.diagnostics.rtp_payload_bytes + (payload_len as u64);
+    if frame.media_kind == MEDIA_KIND_AUDIO {
+        sender.diagnostics.audio_rtp_packets = sender.diagnostics.audio_rtp_packets + 1u64;
+        sender.diagnostics.audio_rtp_payload_bytes = sender.diagnostics.audio_rtp_payload_bytes + (payload_len as u64);
+    }
+    if frame.media_kind == MEDIA_KIND_VIDEO {
+        sender.diagnostics.video_rtp_packets = sender.diagnostics.video_rtp_packets + 1u64;
+        sender.diagnostics.video_rtp_payload_bytes = sender.diagnostics.video_rtp_payload_bytes + (payload_len as u64);
+    }
 
     return DirectSenderPacket{
         media_kind: frame.media_kind,
@@ -225,4 +338,116 @@ export fn rtp_packetize_encoded_frame(
         rtp_len: written,
         rtp_payload_len: payload_len,
     };
+}
+
+export fn direct_sender_protect_rtp_packet(
+    sender: &UyaDirectSender,
+    srtp_ctx: &SrtpContext,
+    rtp_packet: &[byte],
+    srtp_packet: &[byte],
+) !usize {
+    if sender == null || srtp_ctx == null || rtp_packet.len == 0usize {
+        return error.DirectSenderInvalidConfig;
+    }
+    const written: usize = try srtp_protect(srtp_ctx, rtp_packet, srtp_packet);
+    sender.diagnostics.srtp_packets = sender.diagnostics.srtp_packets + 1u64;
+    return written;
+}
+
+export fn direct_sender_write_sender_report(
+    sender: &UyaDirectSender,
+    media_kind: u8,
+    ntp_msw: u32,
+    ntp_lsw: u32,
+    out_packet: &[byte],
+) !usize {
+    if sender == null || out_packet.len == 0usize {
+        return error.DirectSenderInvalidConfig;
+    }
+
+    var report: RtcpSenderReport = rtcp_sender_report_make();
+    if media_kind == MEDIA_KIND_AUDIO {
+        report.sender_ssrc = sender.config.audio_ssrc;
+        report.rtp_timestamp = sender.audio_sender.next_timestamp;
+        report.packet_count = sender.diagnostics.audio_rtp_packets as u32;
+        report.octet_count = sender.diagnostics.audio_rtp_payload_bytes as u32;
+    } else if media_kind == MEDIA_KIND_VIDEO {
+        report.sender_ssrc = sender.config.video_ssrc;
+        report.rtp_timestamp = sender.video_sender.next_timestamp;
+        report.packet_count = sender.diagnostics.video_rtp_packets as u32;
+        report.octet_count = sender.diagnostics.video_rtp_payload_bytes as u32;
+    } else {
+        return error.DirectSenderUnsupportedCodec;
+    }
+    report.ntp_msw = ntp_msw;
+    report.ntp_lsw = ntp_lsw;
+    report.report_count = 0u8;
+
+    const written: usize = try rtcp_sender_report_write(&report, out_packet);
+    sender.diagnostics.rtcp_sender_reports_sent = sender.diagnostics.rtcp_sender_reports_sent + 1u64;
+    return written;
+}
+
+export fn direct_sender_protect_srtcp_packet(
+    sender: &UyaDirectSender,
+    srtcp_ctx: &SrtcpContext,
+    rtcp_packet: &[byte],
+    srtcp_packet: &[byte],
+) !usize {
+    if sender == null || srtcp_ctx == null || rtcp_packet.len == 0usize {
+        return error.DirectSenderInvalidConfig;
+    }
+    const written: usize = try srtcp_protect(srtcp_ctx, rtcp_packet, srtcp_packet);
+    sender.diagnostics.srtcp_packets = sender.diagnostics.srtcp_packets + 1u64;
+    return written;
+}
+
+export fn direct_sender_record_srtcp_packet_received(sender: &UyaDirectSender) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    sender.diagnostics.srtcp_packets_received = sender.diagnostics.srtcp_packets_received + 1u64;
+}
+
+export fn direct_sender_record_srtcp_unprotect_error(sender: &UyaDirectSender) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    sender.diagnostics.srtcp_unprotect_errors = sender.diagnostics.srtcp_unprotect_errors + 1u64;
+}
+
+export fn direct_sender_record_rtcp_feedback(
+    sender: &UyaDirectSender,
+    media_kind: u8,
+    media_ssrc: u32,
+    packet_type: u8,
+    feedback_format: u8,
+) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+
+    sender.diagnostics.rtcp_packets_received = sender.diagnostics.rtcp_packets_received + 1u64;
+    sender.diagnostics.rtcp_last_packet_type = packet_type as u64;
+    sender.diagnostics.rtcp_last_feedback_format = feedback_format as u64;
+    sender.diagnostics.rtcp_last_media_kind = media_kind as u64;
+    sender.diagnostics.rtcp_last_media_ssrc = media_ssrc as u64;
+
+    if packet_type == RTCP_PACKET_TYPE_RR {
+        sender.diagnostics.rtcp_receiver_reports_received = sender.diagnostics.rtcp_receiver_reports_received + 1u64;
+    } else if packet_type == RTCP_PACKET_TYPE_RTPFB || packet_type == RTCP_PACKET_TYPE_PSFB {
+        sender.diagnostics.rtcp_feedback_packets_received = sender.diagnostics.rtcp_feedback_packets_received + 1u64;
+        if packet_type == RTCP_PACKET_TYPE_RTPFB && feedback_format == RTCP_RTPFB_FMT_NACK {
+            sender.diagnostics.rtcp_nack_packets_received = sender.diagnostics.rtcp_nack_packets_received + 1u64;
+        }
+        if packet_type == RTCP_PACKET_TYPE_PSFB && feedback_format == RTCP_PSFB_FMT_PLI {
+            sender.diagnostics.rtcp_pli_packets_received = sender.diagnostics.rtcp_pli_packets_received + 1u64;
+        }
+        if packet_type == RTCP_PACKET_TYPE_PSFB && feedback_format == RTCP_PSFB_FMT_FIR {
+            sender.diagnostics.rtcp_fir_packets_received = sender.diagnostics.rtcp_fir_packets_received + 1u64;
+        }
+        if packet_type == RTCP_PACKET_TYPE_RTPFB && feedback_format == RTCP_RTPFB_FMT_TRANSPORT_CC {
+            sender.diagnostics.rtcp_transport_cc_packets_received = sender.diagnostics.rtcp_transport_cc_packets_received + 1u64;
+        }
+    }
 }

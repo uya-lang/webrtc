@@ -1,0 +1,486 @@
+// webrtc.media.direct_session - pure Uya Chrome offer parsing and answer writing for direct sender
+// Module: src/webrtc/media/direct_session.uya -> use webrtc.media.direct_session;
+
+export error DirectSessionInvalidOffer;
+export error DirectSessionUnsupportedCodec;
+export error DirectSessionMissingIce;
+export error DirectSessionAnswerTooSmall;
+
+export const DIRECT_SESSION_DEFAULT_AUDIO_SSRC: u32 = 0x41554431u32;
+export const DIRECT_SESSION_DEFAULT_VIDEO_SSRC: u32 = 0x56494431u32;
+
+export struct DirectSessionCandidate {
+    present: bool = false,
+    host: &[byte] = [],
+    port: u16 = 0u16,
+}
+
+export struct DirectSessionMedia {
+    present: bool = false,
+    mid: &[byte] = [],
+    mid_extension_id: u8 = 0u8,
+    ice_ufrag: &[byte] = [],
+    ice_pwd: &[byte] = [],
+    payload_type: u8 = 0u8,
+    remote_candidate: DirectSessionCandidate = DirectSessionCandidate{},
+}
+
+export struct DirectSessionOffer {
+    audio: DirectSessionMedia = DirectSessionMedia{},
+    video: DirectSessionMedia = DirectSessionMedia{},
+}
+
+struct DirectSessionLine {
+    kind: byte = 0 as byte,
+    value: &[byte] = [],
+}
+
+struct DirectSessionLineScanner {
+    bytes: &[byte] = [],
+    cursor: usize = 0usize,
+    current: DirectSessionLine = DirectSessionLine{},
+}
+
+fn direct_session_trim_cr(value: &[byte]) &[byte] {
+    if value.len > 0usize && value[value.len - 1usize] == (13 as byte) {
+        return value[0:value.len - 1usize];
+    }
+    return value;
+}
+
+fn direct_session_line_scanner_next(scanner: &DirectSessionLineScanner) !bool {
+    while scanner.cursor < scanner.bytes.len {
+        const start: usize = scanner.cursor;
+        var end: usize = start;
+        while end < scanner.bytes.len && scanner.bytes[end] != (10 as byte) {
+            end = end + 1usize;
+        }
+
+        const raw_line: &[byte] = direct_session_trim_cr(scanner.bytes[start:end - start]);
+        if end < scanner.bytes.len {
+            scanner.cursor = end + 1usize;
+        } else {
+            scanner.cursor = end;
+        }
+
+        if raw_line.len == 0usize {
+            continue;
+        }
+        if raw_line.len < 2usize || raw_line[1] != ('=' as byte) {
+            return error.DirectSessionInvalidOffer;
+        }
+
+        scanner.current = DirectSessionLine{
+            kind: raw_line[0],
+            value: raw_line[2:raw_line.len - 2usize],
+        };
+        return true;
+    }
+
+    return false;
+}
+
+fn direct_session_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn direct_session_ascii_lower(value: byte) byte {
+    if value >= ('A' as byte) && value <= ('Z' as byte) {
+        return value + (32 as byte);
+    }
+    return value;
+}
+
+fn direct_session_bytes_equal_case_insensitive(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if direct_session_ascii_lower(lhs[index]) != direct_session_ascii_lower(rhs[index]) {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn direct_session_starts_with(value: &[byte], prefix: &[byte]) bool {
+    if value.len < prefix.len {
+        return false;
+    }
+    return direct_session_bytes_equal(value[0:prefix.len], prefix);
+}
+
+fn direct_session_parse_decimal_u16(value: &[byte]) !u16 {
+    if value.len == 0usize {
+        return error.DirectSessionInvalidOffer;
+    }
+    var out: u32 = 0u32;
+    var index: usize = 0usize;
+    while index < value.len {
+        const ch: byte = value[index];
+        if ch < ('0' as byte) || ch > ('9' as byte) {
+            return error.DirectSessionInvalidOffer;
+        }
+        out = (out * 10u32) + ((ch - ('0' as byte)) as u32);
+        if out > 65535u32 {
+            return error.DirectSessionInvalidOffer;
+        }
+        index = index + 1usize;
+    }
+    return out as u16;
+}
+
+fn direct_session_parse_decimal_u8(value: &[byte]) !u8 {
+    const parsed: u16 = try direct_session_parse_decimal_u16(value);
+    if parsed > 255u16 {
+        return error.DirectSessionInvalidOffer;
+    }
+    return parsed as u8;
+}
+
+fn direct_session_parse_extmap_id(value: &[byte]) !u8 {
+    if value.len == 0usize {
+        return error.DirectSessionInvalidOffer;
+    }
+    var out: u16 = 0u16;
+    var index: usize = 0usize;
+    while index < value.len && value[index] != ('/' as byte) {
+        const ch: byte = value[index];
+        if ch < ('0' as byte) || ch > ('9' as byte) {
+            return error.DirectSessionInvalidOffer;
+        }
+        out = (out * 10u16) + ((ch - ('0' as byte)) as u16);
+        if out > 14u16 {
+            return error.DirectSessionInvalidOffer;
+        }
+        index = index + 1usize;
+    }
+    if out == 0u16 {
+        return error.DirectSessionInvalidOffer;
+    }
+    return out as u8;
+}
+
+struct DirectSessionTokenCursor {
+    bytes: &[byte] = [],
+    cursor: usize = 0usize,
+}
+
+fn direct_session_token_cursor_next(cursor: &DirectSessionTokenCursor) !&[byte] {
+    while cursor.cursor < cursor.bytes.len && cursor.bytes[cursor.cursor] == (' ' as byte) {
+        cursor.cursor = cursor.cursor + 1usize;
+    }
+    if cursor.cursor >= cursor.bytes.len {
+        return error.DirectSessionInvalidOffer;
+    }
+    const start: usize = cursor.cursor;
+    while cursor.cursor < cursor.bytes.len && cursor.bytes[cursor.cursor] != (' ' as byte) {
+        cursor.cursor = cursor.cursor + 1usize;
+    }
+    return cursor.bytes[start:cursor.cursor - start];
+}
+
+fn direct_session_media_for_kind(offer: &DirectSessionOffer, kind: &[byte]) &DirectSessionMedia {
+    if direct_session_bytes_equal(kind, "audio" as &[byte]) {
+        return &offer.audio;
+    }
+    if direct_session_bytes_equal(kind, "video" as &[byte]) {
+        return &offer.video;
+    }
+    return null;
+}
+
+fn direct_session_parse_media_line(media: &DirectSessionMedia, value: &[byte]) !void {
+    var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
+    const kind: &[byte] = try direct_session_token_cursor_next(&cursor);
+    _ = kind;
+    _ = try direct_session_token_cursor_next(&cursor);
+    _ = try direct_session_token_cursor_next(&cursor);
+    media.present = true;
+}
+
+fn direct_session_parse_candidate(media: &DirectSessionMedia, value: &[byte]) !void {
+    if media == null || media.remote_candidate.present {
+        return;
+    }
+    var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
+    _ = try direct_session_token_cursor_next(&cursor);
+    const component: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const transport: &[byte] = try direct_session_token_cursor_next(&cursor);
+    _ = try direct_session_token_cursor_next(&cursor);
+    const host: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const port_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const typ: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const candidate_type: &[byte] = try direct_session_token_cursor_next(&cursor);
+
+    if !direct_session_bytes_equal(component, "1" as &[byte]) {
+        return;
+    }
+    if !direct_session_bytes_equal_case_insensitive(transport, "udp" as &[byte]) {
+        return;
+    }
+    if !direct_session_bytes_equal(typ, "typ" as &[byte]) {
+        return error.DirectSessionInvalidOffer;
+    }
+    if !direct_session_bytes_equal(candidate_type, "host" as &[byte]) {
+        return;
+    }
+    media.remote_candidate.present = true;
+    media.remote_candidate.host = host;
+    media.remote_candidate.port = try direct_session_parse_decimal_u16(port_token);
+}
+
+fn direct_session_parse_rtpmap(media: &DirectSessionMedia, value: &[byte]) !void {
+    if media == null || media.payload_type != 0u8 {
+        return;
+    }
+    var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
+    const payload_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const codec_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+
+    if media.present && direct_session_bytes_equal_case_insensitive(codec_token, "opus/48000/2" as &[byte]) {
+        media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+        return;
+    }
+    if media.present && direct_session_bytes_equal_case_insensitive(codec_token, "vp8/90000" as &[byte]) {
+        media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+    }
+}
+
+fn direct_session_parse_extmap(media: &DirectSessionMedia, value: &[byte]) !void {
+    if media == null {
+        return;
+    }
+    var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
+    const id_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const uri_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+    if direct_session_bytes_equal(uri_token, "urn:ietf:params:rtp-hdrext:sdes:mid" as &[byte]) {
+        media.mid_extension_id = try direct_session_parse_extmap_id(id_token);
+    }
+}
+
+fn direct_session_parse_attribute(media: &DirectSessionMedia, value: &[byte]) !void {
+    if media == null {
+        return;
+    }
+    if direct_session_starts_with(value, "mid:" as &[byte]) {
+        media.mid = value[4:value.len - 4];
+        return;
+    }
+    if direct_session_starts_with(value, "ice-ufrag:" as &[byte]) {
+        media.ice_ufrag = value[10:value.len - 10];
+        return;
+    }
+    if direct_session_starts_with(value, "ice-pwd:" as &[byte]) {
+        media.ice_pwd = value[8:value.len - 8];
+        return;
+    }
+    if direct_session_starts_with(value, "candidate:" as &[byte]) {
+        try direct_session_parse_candidate(media, value[10:value.len - 10]);
+        return;
+    }
+    if direct_session_starts_with(value, "rtpmap:" as &[byte]) {
+        try direct_session_parse_rtpmap(media, value[7:value.len - 7]);
+        return;
+    }
+    if direct_session_starts_with(value, "extmap:" as &[byte]) {
+        try direct_session_parse_extmap(media, value[7:value.len - 7]);
+    }
+}
+
+export fn direct_session_parse_chrome_offer_sdp(sdp: &[byte]) !DirectSessionOffer {
+    var offer: DirectSessionOffer = DirectSessionOffer{};
+    var scanner: DirectSessionLineScanner = DirectSessionLineScanner{ bytes: sdp };
+    var current_media: &DirectSessionMedia = null;
+
+    while try direct_session_line_scanner_next(&scanner) {
+        if scanner.current.kind == ('m' as byte) {
+            var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: scanner.current.value };
+            const kind: &[byte] = try direct_session_token_cursor_next(&cursor);
+            current_media = direct_session_media_for_kind(&offer, kind);
+            if current_media != null {
+                try direct_session_parse_media_line(current_media, scanner.current.value);
+            }
+            continue;
+        }
+        if scanner.current.kind == ('a' as byte) {
+            try direct_session_parse_attribute(current_media, scanner.current.value);
+        }
+    }
+
+    if !offer.audio.present || !offer.video.present {
+        return error.DirectSessionInvalidOffer;
+    }
+    if offer.audio.payload_type == 0u8 || offer.video.payload_type == 0u8 {
+        return error.DirectSessionUnsupportedCodec;
+    }
+    if offer.audio.ice_ufrag.len == 0usize || offer.audio.ice_pwd.len == 0usize {
+        return error.DirectSessionMissingIce;
+    }
+    if offer.video.ice_ufrag.len == 0usize {
+        offer.video.ice_ufrag = offer.audio.ice_ufrag;
+    }
+    if offer.video.ice_pwd.len == 0usize {
+        offer.video.ice_pwd = offer.audio.ice_pwd;
+    }
+    if offer.audio.mid.len == 0usize {
+        offer.audio.mid = "audio" as &[byte];
+    }
+    if offer.video.mid.len == 0usize {
+        offer.video.mid = "video" as &[byte];
+    }
+    return offer;
+}
+
+fn direct_session_answer_append(out: &[byte], cursor: &usize, value: &[byte]) !void {
+    if *cursor + value.len > out.len {
+        return error.DirectSessionAnswerTooSmall;
+    }
+    var index: usize = 0usize;
+    while index < value.len {
+        out[*cursor + index] = value[index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + value.len;
+}
+
+fn direct_session_answer_append_byte(out: &[byte], cursor: &usize, value: byte) !void {
+    if *cursor + 1usize > out.len {
+        return error.DirectSessionAnswerTooSmall;
+    }
+    out[*cursor] = value;
+    *cursor = *cursor + 1usize;
+}
+
+fn direct_session_answer_append_u32(out: &[byte], cursor: &usize, value: u32) !void {
+    var digits: [byte: 16] = [];
+    var count: usize = 0usize;
+    var remaining: u32 = value;
+    if remaining == 0u32 {
+        try direct_session_answer_append_byte(out, cursor, '0' as byte);
+        return;
+    }
+    while remaining > 0u32 {
+        digits[count] = ('0' as byte) + ((remaining % 10u32) as byte);
+        count = count + 1usize;
+        remaining = remaining / 10u32;
+    }
+    while count > 0usize {
+        count = count - 1usize;
+        try direct_session_answer_append_byte(out, cursor, digits[count]);
+    }
+}
+
+fn direct_session_answer_append_mid_extmap(out: &[byte], cursor: &usize, media: &DirectSessionMedia) !void {
+    if media == null || media.mid_extension_id == 0u8 {
+        return;
+    }
+    try direct_session_answer_append(out, cursor, "a=extmap:" as &[byte]);
+    try direct_session_answer_append_u32(out, cursor, media.mid_extension_id as u32);
+    try direct_session_answer_append_line(out, cursor, " urn:ietf:params:rtp-hdrext:sdes:mid" as &[byte]);
+}
+
+fn direct_session_answer_append_line(out: &[byte], cursor: &usize, value: &[byte]) !void {
+    try direct_session_answer_append(out, cursor, value);
+    try direct_session_answer_append(out, cursor, "\r\n" as &[byte]);
+}
+
+fn direct_session_answer_append_candidate(out: &[byte], cursor: &usize, local_host: &[byte], local_port: u16) !void {
+    try direct_session_answer_append(out, cursor, "a=candidate:1 1 UDP 2130706431 " as &[byte]);
+    try direct_session_answer_append(out, cursor, local_host);
+    try direct_session_answer_append_byte(out, cursor, ' ' as byte);
+    try direct_session_answer_append_u32(out, cursor, local_port as u32);
+    try direct_session_answer_append_line(out, cursor, " typ host" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, "a=end-of-candidates" as &[byte]);
+}
+
+fn direct_session_answer_append_common_media(
+    out: &[byte],
+    cursor: &usize,
+    media: &DirectSessionMedia,
+    local_ufrag: &[byte],
+    local_pwd: &[byte],
+    local_fingerprint: &[byte],
+) !void {
+    try direct_session_answer_append(out, cursor, "a=mid:" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, media.mid);
+    try direct_session_answer_append_line(out, cursor, "a=sendonly" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, "a=rtcp-mux" as &[byte]);
+    try direct_session_answer_append_mid_extmap(out, cursor, media);
+    try direct_session_answer_append(out, cursor, "a=ice-ufrag:" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, local_ufrag);
+    try direct_session_answer_append(out, cursor, "a=ice-pwd:" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, local_pwd);
+    try direct_session_answer_append(out, cursor, "a=fingerprint:sha-256 " as &[byte]);
+    try direct_session_answer_append_line(out, cursor, local_fingerprint);
+    try direct_session_answer_append_line(out, cursor, "a=setup:passive" as &[byte]);
+}
+
+export fn direct_session_write_passive_answer(
+    offer: &DirectSessionOffer,
+    local_host: &[byte],
+    local_port: u16,
+    local_ufrag: &[byte],
+    local_pwd: &[byte],
+    local_fingerprint: &[byte],
+    out: &[byte],
+) !usize {
+    if offer == null || local_host.len == 0usize || local_port == 0u16 || local_ufrag.len == 0usize || local_pwd.len == 0usize || local_fingerprint.len == 0usize {
+        return error.DirectSessionInvalidOffer;
+    }
+
+    var cursor: usize = 0usize;
+    try direct_session_answer_append_line(out, &cursor, "v=0" as &[byte]);
+    try direct_session_answer_append_line(out, &cursor, "o=- 721633 2 IN IP4 127.0.0.1" as &[byte]);
+    try direct_session_answer_append_line(out, &cursor, "s=Uya FFmpeg Direct Sender" as &[byte]);
+    try direct_session_answer_append_line(out, &cursor, "t=0 0" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "a=group:BUNDLE " as &[byte]);
+    try direct_session_answer_append(out, &cursor, offer.audio.mid);
+    try direct_session_answer_append_byte(out, &cursor, ' ' as byte);
+    try direct_session_answer_append_line(out, &cursor, offer.video.mid);
+    try direct_session_answer_append_line(out, &cursor, "a=ice-lite" as &[byte]);
+
+    try direct_session_answer_append(out, &cursor, "m=audio 9 UDP/TLS/RTP/SAVPF " as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
+    try direct_session_answer_append(out, &cursor, "\r\nc=IN IP4 0.0.0.0\r\n" as &[byte]);
+    try direct_session_answer_append_common_media(out, &cursor, &offer.audio, local_ufrag, local_pwd, local_fingerprint);
+    try direct_session_answer_append(out, &cursor, "a=rtpmap:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
+    try direct_session_answer_append_line(out, &cursor, " opus/48000/2" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "a=fmtp:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
+    try direct_session_answer_append_line(out, &cursor, " minptime=10;useinbandfec=1" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "a=ssrc:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, DIRECT_SESSION_DEFAULT_AUDIO_SSRC);
+    try direct_session_answer_append_line(out, &cursor, " cname:uya-direct" as &[byte]);
+    try direct_session_answer_append_candidate(out, &cursor, local_host, local_port);
+
+    try direct_session_answer_append(out, &cursor, "m=video 9 UDP/TLS/RTP/SAVPF " as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
+    try direct_session_answer_append(out, &cursor, "\r\nc=IN IP4 0.0.0.0\r\n" as &[byte]);
+    try direct_session_answer_append_common_media(out, &cursor, &offer.video, local_ufrag, local_pwd, local_fingerprint);
+    try direct_session_answer_append(out, &cursor, "a=rtpmap:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
+    try direct_session_answer_append_line(out, &cursor, " VP8/90000" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "a=rtcp-fb:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
+    try direct_session_answer_append_line(out, &cursor, " nack pli" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "a=ssrc:" as &[byte]);
+    try direct_session_answer_append_u32(out, &cursor, DIRECT_SESSION_DEFAULT_VIDEO_SSRC);
+    try direct_session_answer_append_line(out, &cursor, " cname:uya-direct" as &[byte]);
+    try direct_session_answer_append_candidate(out, &cursor, local_host, local_port);
+
+    return cursor;
+}

@@ -1,0 +1,427 @@
+use libc.printf;
+use webrtc.crypto.p256;
+use webrtc.dtls.handshake;
+use webrtc.dtls.identity;
+use webrtc.dtls.model;
+use webrtc.dtls.record;
+use webrtc.dtls.server;
+use webrtc.srtp.dtls_keys;
+use webrtc.srtp.model;
+
+fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn all_zero(bytes: &[byte]) bool {
+    var index: usize = 0usize;
+    while index < bytes.len {
+        if bytes[index] != 0 as byte {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn record_total_len(packet: &[byte], offset: usize) !usize {
+    if offset + DTLS_RECORD_HEADER_BYTES > packet.len {
+        return error.PacketTooShort;
+    }
+    const payload_len: usize = ((packet[offset + 11usize] as usize) << 8i32) | (packet[offset + 12usize] as usize);
+    if offset + DTLS_RECORD_HEADER_BYTES + payload_len > packet.len {
+        return error.InvalidPacket;
+    }
+    const total_len: usize = DTLS_RECORD_HEADER_BYTES + payload_len;
+    return total_len;
+}
+
+fn check_dtls_server_first_flight() i32 {
+    var client_hello_body: [byte: 53] = [
+        0xfe as byte, 0xfd as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x00 as byte, 0x02 as byte, 0xc0 as byte, 0x2b as byte,
+        0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x09 as byte,
+        0x00 as byte, 0x0e as byte, 0x00 as byte, 0x05 as byte,
+        0x00 as byte, 0x02 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+    ];
+    const client_hello: !DtlsClientHello = dtls_client_hello_parse(client_hello_body[0:53]);
+    if client_hello.error_id != 0 {
+        return 10;
+    }
+
+    var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var ecdhe_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte,
+        0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte,
+        0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte,
+        0x0e as byte, 0x0f as byte, 0x10 as byte, 0x11 as byte,
+        0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte,
+        0x16 as byte, 0x17 as byte, 0x18 as byte, 0x19 as byte,
+        0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte,
+        0x1e as byte, 0x1f as byte, 0x20 as byte, 0x21 as byte,
+    ];
+    var signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte,
+        0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte,
+        0x0f as byte, 0x10 as byte, 0x11 as byte, 0x12 as byte,
+        0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte,
+        0x17 as byte, 0x18 as byte, 0x19 as byte, 0x1a as byte,
+        0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte,
+        0x1f as byte, 0x20 as byte, 0x21 as byte, 0x22 as byte,
+    ];
+    var config: DtlsServerFirstFlightConfig = DtlsServerFirstFlightConfig{
+        server_random: server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        ecdhe_private_key: ecdhe_private[0:CRYPTO_P256_FIELD_BYTES],
+        signature_nonce: signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+    };
+    var flight_bytes: [byte: 2048] = [];
+    const flight: !DtlsServerFirstFlight = dtls_server_write_first_flight(&client_hello.value, &config, flight_bytes[0:2048]);
+    if flight.error_id != 0 {
+        return 11;
+    }
+    if flight.value.record_count != 4usize
+        || flight.value.selected_cipher_suite != DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        || flight.value.selected_srtp_profile != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 12;
+    }
+
+    var offset: usize = 0usize;
+    const record1_len: !usize = record_total_len(flight_bytes[0:flight.value.bytes_written], offset);
+    if record1_len.error_id != 0 {
+        return 13;
+    }
+    const record1: !DtlsRecord = dtls_record_parse(flight_bytes[offset:record1_len.value]);
+    if record1.error_id != 0 {
+        return 14;
+    }
+    const fragment1: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(record1.value.payload);
+    if fragment1.error_id != 0
+        || fragment1.value.handshake_type != DTLS_HANDSHAKE_TYPE_SERVER_HELLO
+        || fragment1.value.message_sequence != 1u16 {
+        return 15;
+    }
+    const server_hello: !DtlsServerHello = dtls_server_hello_parse(fragment1.value.fragment);
+    if server_hello.error_id != 0
+        || server_hello.value.cipher_suite != DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        || server_hello.value.extensions.len != 9usize {
+        return 16;
+    }
+    const server_extensions: &[byte] = server_hello.value.extensions;
+    const selected_srtp_body: &[byte] = server_extensions[4usize:5usize];
+    const selected_srtp: !DtlsUseSrtpExtension = dtls_use_srtp_extension_parse(selected_srtp_body);
+    if selected_srtp.error_id != 0
+        || selected_srtp.value.profile_count != 1usize
+        || selected_srtp.value.profiles[0] != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 17;
+    }
+    offset = offset + record1_len.value;
+
+    const record2_len: !usize = record_total_len(flight_bytes[0:flight.value.bytes_written], offset);
+    if record2_len.error_id != 0 {
+        return 18;
+    }
+    const record2: !DtlsRecord = dtls_record_parse(flight_bytes[offset:record2_len.value]);
+    if record2.error_id != 0 {
+        return 19;
+    }
+    const fragment2: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(record2.value.payload);
+    if fragment2.error_id != 0 || fragment2.value.handshake_type != DTLS_HANDSHAKE_TYPE_CERTIFICATE {
+        return 20;
+    }
+    const certificate: !DtlsCertificateMessage = dtls_certificate_parse(fragment2.value.fragment);
+    if certificate.error_id != 0 || certificate.value.certificate_count != 1usize {
+        return 21;
+    }
+    if dtls_certificate_fingerprint_verify(
+        certificate.value.certificates[0].der,
+        "sha-256" as &[byte],
+        dtls_identity_fingerprint_sha256_text(),
+    ).error_id != 0 {
+        return 22;
+    }
+    offset = offset + record2_len.value;
+
+    const record3_len: !usize = record_total_len(flight_bytes[0:flight.value.bytes_written], offset);
+    if record3_len.error_id != 0 {
+        return 23;
+    }
+    const record3: !DtlsRecord = dtls_record_parse(flight_bytes[offset:record3_len.value]);
+    if record3.error_id != 0 {
+        return 24;
+    }
+    const fragment3: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(record3.value.payload);
+    if fragment3.error_id != 0 || fragment3.value.handshake_type != DTLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE {
+        return 25;
+    }
+    const key_exchange: !DtlsServerKeyExchange = dtls_server_key_exchange_parse(fragment3.value.fragment);
+    if key_exchange.error_id != 0
+        || key_exchange.value.public_key.len != CRYPTO_P256_PUBLIC_KEY_BYTES
+        || key_exchange.value.signature_hash_algorithm != DTLS_HASH_ALGORITHM_SHA256
+        || key_exchange.value.signature_algorithm != DTLS_SIGNATURE_ALGORITHM_ECDSA
+        || key_exchange.value.signature.len < 64usize {
+        return 26;
+    }
+    offset = offset + record3_len.value;
+
+    const record4_len: !usize = record_total_len(flight_bytes[0:flight.value.bytes_written], offset);
+    if record4_len.error_id != 0 {
+        return 27;
+    }
+    const record4: !DtlsRecord = dtls_record_parse(flight_bytes[offset:record4_len.value]);
+    if record4.error_id != 0 {
+        return 28;
+    }
+    const fragment4: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(record4.value.payload);
+    if fragment4.error_id != 0
+        || fragment4.value.handshake_type != DTLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE
+        || fragment4.value.message_sequence != 4u16
+        || fragment4.value.fragment.len != 0usize {
+        return 29;
+    }
+    offset = offset + record4_len.value;
+    if offset != flight.value.bytes_written {
+        return 30;
+    }
+
+    return 0;
+}
+
+fn check_dtls_server_key_material() i32 {
+    var client_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte,
+        0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte,
+        0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte,
+    ];
+    var server_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte,
+        0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte,
+        0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte,
+        0x0e as byte, 0x0f as byte, 0x10 as byte, 0x11 as byte,
+        0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte,
+        0x16 as byte, 0x17 as byte, 0x18 as byte, 0x19 as byte,
+        0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte,
+        0x1e as byte, 0x1f as byte, 0x20 as byte, 0x21 as byte,
+    ];
+    var client_public: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
+    if crypto_p256_public_from_private(
+        client_private[0:CRYPTO_P256_FIELD_BYTES],
+        client_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+    ).error_id != 0 {
+        return 40;
+    }
+
+    var client_key_exchange: DtlsClientKeyExchange = DtlsClientKeyExchange{
+        public_key: client_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+    };
+    var client_key_exchange_body: [byte: 80] = [];
+    const client_key_exchange_len: !usize = dtls_client_key_exchange_write(&client_key_exchange, client_key_exchange_body[0:80]);
+    if client_key_exchange_len.error_id != 0 {
+        return 41;
+    }
+
+    var client_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+    ];
+    var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+
+    var material: DtlsServerKeyMaterial = dtls_server_key_material_make();
+    if dtls_server_derive_srtp_key_material(
+        client_key_exchange_body[0:client_key_exchange_len.value],
+        server_private[0:CRYPTO_P256_FIELD_BYTES],
+        client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80,
+        &material,
+    ).error_id != 0 {
+        return 42;
+    }
+    if material.selected_srtp_profile != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 43;
+    }
+    if all_zero(material.master_secret[0:DTLS_MASTER_SECRET_BYTES])
+        || all_zero(material.srtp_key_material[0:DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES]) {
+        return 44;
+    }
+
+    var srtp_send: SrtpContext = srtp_context_make();
+    var srtp_recv: SrtpContext = srtp_context_make();
+    var srtcp_send: SrtcpContext = srtcp_context_make();
+    var srtcp_recv: SrtcpContext = srtcp_context_make();
+    if srtp_dtls_exporter_init_contexts(
+        material.selected_srtp_profile,
+        false,
+        0x11223344u32,
+        0x55667788u32,
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &srtp_send,
+        &srtp_recv,
+        &srtcp_send,
+        &srtcp_recv,
+    ).error_id != 0 {
+        return 45;
+    }
+    const exporter_material: &[byte] = material.srtp_key_material[0:DTLS_SERVER_SRTP_KEY_MATERIAL_BYTES];
+    const server_key: &[byte] = exporter_material[SRTP_KEY_BYTES:SRTP_KEY_BYTES];
+    const client_key: &[byte] = exporter_material[0usize:SRTP_KEY_BYTES];
+    if !bytes_equal(srtp_send.master_key[0:SRTP_KEY_BYTES], server_key) {
+        return 46;
+    }
+    if !bytes_equal(srtp_recv.master_key[0:SRTP_KEY_BYTES], client_key) {
+        return 47;
+    }
+    if all_zero(srtp_send.cipher_key[0:SRTP_KEY_BYTES]) || all_zero(srtp_recv.cipher_key[0:SRTP_KEY_BYTES]) {
+        return 48;
+    }
+
+    var record_keys: DtlsServerRecordKeys = dtls_server_record_keys_make();
+    if dtls_server_record_keys_from_master(
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &record_keys,
+    ).error_id != 0 {
+        return 49;
+    }
+    if all_zero(record_keys.client_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES])
+        || all_zero(record_keys.server_write_key[0:DTLS_SERVER_AES_GCM_KEY_BYTES])
+        || all_zero(record_keys.client_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES])
+        || all_zero(record_keys.server_write_iv[0:DTLS_SERVER_AES_GCM_FIXED_IV_BYTES]) {
+        return 50;
+    }
+
+    var transcript_hash: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    var index: usize = 0usize;
+    while index < DTLS_FINISHED_TRANSCRIPT_HASH_BYTES {
+        transcript_hash[index] = (index + 1usize) as byte;
+        index = index + 1usize;
+    }
+    var verify_data: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    if dtls_finished_verify_data_compute(
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+        true,
+        verify_data[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    ).error_id != 0 {
+        return 51;
+    }
+    var finished_payload: [byte: DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    finished_payload[0] = DTLS_HANDSHAKE_TYPE_FINISHED as byte;
+    finished_payload[1] = 0 as byte;
+    finished_payload[2] = 0 as byte;
+    finished_payload[3] = DTLS_FINISHED_VERIFY_DATA_BYTES as byte;
+    finished_payload[4] = 0 as byte;
+    finished_payload[5] = 5 as byte;
+    finished_payload[6] = 0 as byte;
+    finished_payload[7] = 0 as byte;
+    finished_payload[8] = 0 as byte;
+    finished_payload[9] = 0 as byte;
+    finished_payload[10] = 0 as byte;
+    finished_payload[11] = DTLS_FINISHED_VERIFY_DATA_BYTES as byte;
+    index = 0usize;
+    while index < DTLS_FINISHED_VERIFY_DATA_BYTES {
+        finished_payload[DTLS_HANDSHAKE_HEADER_BYTES + index] = verify_data[index];
+        index = index + 1usize;
+    }
+
+    var encrypted_record: [byte: 128] = [];
+    const encrypted_len: !usize = dtls_server_encrypt_aes_gcm_record(
+        &record_keys,
+        false,
+        DTLS_CONTENT_TYPE_HANDSHAKE,
+        1u16,
+        0u64,
+        finished_payload[0:DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES],
+        encrypted_record[0:128],
+    );
+    if encrypted_len.error_id != 0 {
+        return 52;
+    }
+    var decrypted: [byte: 64] = [];
+    const decrypted_record: !DtlsServerDecryptedRecord = dtls_server_decrypt_aes_gcm_record(
+        &record_keys,
+        true,
+        encrypted_record[0:encrypted_len.value],
+        decrypted[0:64],
+    );
+    if decrypted_record.error_id != 0 {
+        return 53;
+    }
+    if decrypted_record.value.content_type != DTLS_CONTENT_TYPE_HANDSHAKE
+        || decrypted_record.value.epoch != 1u16
+        || decrypted_record.value.sequence_number != 0u64
+        || decrypted_record.value.plaintext_len != DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES {
+        return 54;
+    }
+    const decrypted_payload: &[byte] = decrypted[0:decrypted_record.value.plaintext_len];
+    const finished_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(decrypted_payload);
+    if finished_fragment.error_id != 0
+        || finished_fragment.value.handshake_type != DTLS_HANDSHAKE_TYPE_FINISHED
+        || finished_fragment.value.message_sequence != 5u16 {
+        return 55;
+    }
+    const finished_message: !DtlsFinished = dtls_finished_parse(finished_fragment.value.fragment);
+    if finished_message.error_id != 0 {
+        return 56;
+    }
+    if dtls_finished_verify(
+        &finished_message.value,
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+        true,
+    ).error_id != 0 {
+        return 57;
+    }
+    return 0;
+}
+
+fn main() i32 {
+    var result: i32 = check_dtls_server_first_flight();
+    if result != 0 {
+        printf("Uya DTLS server first-flight tests failed: %d\n", result);
+        return 1;
+    }
+    result = check_dtls_server_key_material();
+    if result != 0 {
+        printf("Uya DTLS server key-material tests failed: %d\n", result);
+        return 1;
+    }
+    printf("Uya DTLS server first-flight/key-material/record-crypto tests passed\n");
+    return 0;
+}

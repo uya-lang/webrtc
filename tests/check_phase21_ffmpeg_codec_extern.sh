@@ -50,6 +50,8 @@ test -f tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c
 test -f src/webrtc_ffmpeg_codec_boundary_test_main.uya
 
 rg -Fq "optional FFmpeg libavcodec boundary" src/webrtc/media/ffmpeg_codec.uya
+rg -Fq "@c_import(" src/webrtc/media/ffmpeg_codec.uya
+rg -Fq "tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c" src/webrtc/media/ffmpeg_codec.uya
 rg -Fq "extern fn uya_ffmpeg_codec_encoder_open" src/webrtc/media/ffmpeg_codec.uya
 rg -Fq "extern fn uya_ffmpeg_codec_decoder_open" src/webrtc/media/ffmpeg_codec.uya
 rg -Fq "extern fn uya_ffmpeg_codec_encode_audio" src/webrtc/media/ffmpeg_codec.uya
@@ -73,6 +75,18 @@ rg -Fq "FFmpeg codec extern boundary tests passed" src/webrtc_ffmpeg_codec_bound
 
 if rg -Fq "captureStream" src/webrtc/media/ffmpeg_codec.uya src/webrtc/media/ffmpeg_direct_ingest.uya src/webrtc_ffmpeg_codec_boundary_test_main.uya; then
 	printf '%s\n' "FFmpeg codec boundary must not depend on browser captureStream loopback" >&2
+	exit 1
+fi
+
+non_codec_externs="$(
+	rg -n "@c_import\\(|uya_ffmpeg_codec_" src tests \
+		-g '*.uya' \
+		-g '!src/webrtc/media/ffmpeg_codec.uya' \
+		-g '!tests/fixtures/**' || true
+)"
+if [ -n "$non_codec_externs" ]; then
+	printf '%s\n' "$non_codec_externs" >&2
+	printf '%s\n' "FFmpeg codec extern declarations must live only in src/webrtc/media/ffmpeg_codec.uya" >&2
 	exit 1
 fi
 

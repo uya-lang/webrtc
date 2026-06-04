@@ -5,7 +5,7 @@ use webrtc.errors;
 
 export const SRTP_KEY_BYTES: usize = 16usize;
 export const SRTP_SALT_BYTES: usize = 14usize;
-export const SRTP_AUTH_KEY_BYTES: usize = 94usize;
+export const SRTP_AUTH_KEY_BYTES: usize = 20usize;
 
 export const SRTP_AUTH_TAG_BYTES_80: usize = 10usize;
 export const SRTP_AUTH_TAG_BYTES_32: usize = 4usize;

@@ -1,0 +1,694 @@
+use libc.printf;
+use webrtc.binary;
+use webrtc.crypto.hash;
+use webrtc.crypto.p256;
+use webrtc.dtls.handshake;
+use webrtc.dtls.model;
+use webrtc.dtls.record;
+use webrtc.dtls.server;
+use webrtc.media.model;
+use webrtc.media.direct_runtime;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+use webrtc.srtp.srtcp;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+
+fn test_bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
+    if lhs.len != rhs.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < lhs.len {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn test_all_zero(bytes: &[byte]) bool {
+    var index: usize = 0usize;
+    while index < bytes.len {
+        if bytes[index] != 0 as byte {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn test_init_srtcp_pair(tx: &SrtcpContext, rx: &SrtcpContext, ssrc: u32) i32 {
+    var key: [byte: SRTP_KEY_BYTES] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte,
+        0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte,
+        0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+    ];
+    var salt: [byte: SRTP_SALT_BYTES] = [
+        0xc0 as byte, 0xc1 as byte, 0xc2 as byte, 0xc3 as byte,
+        0xc4 as byte, 0xc5 as byte, 0xc6 as byte, 0xc7 as byte,
+        0xc8 as byte, 0xc9 as byte, 0xca as byte, 0xcb as byte,
+        0xcc as byte, 0xcd as byte,
+    ];
+    if srtcp_context_init(tx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 120i32;
+    }
+    if srtcp_context_init(rx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 121i32;
+    }
+    if srtcp_derive_session_keys(tx).error_id != 0 || srtcp_derive_session_keys(rx).error_id != 0 {
+        return 122i32;
+    }
+    return 0i32;
+}
+
+fn test_append(dst: &[byte], cursor: &usize, src: &[byte]) !void {
+    if *cursor + src.len > dst.len {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[*cursor + index] = src[index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + src.len;
+}
+
+fn test_write_handshake_record(
+    handshake_type: u8,
+    message_sequence: u16,
+    body: &[byte],
+    record_sequence: u64,
+    out: &[byte],
+) !usize {
+    var payload: [byte: 512] = [];
+    const payload_len: usize = try direct_runtime_write_handshake_payload(handshake_type, message_sequence, body, payload[0:512]);
+    var header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
+        version: DTLS_VERSION_1_2,
+        epoch: 0u16,
+        sequence_number: record_sequence,
+        length: payload_len as u16,
+    };
+    return dtls_record_write(&header, payload[0:payload_len], out);
+}
+
+fn test_write_ccs_record(record_sequence: u64, out: &[byte]) !usize {
+    var payload: [byte: 1] = [1 as byte];
+    var header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC,
+        version: DTLS_VERSION_1_2,
+        epoch: 0u16,
+        sequence_number: record_sequence,
+        length: 1u16,
+    };
+    return dtls_record_write(&header, payload[0:1], out);
+}
+
+fn test_record_total_len(packet: &[byte], offset: usize) !usize {
+    if offset + DTLS_RECORD_HEADER_BYTES > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const payload_len: usize = (try read_be_u16(packet[offset + 11usize:2])) as usize;
+    const total_len: usize = DTLS_RECORD_HEADER_BYTES + payload_len;
+    if offset + total_len > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    return total_len;
+}
+
+fn test_copy_client_hello_body(out: &[byte]) !usize {
+    var client_hello_body: [byte: 53] = [
+        0xfe as byte, 0xfd as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x00 as byte,
+        0x00 as byte,
+        0x00 as byte, 0x02 as byte, 0xc0 as byte, 0x2b as byte,
+        0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x09 as byte,
+        0x00 as byte, 0x0e as byte, 0x00 as byte, 0x05 as byte,
+        0x00 as byte, 0x02 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+    ];
+    var cursor: usize = 0usize;
+    try test_append(out, &cursor, client_hello_body[0:53]);
+    return cursor;
+}
+
+fn test_copy_client_hello_body_with_cookie(out: &[byte]) !usize {
+    var client_hello_body: [byte: 61] = [
+        0xfe as byte, 0xfd as byte,
+        0x00 as byte, 0x01 as byte, 0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x00 as byte,
+        0x08 as byte, 'u' as byte, 'y' as byte, 'a' as byte, '-' as byte, 'd' as byte, 't' as byte, 'l' as byte, 's' as byte,
+        0x00 as byte, 0x02 as byte, 0xc0 as byte, 0x2b as byte,
+        0x01 as byte, 0x00 as byte,
+        0x00 as byte, 0x09 as byte,
+        0x00 as byte, 0x0e as byte, 0x00 as byte, 0x05 as byte,
+        0x00 as byte, 0x02 as byte, 0x00 as byte, 0x01 as byte, 0x00 as byte,
+    ];
+    var cursor: usize = 0usize;
+    try test_append(out, &cursor, client_hello_body[0:61]);
+    return cursor;
+}
+
+fn check_direct_runtime_stun_response() i32 {
+    var txid: [byte: STUN_TRANSACTION_ID_BYTES] = [
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte,
+        0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte,
+    ];
+    var request: [byte: 256] = [];
+    var builder: StunMessageBuilder = stun_message_builder_make();
+    if stun_builder_init_binding_request(&builder, request[0:256], txid[0:STUN_TRANSACTION_ID_BYTES]).error_id != 0 {
+        return 10i32;
+    }
+    if stun_builder_append_username(&builder, "uyaDirect:chrome" as &[byte]).error_id != 0 {
+        return 11i32;
+    }
+    if stun_builder_append_priority(&builder, 0x6e0001ffu32).error_id != 0 {
+        return 12i32;
+    }
+    if stun_builder_append_message_integrity(&builder, "localPwd0123456789" as &[byte]).error_id != 0 {
+        return 13i32;
+    }
+    if stun_builder_append_fingerprint(&builder).error_id != 0 {
+        return 14i32;
+    }
+    const request_len: !usize = stun_builder_finish(&builder);
+    if request_len.error_id != 0 {
+        return 15i32;
+    }
+
+    var mapped_ipv4: [byte: 4] = [127 as byte, 0 as byte, 0 as byte, 1 as byte];
+    var response: [byte: DIRECT_RUNTIME_STUN_OUT_MAX_BYTES] = [];
+    const out: !DirectRuntimeOutput = direct_runtime_write_stun_binding_response(
+        request[0:request_len.value],
+        "localPwd0123456789" as &[byte],
+        50000u16,
+        mapped_ipv4[0:4],
+        response[0:DIRECT_RUNTIME_STUN_OUT_MAX_BYTES],
+    );
+    if out.error_id != 0 || out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_STUN || out.value.bytes_written == 0usize {
+        return 16i32;
+    }
+    const header: !StunMessageHeader = stun_header_parse(response[0:out.value.bytes_written]);
+    if header.error_id != 0 {
+        return 17i32;
+    }
+    if header.value.method != STUN_METHOD_BINDING || header.value.message_class != STUN_MESSAGE_CLASS_SUCCESS_RESPONSE {
+        return 18i32;
+    }
+    if stun_verify_message_integrity(response[0:out.value.bytes_written], "localPwd0123456789" as &[byte]).error_id != 0 {
+        return 19i32;
+    }
+    if stun_verify_fingerprint(response[0:out.value.bytes_written]).error_id != 0 {
+        return 20i32;
+    }
+
+    var iter: StunAttributeIterator = stun_attribute_iterator_make();
+    stun_attribute_iterator_init(&iter, response[STUN_HEADER_BYTES:header.value.message_length as usize]);
+    var saw_xor: bool = false;
+    while iter.cursor < header.value.message_length as usize {
+        const attr: !StunAttribute = stun_attribute_iterator_next(&iter);
+        if attr.error_id != 0 {
+            return 21i32;
+        }
+        if attr.value.attr_type == STUN_ATTRIBUTE_XOR_MAPPED_ADDRESS {
+            const mapped: !StunXorMappedAddress = stun_parse_xor_mapped_address(attr.value.value, txid[0:STUN_TRANSACTION_ID_BYTES]);
+            if mapped.error_id != 0 {
+                return 22i32;
+            }
+            if mapped.value.port != 50000u16 || mapped.value.address_len != 4usize {
+                return 23i32;
+            }
+            if mapped.value.address_bytes[0] != mapped_ipv4[0]
+                || mapped.value.address_bytes[1] != mapped_ipv4[1]
+                || mapped.value.address_bytes[2] != mapped_ipv4[2]
+                || mapped.value.address_bytes[3] != mapped_ipv4[3] {
+                return 24i32;
+            }
+            saw_xor = true;
+        }
+    }
+    if !saw_xor {
+        return 25i32;
+    }
+    return 0i32;
+}
+
+fn check_direct_runtime_dtls_handshake() i32 {
+    var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var server_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte,
+        0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte,
+        0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte,
+        0x0e as byte, 0x0f as byte, 0x10 as byte, 0x11 as byte,
+        0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte,
+        0x16 as byte, 0x17 as byte, 0x18 as byte, 0x19 as byte,
+        0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte,
+        0x1e as byte, 0x1f as byte, 0x20 as byte, 0x21 as byte,
+    ];
+    var signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte,
+        0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte,
+        0x0f as byte, 0x10 as byte, 0x11 as byte, 0x12 as byte,
+        0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte,
+        0x17 as byte, 0x18 as byte, 0x19 as byte, 0x1a as byte,
+        0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte,
+        0x1f as byte, 0x20 as byte, 0x21 as byte, 0x22 as byte,
+    ];
+    var runtime: DirectRuntime = direct_runtime_make();
+    if direct_runtime_init_with_entropy(
+        &runtime,
+        server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        server_private[0:CRYPTO_P256_FIELD_BYTES],
+        signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        0x41554431u32,
+        0x56494431u32,
+    ).error_id != 0 {
+        return 30i32;
+    }
+
+    var client_hello_body: [byte: 64] = [];
+    const client_hello_len: !usize = test_copy_client_hello_body(client_hello_body[0:64]);
+    if client_hello_len.error_id != 0 {
+        return 31i32;
+    }
+    var client_hello_record: [byte: 256] = [];
+    const client_hello_record_len: !usize = test_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        0u16,
+        client_hello_body[0:client_hello_len.value],
+        0u64,
+        client_hello_record[0:256],
+    );
+    if client_hello_record_len.error_id != 0 {
+        return 32i32;
+    }
+    var first_flight: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
+    const first_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        client_hello_record[0:client_hello_record_len.value],
+        first_flight[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if first_out.error_id != 0 {
+        return 33i32;
+    }
+    if first_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || first_out.value.bytes_written == 0usize
+        || first_out.value.dtls_srtp_ready
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_NEW
+        || !runtime.hello_verify_sent {
+        return 34i32;
+    }
+    const hello_verify_record: !DtlsRecord = dtls_record_parse(first_flight[0:first_out.value.bytes_written]);
+    if hello_verify_record.error_id != 0 || hello_verify_record.value.header.content_type != DTLS_CONTENT_TYPE_HANDSHAKE {
+        return 35i32;
+    }
+    const hello_verify_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(hello_verify_record.value.payload);
+    if hello_verify_fragment.error_id != 0
+        || hello_verify_fragment.value.handshake_type != DIRECT_RUNTIME_HANDSHAKE_TYPE_HELLO_VERIFY_REQUEST
+        || hello_verify_fragment.value.message_sequence != 0u16 {
+        return 36i32;
+    }
+
+    var client_hello_cookie_body: [byte: 80] = [];
+    const client_hello_cookie_len: !usize = test_copy_client_hello_body_with_cookie(client_hello_cookie_body[0:80]);
+    if client_hello_cookie_len.error_id != 0 {
+        return 37i32;
+    }
+    var client_hello_cookie_record: [byte: 256] = [];
+    const client_hello_cookie_record_len: !usize = test_write_handshake_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        1u16,
+        client_hello_cookie_body[0:client_hello_cookie_len.value],
+        1u64,
+        client_hello_cookie_record[0:256],
+    );
+    if client_hello_cookie_record_len.error_id != 0 {
+        return 38i32;
+    }
+    const first_flight_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        client_hello_cookie_record[0:client_hello_cookie_record_len.value],
+        first_flight[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if first_flight_out.error_id != 0 {
+        return 39i32;
+    }
+    if first_flight_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || first_flight_out.value.bytes_written == 0usize
+        || first_flight_out.value.dtls_srtp_ready
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT
+        || runtime.selected_srtp_profile != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 40i32;
+    }
+    const server_hello_record_len: !usize = test_record_total_len(first_flight[0:first_flight_out.value.bytes_written], 0usize);
+    if server_hello_record_len.error_id != 0 {
+        return 67i32;
+    }
+    const server_hello_record: !DtlsRecord = dtls_record_parse(first_flight[0:server_hello_record_len.value]);
+    if server_hello_record.error_id != 0 {
+        return 68i32;
+    }
+    const server_hello_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(server_hello_record.value.payload);
+    if server_hello_fragment.error_id != 0
+        || server_hello_fragment.value.handshake_type != DTLS_HANDSHAKE_TYPE_SERVER_HELLO
+        || server_hello_fragment.value.message_sequence != 1u16 {
+        return 69i32;
+    }
+    var retransmit_flight: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
+    const retransmit_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        client_hello_cookie_record[0:client_hello_cookie_record_len.value],
+        retransmit_flight[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if retransmit_out.error_id != 0 {
+        return 65i32;
+    }
+    if retransmit_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || retransmit_out.value.bytes_written != first_flight_out.value.bytes_written
+        || retransmit_out.value.dtls_srtp_ready
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT {
+        return 66i32;
+    }
+    const client_key_exchange_sequence: u16 = runtime.next_client_handshake_sequence;
+
+    var client_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x04 as byte, 0x05 as byte, 0x06 as byte, 0x07 as byte,
+        0x08 as byte, 0x09 as byte, 0x0a as byte, 0x0b as byte,
+        0x0c as byte, 0x0d as byte, 0x0e as byte, 0x0f as byte,
+        0x10 as byte, 0x11 as byte, 0x12 as byte, 0x13 as byte,
+        0x14 as byte, 0x15 as byte, 0x16 as byte, 0x17 as byte,
+        0x18 as byte, 0x19 as byte, 0x1a as byte, 0x1b as byte,
+        0x1c as byte, 0x1d as byte, 0x1e as byte, 0x1f as byte,
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte,
+    ];
+    var client_public: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
+    if crypto_p256_public_from_private(client_private[0:CRYPTO_P256_FIELD_BYTES], client_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES]).error_id != 0 {
+        return 41i32;
+    }
+    var client_key_exchange: DtlsClientKeyExchange = DtlsClientKeyExchange{
+        public_key: client_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+    };
+    var client_key_exchange_body: [byte: 80] = [];
+    const client_key_exchange_len: !usize = dtls_client_key_exchange_write(&client_key_exchange, client_key_exchange_body[0:80]);
+    if client_key_exchange_len.error_id != 0 {
+        return 42i32;
+    }
+    var client_key_exchange_payload: [byte: 128] = [];
+    const client_key_exchange_payload_len: !usize = direct_runtime_write_handshake_payload(
+        DIRECT_RUNTIME_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE,
+        client_key_exchange_sequence,
+        client_key_exchange_body[0:client_key_exchange_len.value],
+        client_key_exchange_payload[0:128],
+    );
+    if client_key_exchange_payload_len.error_id != 0 {
+        return 43i32;
+    }
+    var client_key_exchange_record: [byte: 192] = [];
+    var cke_header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
+        version: DTLS_VERSION_1_2,
+        epoch: 0u16,
+        sequence_number: 2u64,
+        length: client_key_exchange_payload_len.value as u16,
+    };
+    const client_key_exchange_record_len: !usize = dtls_record_write(
+        &cke_header,
+        client_key_exchange_payload[0:client_key_exchange_payload_len.value],
+        client_key_exchange_record[0:192],
+    );
+    if client_key_exchange_record_len.error_id != 0 {
+        return 44i32;
+    }
+
+    var material: DtlsServerKeyMaterial = dtls_server_key_material_make();
+    if dtls_server_derive_srtp_key_material(
+        client_key_exchange_body[0:client_key_exchange_len.value],
+        server_private[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.selected_srtp_profile,
+        &material,
+    ).error_id != 0 {
+        return 45i32;
+    }
+    var record_keys: DtlsServerRecordKeys = dtls_server_record_keys_make();
+    if dtls_server_record_keys_from_master(
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &record_keys,
+    ).error_id != 0 {
+        return 46i32;
+    }
+
+    var transcript: [byte: DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES] = [];
+    var transcript_len: usize = 0usize;
+    if test_append(transcript[0:DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES], &transcript_len, runtime.transcript[0:runtime.transcript_len]).error_id != 0 {
+        return 47i32;
+    }
+    if test_append(transcript[0:DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES], &transcript_len, client_key_exchange_payload[0:client_key_exchange_payload_len.value]).error_id != 0 {
+        return 48i32;
+    }
+    var transcript_hash: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    if crypto_sha256_digest(transcript[0:transcript_len], transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES]).error_id != 0 {
+        return 49i32;
+    }
+    var client_verify_data: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    if dtls_finished_verify_data_compute(
+        material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+        true,
+        client_verify_data[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    ).error_id != 0 {
+        return 50i32;
+    }
+    var client_finished: DtlsFinished = DtlsFinished{
+        verify_data: client_verify_data[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    };
+    var client_finished_body: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    const client_finished_body_len: !usize = dtls_finished_write(&client_finished, client_finished_body[0:DTLS_FINISHED_VERIFY_DATA_BYTES]);
+    if client_finished_body_len.error_id != 0 {
+        return 51i32;
+    }
+    var client_finished_payload: [byte: DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    const client_finished_payload_len: !usize = direct_runtime_write_handshake_payload(
+        DIRECT_RUNTIME_HANDSHAKE_TYPE_FINISHED,
+        client_key_exchange_sequence + 1u16,
+        client_finished_body[0:client_finished_body_len.value],
+        client_finished_payload[0:DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES],
+    );
+    if client_finished_payload_len.error_id != 0 {
+        return 52i32;
+    }
+    var encrypted_client_finished: [byte: 128] = [];
+    const encrypted_client_finished_len: !usize = dtls_server_encrypt_aes_gcm_record(
+        &record_keys,
+        false,
+        DTLS_CONTENT_TYPE_HANDSHAKE,
+        1u16,
+        0u64,
+        client_finished_payload[0:client_finished_payload_len.value],
+        encrypted_client_finished[0:128],
+    );
+    if encrypted_client_finished_len.error_id != 0 {
+        return 53i32;
+    }
+    var client_ccs: [byte: 32] = [];
+    const client_ccs_len: !usize = test_write_ccs_record(3u64, client_ccs[0:32]);
+    if client_ccs_len.error_id != 0 {
+        return 54i32;
+    }
+
+    var client_flight: [byte: 512] = [];
+    var client_flight_len: usize = 0usize;
+    if test_append(client_flight[0:512], &client_flight_len, client_key_exchange_record[0:client_key_exchange_record_len.value]).error_id != 0 {
+        return 55i32;
+    }
+    if test_append(client_flight[0:512], &client_flight_len, client_ccs[0:client_ccs_len.value]).error_id != 0 {
+        return 56i32;
+    }
+    if test_append(client_flight[0:512], &client_flight_len, encrypted_client_finished[0:encrypted_client_finished_len.value]).error_id != 0 {
+        return 57i32;
+    }
+
+    var server_done: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
+    const done_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        client_flight[0:client_flight_len],
+        server_done[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if done_out.error_id != 0 {
+        return 58i32;
+    }
+    if done_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || done_out.value.bytes_written == 0usize
+        || !done_out.value.dtls_srtp_ready
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_READY {
+        return 59i32;
+    }
+    if runtime.audio_srtp_send.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || runtime.video_srtp_send.profile != SRTP_PROFILE_AES128_CM_HMAC_SHA1_80
+        || runtime.audio_srtp_send.ssrc != 0x41554431u32
+        || runtime.video_srtp_send.ssrc != 0x56494431u32 {
+        return 60i32;
+    }
+    if test_all_zero(runtime.audio_srtp_send.cipher_key[0:SRTP_KEY_BYTES])
+        || test_all_zero(runtime.video_srtp_send.cipher_key[0:SRTP_KEY_BYTES]) {
+        return 61i32;
+    }
+
+    const ccs_record_len: usize = DTLS_RECORD_HEADER_BYTES + 1usize;
+    if done_out.value.bytes_written <= ccs_record_len {
+        return 62i32;
+    }
+    var decrypted_server_finished: [byte: 128] = [];
+    const server_finished_record: &[byte] = server_done[ccs_record_len:done_out.value.bytes_written - ccs_record_len];
+    const decrypted_server: !DtlsServerDecryptedRecord = dtls_server_decrypt_aes_gcm_record(
+        &record_keys,
+        false,
+        server_finished_record,
+        decrypted_server_finished[0:128],
+    );
+    if decrypted_server.error_id != 0 || decrypted_server.value.content_type != DTLS_CONTENT_TYPE_HANDSHAKE {
+        return 63i32;
+    }
+    const server_finished_fragment: !DtlsHandshakeFragment = dtls_handshake_fragment_parse(
+        decrypted_server_finished[0:decrypted_server.value.plaintext_len],
+    );
+    if server_finished_fragment.error_id != 0
+        || server_finished_fragment.value.handshake_type != DIRECT_RUNTIME_HANDSHAKE_TYPE_FINISHED
+        || server_finished_fragment.value.message_sequence != 5u16 {
+        return 64i32;
+    }
+
+    return 0i32;
+}
+
+fn check_direct_runtime_srtcp_feedback() i32 {
+    var runtime: DirectRuntime = direct_runtime_make();
+    runtime.audio_ssrc = 0x41554431u32;
+    runtime.video_ssrc = 0x56494431u32;
+
+    var chrome_audio_tx: SrtcpContext = srtcp_context_make();
+    var chrome_video_tx: SrtcpContext = srtcp_context_make();
+    const audio_srtcp: i32 = test_init_srtcp_pair(&chrome_audio_tx, &runtime.audio_srtcp_recv, 0x0a0b0c0du32);
+    if audio_srtcp != 0i32 {
+        return audio_srtcp;
+    }
+    const video_srtcp: i32 = test_init_srtcp_pair(&chrome_video_tx, &runtime.video_srtcp_recv, 0x0e0f1011u32);
+    if video_srtcp != 0i32 {
+        return video_srtcp;
+    }
+
+    var rr: RtcpReceiverReport = rtcp_receiver_report_make();
+    rr.sender_ssrc = 0x0a0b0c0du32;
+    rr.report_count = 1u8;
+    rr.report_blocks[0].ssrc = 0x41554431u32;
+    rr.report_blocks[0].highest_seq = 1234u32;
+    var rr_packet: [byte: 64] = [];
+    const rr_len: !usize = rtcp_receiver_report_write(&rr, rr_packet[0:64]);
+    if rr_len.error_id != 0 {
+        return 80i32;
+    }
+    var rr_srtcp: [byte: 128] = [];
+    const rr_srtcp_len: !usize = srtcp_protect(&chrome_audio_tx, rr_packet[0:rr_len.value], rr_srtcp[0:128]);
+    if rr_srtcp_len.error_id != 0 {
+        return 81i32;
+    }
+    var recovered: [byte: 128] = [];
+    const rr_feedback: !DirectRuntimeRtcpFeedback = direct_runtime_process_srtcp_feedback(
+        &runtime,
+        rr_srtcp[0:rr_srtcp_len.value],
+        recovered[0:128],
+    );
+    if rr_feedback.error_id != 0 {
+        return 82i32;
+    }
+    if rr_feedback.value.packet_type != RTCP_PACKET_TYPE_RR
+        || rr_feedback.value.media_kind != MEDIA_KIND_AUDIO
+        || rr_feedback.value.media_ssrc != 0x41554431u32
+        || rr_feedback.value.report_blocks != 1u8 {
+        return 83i32;
+    }
+
+    var pli: RtcpPliPacket = rtcp_pli_packet_make();
+    pli.sender_ssrc = 0x0e0f1011u32;
+    pli.media_ssrc = 0x56494431u32;
+    var pli_packet: [byte: 32] = [];
+    const pli_len: !usize = rtcp_pli_write(&pli, pli_packet[0:32]);
+    if pli_len.error_id != 0 {
+        return 84i32;
+    }
+    var pli_srtcp: [byte: 128] = [];
+    const pli_srtcp_len: !usize = srtcp_protect(&chrome_video_tx, pli_packet[0:pli_len.value], pli_srtcp[0:128]);
+    if pli_srtcp_len.error_id != 0 {
+        return 85i32;
+    }
+    const pli_feedback: !DirectRuntimeRtcpFeedback = direct_runtime_process_srtcp_feedback(
+        &runtime,
+        pli_srtcp[0:pli_srtcp_len.value],
+        recovered[0:128],
+    );
+    if pli_feedback.error_id != 0 {
+        return 86i32;
+    }
+    if pli_feedback.value.packet_type != RTCP_PACKET_TYPE_PSFB
+        || pli_feedback.value.feedback_format != RTCP_PSFB_FMT_PLI
+        || pli_feedback.value.media_kind != MEDIA_KIND_VIDEO
+        || pli_feedback.value.media_ssrc != 0x56494431u32 {
+        return 87i32;
+    }
+
+    const replay: !DirectRuntimeRtcpFeedback = direct_runtime_process_srtcp_feedback(
+        &runtime,
+        pli_srtcp[0:pli_srtcp_len.value],
+        recovered[0:128],
+    );
+    if replay.error_id == 0 {
+        return 88i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_direct_runtime_stun_response();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct runtime STUN tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_direct_runtime_dtls_handshake();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct runtime DTLS handshake tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_direct_runtime_srtcp_feedback();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct runtime SRTCP feedback tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("Uya FFmpeg direct runtime STUN/DTLS/SRTP/SRTCP tests passed\n");
+    return 0i32;
+}

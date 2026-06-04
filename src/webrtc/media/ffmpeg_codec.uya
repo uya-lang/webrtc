@@ -4,6 +4,12 @@
 // FFmpeg lives only at the explicit codec boundary. WebRTC RTP, SRTP/SRTCP,
 // ICE/DTLS, and UDP remain Uya-owned.
 
+@c_import(
+    "../../../tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c",
+    "-I.uyacache/ffmpeg-dev/usr/include/x86_64-linux-gnu",
+    "-L.uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu -lavcodec -lavutil -Wl,--version-script=tests/fixtures/ffmpeg_codec/uya_ffmpeg_codec_boundary.map"
+);
+
 use webrtc.media.model;
 
 export error FfmpegCodecInvalidConfig;

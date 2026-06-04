@@ -1,0 +1,911 @@
+// webrtc.media.direct_runtime - pure Uya direct sender ICE/DTLS/SRTP runtime
+// Module: src/webrtc/media/direct_runtime.uya -> use webrtc.media.direct_runtime;
+
+use webrtc.binary;
+use webrtc.crypto.csprng;
+use webrtc.crypto.hash;
+use webrtc.crypto.p256;
+use webrtc.dtls.handshake;
+use webrtc.dtls.model;
+use webrtc.dtls.record;
+use webrtc.dtls.server;
+use webrtc.media.direct_session;
+use webrtc.media.model;
+use webrtc.rtcp.rtcp_packet;
+use webrtc.srtp.dtls_keys;
+use webrtc.srtp.model;
+use webrtc.srtp.srtcp;
+use webrtc.stun.model;
+use webrtc.stun.parse;
+use webrtc.stun.write;
+
+export error DirectRuntimeInvalidPacket;
+export error DirectRuntimeOutputTooSmall;
+export error DirectRuntimeTranscriptTooLarge;
+export error DirectRuntimeDtlsNotReady;
+export error DirectRuntimeUnsupportedRemoteAddress;
+
+export const DIRECT_RUNTIME_DTLS_STATE_NEW: u8 = 0u8;
+export const DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT: u8 = 1u8;
+export const DIRECT_RUNTIME_DTLS_STATE_READY: u8 = 2u8;
+export const DIRECT_RUNTIME_DTLS_STATE_FAILED: u8 = 3u8;
+
+export const DIRECT_RUNTIME_OUTPUT_KIND_NONE: u8 = 0u8;
+export const DIRECT_RUNTIME_OUTPUT_KIND_STUN: u8 = 1u8;
+export const DIRECT_RUNTIME_OUTPUT_KIND_DTLS: u8 = 2u8;
+export const DIRECT_RUNTIME_OUTPUT_KIND_SRTCP: u8 = 3u8;
+
+export const DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES: usize = 4096usize;
+export const DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES: usize = 2048usize;
+export const DIRECT_RUNTIME_STUN_OUT_MAX_BYTES: usize = 256usize;
+export const DIRECT_RUNTIME_DTLS_COOKIE_BYTES: usize = 8usize;
+export const DIRECT_RUNTIME_HANDSHAKE_TYPE_HELLO_VERIFY_REQUEST: u8 = 3u8;
+export const DIRECT_RUNTIME_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE: u8 = 16u8;
+export const DIRECT_RUNTIME_HANDSHAKE_TYPE_FINISHED: u8 = 20u8;
+
+export struct DirectRuntimeOutput {
+    kind: u8 = DIRECT_RUNTIME_OUTPUT_KIND_NONE,
+    bytes_written: usize = 0usize,
+    dtls_srtp_ready: bool = false,
+}
+
+export struct DirectRuntimeRtcpFeedback {
+    rtcp_len: usize = 0usize,
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
+    media_ssrc: u32 = 0u32,
+    packet_type: u8 = 0u8,
+    feedback_format: u8 = 0u8,
+    report_blocks: u8 = 0u8,
+}
+
+export struct DirectRuntime {
+    dtls_state: u8 = DIRECT_RUNTIME_DTLS_STATE_NEW,
+    selected_srtp_profile: u16 = 0u16,
+    server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [],
+    server_ecdhe_private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    server_signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    client_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [],
+    transcript: [byte: DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES] = [],
+    transcript_len: usize = 0usize,
+    hello_verify_sent: bool = false,
+    server_first_flight_record_sequence_start: u64 = 0u64,
+    server_first_flight_handshake_sequence_start: u16 = 1u16,
+    next_client_handshake_sequence: u16 = 5u16,
+    next_server_handshake_sequence: u16 = 1u16,
+    next_server_epoch0_record_sequence: u64 = 0u64,
+    next_server_epoch1_record_sequence: u64 = 0u64,
+    key_material: DtlsServerKeyMaterial = DtlsServerKeyMaterial{},
+    record_keys: DtlsServerRecordKeys = DtlsServerRecordKeys{},
+    audio_srtp_send: SrtpContext = SrtpContext{},
+    video_srtp_send: SrtpContext = SrtpContext{},
+    audio_srtp_recv: SrtpContext = SrtpContext{},
+    video_srtp_recv: SrtpContext = SrtpContext{},
+    audio_srtcp_send: SrtcpContext = SrtcpContext{},
+    video_srtcp_send: SrtcpContext = SrtcpContext{},
+    audio_srtcp_recv: SrtcpContext = SrtcpContext{},
+    video_srtcp_recv: SrtcpContext = SrtcpContext{},
+    audio_ssrc: u32 = DIRECT_SESSION_DEFAULT_AUDIO_SSRC,
+    video_ssrc: u32 = DIRECT_SESSION_DEFAULT_VIDEO_SSRC,
+}
+
+fn direct_runtime_copy_bytes(dst: &[byte], src: &[byte]) !void {
+    if dst.len < src.len {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+    var index: usize = 0usize;
+    while index < src.len {
+        dst[index] = src[index];
+        index = index + 1usize;
+    }
+}
+
+fn direct_runtime_zero_bytes(dst: &[byte]) void {
+    var index: usize = 0usize;
+    while index < dst.len {
+        dst[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn direct_runtime_cookie_byte(index: usize) byte {
+    const cookie: [byte: DIRECT_RUNTIME_DTLS_COOKIE_BYTES] = [
+        0x75 as byte,
+        0x79 as byte,
+        0x61 as byte,
+        0x2d as byte,
+        0x64 as byte,
+        0x74 as byte,
+        0x6c as byte,
+        0x73 as byte,
+    ];
+    if index >= DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
+        return 0 as byte;
+    }
+    return cookie[index];
+}
+
+fn direct_runtime_cookie_matches(cookie: &[byte]) bool {
+    if cookie.len != DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
+        if cookie[index] != direct_runtime_cookie_byte(index) {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn direct_runtime_append_transcript(runtime: &DirectRuntime, payload: &[byte]) !void {
+    if runtime == null {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    if runtime.transcript_len + payload.len > DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES {
+        runtime.dtls_state = DIRECT_RUNTIME_DTLS_STATE_FAILED;
+        return error.DirectRuntimeTranscriptTooLarge;
+    }
+    try direct_runtime_copy_bytes(runtime.transcript[runtime.transcript_len:payload.len], payload);
+    runtime.transcript_len = runtime.transcript_len + payload.len;
+}
+
+fn direct_runtime_copy_client_random(runtime: &DirectRuntime, hello: &DtlsClientHello) !void {
+    if runtime == null || hello == null || hello.random.len != DTLS_HELLO_RANDOM_BYTES {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    try direct_runtime_copy_bytes(runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES], hello.random);
+}
+
+fn direct_runtime_record_total_len(packet: &[byte], offset: usize) !usize {
+    if offset + DTLS_RECORD_HEADER_BYTES > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const payload_len: usize = (try read_be_u16(packet[offset + 11usize:2])) as usize;
+    const total_len: usize = DTLS_RECORD_HEADER_BYTES + payload_len;
+    if offset + total_len > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    return total_len;
+}
+
+fn direct_runtime_rtcp_packet_total_len(packet: &[byte], offset: usize) !usize {
+    if offset + 4usize > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const length_words_minus_one: usize = (try read_be_u16(packet[offset + 2usize:2])) as usize;
+    const total_len: usize = (length_words_minus_one + 1usize) * 4usize;
+    if total_len < 4usize || offset + total_len > packet.len {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    return total_len;
+}
+
+fn direct_runtime_media_kind_for_ssrc(runtime: &DirectRuntime, ssrc: u32) u8 {
+    if runtime == null {
+        return MEDIA_KIND_UNKNOWN;
+    }
+    if ssrc == runtime.audio_ssrc {
+        return MEDIA_KIND_AUDIO;
+    }
+    if ssrc == runtime.video_ssrc {
+        return MEDIA_KIND_VIDEO;
+    }
+    return MEDIA_KIND_UNKNOWN;
+}
+
+fn direct_runtime_feedback_from_rtcp_segment(
+    runtime: &DirectRuntime,
+    packet: &[byte],
+) !DirectRuntimeRtcpFeedback {
+    if runtime == null || packet.len < 4usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    const packet_type: u8 = packet[1] as u8;
+    const feedback_format: u8 = (packet[0] as u8) & 0x1fu8;
+    if packet_type == RTCP_PACKET_TYPE_RR {
+        const report: RtcpReceiverReport = try rtcp_receiver_report_parse(packet);
+        var media_ssrc: u32 = 0u32;
+        var media_kind: u8 = MEDIA_KIND_UNKNOWN;
+        if report.report_count > 0u8 {
+            media_ssrc = report.report_blocks[0].ssrc;
+            media_kind = direct_runtime_media_kind_for_ssrc(runtime, media_ssrc);
+        }
+        return DirectRuntimeRtcpFeedback{
+            rtcp_len: packet.len,
+            media_kind: media_kind,
+            media_ssrc: media_ssrc,
+            packet_type: packet_type,
+            feedback_format: 0u8,
+            report_blocks: report.report_count,
+        };
+    }
+
+    if packet_type == RTCP_PACKET_TYPE_RTPFB && feedback_format == RTCP_RTPFB_FMT_NACK {
+        const nack: RtcpNackPacket = try rtcp_nack_parse(packet);
+        return DirectRuntimeRtcpFeedback{
+            rtcp_len: packet.len,
+            media_kind: direct_runtime_media_kind_for_ssrc(runtime, nack.media_ssrc),
+            media_ssrc: nack.media_ssrc,
+            packet_type: packet_type,
+            feedback_format: feedback_format,
+            report_blocks: 0u8,
+        };
+    }
+    if packet_type == RTCP_PACKET_TYPE_RTPFB && feedback_format == RTCP_RTPFB_FMT_TRANSPORT_CC {
+        const transport_cc: RtcpTransportCcPacket = try rtcp_transport_cc_parse(packet);
+        return DirectRuntimeRtcpFeedback{
+            rtcp_len: packet.len,
+            media_kind: direct_runtime_media_kind_for_ssrc(runtime, transport_cc.media_ssrc),
+            media_ssrc: transport_cc.media_ssrc,
+            packet_type: packet_type,
+            feedback_format: feedback_format,
+            report_blocks: 0u8,
+        };
+    }
+    if packet_type == RTCP_PACKET_TYPE_PSFB && feedback_format == RTCP_PSFB_FMT_PLI {
+        const pli: RtcpPliPacket = try rtcp_pli_parse(packet);
+        return DirectRuntimeRtcpFeedback{
+            rtcp_len: packet.len,
+            media_kind: direct_runtime_media_kind_for_ssrc(runtime, pli.media_ssrc),
+            media_ssrc: pli.media_ssrc,
+            packet_type: packet_type,
+            feedback_format: feedback_format,
+            report_blocks: 0u8,
+        };
+    }
+    if packet_type == RTCP_PACKET_TYPE_PSFB && feedback_format == RTCP_PSFB_FMT_FIR {
+        const fir: RtcpFirPacket = try rtcp_fir_parse(packet);
+        return DirectRuntimeRtcpFeedback{
+            rtcp_len: packet.len,
+            media_kind: direct_runtime_media_kind_for_ssrc(runtime, fir.media_ssrc),
+            media_ssrc: fir.media_ssrc,
+            packet_type: packet_type,
+            feedback_format: feedback_format,
+            report_blocks: 0u8,
+        };
+    }
+
+    return DirectRuntimeRtcpFeedback{
+        rtcp_len: packet.len,
+        media_kind: MEDIA_KIND_UNKNOWN,
+        media_ssrc: 0u32,
+        packet_type: packet_type,
+        feedback_format: feedback_format,
+        report_blocks: 0u8,
+    };
+}
+
+fn direct_runtime_feedback_from_rtcp_compound(
+    runtime: &DirectRuntime,
+    rtcp_packet: &[byte],
+) !DirectRuntimeRtcpFeedback {
+    if runtime == null || rtcp_packet.len < 4usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    var offset: usize = 0usize;
+    while offset < rtcp_packet.len {
+        const packet_len: usize = try direct_runtime_rtcp_packet_total_len(rtcp_packet, offset);
+        const segment: &[byte] = rtcp_packet[offset:packet_len];
+        const feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_segment(runtime, segment);
+        if feedback.packet_type == RTCP_PACKET_TYPE_RR
+            || feedback.packet_type == RTCP_PACKET_TYPE_RTPFB
+            || feedback.packet_type == RTCP_PACKET_TYPE_PSFB {
+            return feedback;
+        }
+        offset = offset + packet_len;
+    }
+
+    return error.DirectRuntimeInvalidPacket;
+}
+
+fn direct_runtime_write_u24(dst: &[byte], value: usize) !void {
+    if dst.len < 3usize || value > 0xffffffusize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    dst[0] = ((value >> 16i32) & 0xffusize) as byte;
+    dst[1] = ((value >> 8i32) & 0xffusize) as byte;
+    dst[2] = (value & 0xffusize) as byte;
+}
+
+export fn direct_runtime_write_handshake_payload(
+    handshake_type: u8,
+    message_sequence: u16,
+    body: &[byte],
+    out: &[byte],
+) !usize {
+    const total_len: usize = DTLS_HANDSHAKE_HEADER_BYTES + body.len;
+    if body.len > 0xffffffusize || out.len < total_len {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+    out[0] = handshake_type as byte;
+    try direct_runtime_write_u24(out[1:3], body.len);
+    try write_be_u16(out[4:2], message_sequence);
+    try direct_runtime_write_u24(out[6:3], 0usize);
+    try direct_runtime_write_u24(out[9:3], body.len);
+    try direct_runtime_copy_bytes(out[DTLS_HANDSHAKE_HEADER_BYTES:body.len], body);
+    return total_len;
+}
+
+fn direct_runtime_write_hello_verify_request(
+    runtime: &DirectRuntime,
+    message_sequence: u16,
+    out: &[byte],
+) !DirectRuntimeOutput {
+    if runtime == null || out.len < DTLS_RECORD_HEADER_BYTES + DTLS_HANDSHAKE_HEADER_BYTES + 3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+
+    var body: [byte: 3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES] = [];
+    try write_be_u16(body[0:2], DTLS_VERSION_1_2);
+    body[2] = DIRECT_RUNTIME_DTLS_COOKIE_BYTES as byte;
+    var index: usize = 0usize;
+    while index < DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
+        body[3usize + index] = direct_runtime_cookie_byte(index);
+        index = index + 1usize;
+    }
+
+    var payload: [byte: DTLS_HANDSHAKE_HEADER_BYTES + 3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES] = [];
+    const payload_len: usize = try direct_runtime_write_handshake_payload(
+        DIRECT_RUNTIME_HANDSHAKE_TYPE_HELLO_VERIFY_REQUEST,
+        message_sequence,
+        body[0:3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES],
+        payload[0:DTLS_HANDSHAKE_HEADER_BYTES + 3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES],
+    );
+    var header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
+        version: DTLS_VERSION_1_0_COMPAT,
+        epoch: 0u16,
+        sequence_number: runtime.next_server_epoch0_record_sequence,
+        length: payload_len as u16,
+    };
+    const written: usize = try dtls_record_write(&header, payload[0:payload_len], out);
+    runtime.next_server_epoch0_record_sequence = runtime.next_server_epoch0_record_sequence + 1u64;
+    runtime.hello_verify_sent = true;
+    return DirectRuntimeOutput{
+        kind: DIRECT_RUNTIME_OUTPUT_KIND_DTLS,
+        bytes_written: written,
+        dtls_srtp_ready: false,
+    };
+}
+
+fn direct_runtime_append_server_flight_transcript(runtime: &DirectRuntime, flight: &[byte]) !void {
+    var offset: usize = 0usize;
+    while offset < flight.len {
+        const record_len: usize = try direct_runtime_record_total_len(flight, offset);
+        const parsed: DtlsRecord = try dtls_record_parse(flight[offset:record_len]);
+        if parsed.header.content_type != DTLS_CONTENT_TYPE_HANDSHAKE || parsed.header.epoch != 0u16 {
+            return error.DirectRuntimeInvalidPacket;
+        }
+        try direct_runtime_append_transcript(runtime, parsed.payload);
+        offset = offset + record_len;
+    }
+}
+
+fn direct_runtime_generate_entropy(runtime: &DirectRuntime) !void {
+    if runtime == null {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    try crypto_csprng_fill(runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES]);
+
+    var share: DtlsEcdheKeyShare = dtls_ecdhe_key_share_make();
+    try dtls_ecdhe_p256_key_share_generate(&share);
+    try direct_runtime_copy_bytes(
+        runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
+        share.private_key[0:CRYPTO_P256_FIELD_BYTES],
+    );
+
+    try crypto_csprng_fill(runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES]);
+}
+
+fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_ssrc: u32) !void {
+    if runtime == null || audio_ssrc == 0u32 || video_ssrc == 0u32 {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    runtime.dtls_state = DIRECT_RUNTIME_DTLS_STATE_NEW;
+    runtime.selected_srtp_profile = 0u16;
+    runtime.transcript_len = 0usize;
+    runtime.hello_verify_sent = false;
+    runtime.server_first_flight_record_sequence_start = 0u64;
+    runtime.server_first_flight_handshake_sequence_start = 1u16;
+    runtime.next_client_handshake_sequence = 5u16;
+    runtime.next_server_handshake_sequence = 1u16;
+    runtime.next_server_epoch0_record_sequence = 0u64;
+    runtime.next_server_epoch1_record_sequence = 0u64;
+    runtime.key_material = dtls_server_key_material_make();
+    runtime.record_keys = dtls_server_record_keys_make();
+    runtime.audio_srtp_send = srtp_context_make();
+    runtime.video_srtp_send = srtp_context_make();
+    runtime.audio_srtp_recv = srtp_context_make();
+    runtime.video_srtp_recv = srtp_context_make();
+    runtime.audio_srtcp_send = srtcp_context_make();
+    runtime.video_srtcp_send = srtcp_context_make();
+    runtime.audio_srtcp_recv = srtcp_context_make();
+    runtime.video_srtcp_recv = srtcp_context_make();
+    runtime.audio_ssrc = audio_ssrc;
+    runtime.video_ssrc = video_ssrc;
+    direct_runtime_zero_bytes(runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES]);
+    direct_runtime_zero_bytes(runtime.transcript[0:DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES]);
+}
+
+export fn direct_runtime_make() DirectRuntime {
+    var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [];
+    var server_ecdhe_private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var server_signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var client_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [];
+    var transcript: [byte: DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES] = [];
+    return DirectRuntime{
+        dtls_state: DIRECT_RUNTIME_DTLS_STATE_NEW,
+        selected_srtp_profile: 0u16,
+        server_random: server_random,
+        server_ecdhe_private_key: server_ecdhe_private_key,
+        server_signature_nonce: server_signature_nonce,
+        client_random: client_random,
+        transcript: transcript,
+        transcript_len: 0usize,
+        hello_verify_sent: false,
+        server_first_flight_record_sequence_start: 0u64,
+        server_first_flight_handshake_sequence_start: 1u16,
+        next_client_handshake_sequence: 5u16,
+        next_server_handshake_sequence: 1u16,
+        next_server_epoch0_record_sequence: 0u64,
+        next_server_epoch1_record_sequence: 0u64,
+        key_material: dtls_server_key_material_make(),
+        record_keys: dtls_server_record_keys_make(),
+        audio_srtp_send: srtp_context_make(),
+        video_srtp_send: srtp_context_make(),
+        audio_srtp_recv: srtp_context_make(),
+        video_srtp_recv: srtp_context_make(),
+        audio_srtcp_send: srtcp_context_make(),
+        video_srtcp_send: srtcp_context_make(),
+        audio_srtcp_recv: srtcp_context_make(),
+        video_srtcp_recv: srtcp_context_make(),
+        audio_ssrc: DIRECT_SESSION_DEFAULT_AUDIO_SSRC,
+        video_ssrc: DIRECT_SESSION_DEFAULT_VIDEO_SSRC,
+    };
+}
+
+export fn direct_runtime_init(runtime: &DirectRuntime, audio_ssrc: u32, video_ssrc: u32) !void {
+    try direct_runtime_reset_common(runtime, audio_ssrc, video_ssrc);
+    try direct_runtime_generate_entropy(runtime);
+}
+
+export fn direct_runtime_init_with_entropy(
+    runtime: &DirectRuntime,
+    server_random: &[byte],
+    ecdhe_private_key: &[byte],
+    signature_nonce: &[byte],
+    audio_ssrc: u32,
+    video_ssrc: u32,
+) !void {
+    if server_random.len != DTLS_HELLO_RANDOM_BYTES
+        || ecdhe_private_key.len != CRYPTO_P256_FIELD_BYTES
+        || signature_nonce.len != CRYPTO_P256_FIELD_BYTES {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    try direct_runtime_reset_common(runtime, audio_ssrc, video_ssrc);
+    try direct_runtime_copy_bytes(runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES], server_random);
+    try direct_runtime_copy_bytes(runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES], ecdhe_private_key);
+    try direct_runtime_copy_bytes(runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES], signature_nonce);
+}
+
+export fn direct_runtime_write_stun_binding_response(
+    request_packet: &[byte],
+    local_ice_pwd: &[byte],
+    mapped_port: u16,
+    mapped_ipv4: &[byte],
+    out: &[byte],
+) !DirectRuntimeOutput {
+    if local_ice_pwd.len == 0usize || mapped_port == 0u16 || mapped_ipv4.len != 4usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    if out.len < DIRECT_RUNTIME_STUN_OUT_MAX_BYTES {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+
+    const header: StunMessageHeader = try stun_header_parse(request_packet);
+    if header.method != STUN_METHOD_BINDING || header.message_class != STUN_MESSAGE_CLASS_REQUEST {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    try stun_verify_message_integrity(request_packet, local_ice_pwd);
+    try stun_verify_fingerprint(request_packet);
+
+    var builder: StunMessageBuilder = stun_message_builder_make();
+    try stun_builder_init_binding_success_response(
+        &builder,
+        out[0:DIRECT_RUNTIME_STUN_OUT_MAX_BYTES],
+        header.transaction_id[0:STUN_TRANSACTION_ID_BYTES],
+    );
+    try stun_builder_append_xor_mapped_address_ipv4(&builder, mapped_port, mapped_ipv4);
+    try stun_builder_append_message_integrity(&builder, local_ice_pwd);
+    try stun_builder_append_fingerprint(&builder);
+    const written: usize = try stun_builder_finish(&builder);
+    return DirectRuntimeOutput{
+        kind: DIRECT_RUNTIME_OUTPUT_KIND_STUN,
+        bytes_written: written,
+        dtls_srtp_ready: false,
+    };
+}
+
+fn direct_runtime_process_client_hello(
+    runtime: &DirectRuntime,
+    record_packet: &[byte],
+    out: &[byte],
+) !DirectRuntimeOutput {
+    const parsed: DtlsRecord = try dtls_record_parse(record_packet);
+    if parsed.header.content_type != DTLS_CONTENT_TYPE_HANDSHAKE || parsed.header.epoch != 0u16 {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const fragment: DtlsHandshakeFragment = try dtls_handshake_fragment_parse(parsed.payload);
+    if fragment.handshake_type != DTLS_HANDSHAKE_TYPE_CLIENT_HELLO
+        || fragment.fragment_offset != 0usize
+        || fragment.fragment.len != fragment.body_length {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const hello: DtlsClientHello = try dtls_client_hello_parse(fragment.fragment);
+    if hello.cookie.len == 0usize && !runtime.hello_verify_sent {
+        return direct_runtime_write_hello_verify_request(runtime, fragment.message_sequence, out);
+    }
+    if runtime.hello_verify_sent && !direct_runtime_cookie_matches(hello.cookie) {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    try direct_runtime_copy_client_random(runtime, &hello);
+    try direct_runtime_append_transcript(runtime, parsed.payload);
+
+    runtime.server_first_flight_record_sequence_start = runtime.next_server_epoch0_record_sequence;
+    runtime.server_first_flight_handshake_sequence_start = 1u16;
+    var config: DtlsServerFirstFlightConfig = DtlsServerFirstFlightConfig{
+        server_random: runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        ecdhe_private_key: runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
+        signature_nonce: runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        first_record_sequence: runtime.server_first_flight_record_sequence_start,
+        first_handshake_sequence: runtime.server_first_flight_handshake_sequence_start,
+    };
+    const flight: DtlsServerFirstFlight = try dtls_server_write_first_flight(&hello, &config, out);
+    try direct_runtime_append_server_flight_transcript(runtime, out[0:flight.bytes_written]);
+    runtime.selected_srtp_profile = flight.selected_srtp_profile;
+    runtime.next_server_epoch0_record_sequence = flight.next_record_sequence;
+    runtime.next_client_handshake_sequence = fragment.message_sequence + 1u16;
+    runtime.next_server_handshake_sequence = flight.next_handshake_sequence;
+    runtime.next_server_epoch1_record_sequence = 0u64;
+    runtime.dtls_state = DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT;
+
+    return DirectRuntimeOutput{
+        kind: DIRECT_RUNTIME_OUTPUT_KIND_DTLS,
+        bytes_written: flight.bytes_written,
+        dtls_srtp_ready: false,
+    };
+}
+
+fn direct_runtime_retransmit_server_first_flight(
+    runtime: &DirectRuntime,
+    record_packet: &[byte],
+    out: &[byte],
+) !DirectRuntimeOutput {
+    const parsed: DtlsRecord = try dtls_record_parse(record_packet);
+    if parsed.header.content_type != DTLS_CONTENT_TYPE_HANDSHAKE || parsed.header.epoch != 0u16 {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const fragment: DtlsHandshakeFragment = try dtls_handshake_fragment_parse(parsed.payload);
+    if fragment.handshake_type != DTLS_HANDSHAKE_TYPE_CLIENT_HELLO
+        || fragment.message_sequence + 1u16 != runtime.next_client_handshake_sequence
+        || fragment.fragment_offset != 0usize
+        || fragment.fragment.len != fragment.body_length {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const hello: DtlsClientHello = try dtls_client_hello_parse(fragment.fragment);
+    if runtime.hello_verify_sent && !direct_runtime_cookie_matches(hello.cookie) {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    var config: DtlsServerFirstFlightConfig = DtlsServerFirstFlightConfig{
+        server_random: runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        ecdhe_private_key: runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
+        signature_nonce: runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        first_record_sequence: runtime.server_first_flight_record_sequence_start,
+        first_handshake_sequence: runtime.server_first_flight_handshake_sequence_start,
+    };
+    const flight: DtlsServerFirstFlight = try dtls_server_write_first_flight(&hello, &config, out);
+    return DirectRuntimeOutput{
+        kind: DIRECT_RUNTIME_OUTPUT_KIND_DTLS,
+        bytes_written: flight.bytes_written,
+        dtls_srtp_ready: false,
+    };
+}
+
+fn direct_runtime_init_srtp_contexts(runtime: &DirectRuntime) !void {
+    var audio_recv_srtcp: SrtcpContext = srtcp_context_make();
+    var video_recv_srtcp: SrtcpContext = srtcp_context_make();
+    try srtp_dtls_exporter_init_contexts(
+        runtime.selected_srtp_profile,
+        false,
+        runtime.audio_ssrc,
+        0x01020304u32,
+        runtime.key_material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &runtime.audio_srtp_send,
+        &runtime.audio_srtp_recv,
+        &runtime.audio_srtcp_send,
+        &audio_recv_srtcp,
+    );
+    runtime.audio_srtcp_recv = audio_recv_srtcp;
+
+    try srtp_dtls_exporter_init_contexts(
+        runtime.selected_srtp_profile,
+        false,
+        runtime.video_ssrc,
+        0x05060708u32,
+        runtime.key_material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &runtime.video_srtp_send,
+        &runtime.video_srtp_recv,
+        &runtime.video_srtcp_send,
+        &video_recv_srtcp,
+    );
+    runtime.video_srtcp_recv = video_recv_srtcp;
+}
+
+fn direct_runtime_process_client_key_exchange(runtime: &DirectRuntime, payload: &[byte]) !void {
+    const fragment: DtlsHandshakeFragment = try dtls_handshake_fragment_parse(payload);
+    if fragment.handshake_type != DIRECT_RUNTIME_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE
+        || fragment.message_sequence != runtime.next_client_handshake_sequence
+        || fragment.fragment_offset != 0usize
+        || fragment.fragment.len != fragment.body_length {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    try dtls_server_derive_srtp_key_material(
+        fragment.fragment,
+        runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.selected_srtp_profile,
+        &runtime.key_material,
+    );
+    try dtls_server_record_keys_from_master(
+        runtime.key_material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES],
+        runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        &runtime.record_keys,
+    );
+    try direct_runtime_append_transcript(runtime, payload);
+}
+
+fn direct_runtime_write_server_finished(runtime: &DirectRuntime, out: &[byte], out_cursor: &usize) !void {
+    var ccs_payload: [byte: 1] = [1 as byte];
+    var ccs_header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC,
+        version: DTLS_VERSION_1_2,
+        epoch: 0u16,
+        sequence_number: runtime.next_server_epoch0_record_sequence,
+        length: 1u16,
+    };
+    const ccs_len: usize = try dtls_record_write(&ccs_header, ccs_payload[0:1], out[*out_cursor:out.len - *out_cursor]);
+    *out_cursor = *out_cursor + ccs_len;
+    runtime.next_server_epoch0_record_sequence = runtime.next_server_epoch0_record_sequence + 1u64;
+
+    var transcript_hash: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    try crypto_sha256_digest(
+        runtime.transcript[0:runtime.transcript_len],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+    );
+
+    var verify_data: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    try dtls_finished_verify_data_compute(
+        runtime.key_material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+        false,
+        verify_data[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    );
+    var finished_message: DtlsFinished = DtlsFinished{
+        verify_data: verify_data[0:DTLS_FINISHED_VERIFY_DATA_BYTES],
+    };
+    var finished_body: [byte: DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    const finished_body_len: usize = try dtls_finished_write(&finished_message, finished_body[0:DTLS_FINISHED_VERIFY_DATA_BYTES]);
+    var finished_payload: [byte: DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES] = [];
+    const finished_payload_len: usize = try direct_runtime_write_handshake_payload(
+        DIRECT_RUNTIME_HANDSHAKE_TYPE_FINISHED,
+        runtime.next_server_handshake_sequence,
+        finished_body[0:finished_body_len],
+        finished_payload[0:DTLS_HANDSHAKE_HEADER_BYTES + DTLS_FINISHED_VERIFY_DATA_BYTES],
+    );
+    const encrypted_len: usize = try dtls_server_encrypt_aes_gcm_record(
+        &runtime.record_keys,
+        true,
+        DTLS_CONTENT_TYPE_HANDSHAKE,
+        1u16,
+        runtime.next_server_epoch1_record_sequence,
+        finished_payload[0:finished_payload_len],
+        out[*out_cursor:out.len - *out_cursor],
+    );
+    *out_cursor = *out_cursor + encrypted_len;
+    runtime.next_server_epoch1_record_sequence = runtime.next_server_epoch1_record_sequence + 1u64;
+    runtime.next_server_handshake_sequence = runtime.next_server_handshake_sequence + 1u16;
+}
+
+fn direct_runtime_process_client_finished(runtime: &DirectRuntime, record_packet: &[byte], out: &[byte]) !DirectRuntimeOutput {
+    var decrypted: [byte: 128] = [];
+    const decrypted_record: DtlsServerDecryptedRecord = try dtls_server_decrypt_aes_gcm_record(
+        &runtime.record_keys,
+        true,
+        record_packet,
+        decrypted[0:128],
+    );
+    if decrypted_record.content_type != DTLS_CONTENT_TYPE_HANDSHAKE
+        || decrypted_record.epoch != 1u16
+        || decrypted_record.plaintext_len < DTLS_HANDSHAKE_HEADER_BYTES {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    const decrypted_payload: &[byte] = decrypted[0:decrypted_record.plaintext_len];
+    const fragment: DtlsHandshakeFragment = try dtls_handshake_fragment_parse(decrypted_payload);
+    if fragment.handshake_type != DIRECT_RUNTIME_HANDSHAKE_TYPE_FINISHED
+        || fragment.message_sequence != runtime.next_client_handshake_sequence + 1u16
+        || fragment.fragment_offset != 0usize
+        || fragment.fragment.len != fragment.body_length {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const finished: DtlsFinished = try dtls_finished_parse(fragment.fragment);
+
+    var transcript_hash: [byte: DTLS_FINISHED_TRANSCRIPT_HASH_BYTES] = [];
+    try crypto_sha256_digest(
+        runtime.transcript[0:runtime.transcript_len],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+    );
+    try dtls_finished_verify(
+        &finished,
+        runtime.key_material.master_secret[0:DTLS_MASTER_SECRET_BYTES],
+        transcript_hash[0:DTLS_FINISHED_TRANSCRIPT_HASH_BYTES],
+        true,
+    );
+    try direct_runtime_append_transcript(runtime, decrypted_payload);
+
+    var cursor: usize = 0usize;
+    try direct_runtime_write_server_finished(runtime, out, &cursor);
+    try direct_runtime_init_srtp_contexts(runtime);
+    runtime.dtls_state = DIRECT_RUNTIME_DTLS_STATE_READY;
+
+    return DirectRuntimeOutput{
+        kind: DIRECT_RUNTIME_OUTPUT_KIND_DTLS,
+        bytes_written: cursor,
+        dtls_srtp_ready: true,
+    };
+}
+
+fn direct_runtime_process_client_flight(
+    runtime: &DirectRuntime,
+    datagram: &[byte],
+    out: &[byte],
+) !DirectRuntimeOutput {
+    var offset: usize = 0usize;
+    var saw_key_exchange: bool = false;
+    var saw_change_cipher_spec: bool = false;
+    var ready_output: DirectRuntimeOutput = DirectRuntimeOutput{};
+
+    while offset < datagram.len {
+        const record_len: usize = try direct_runtime_record_total_len(datagram, offset);
+        const record_packet: &[byte] = datagram[offset:record_len];
+        const content_type: u8 = record_packet[0] as u8;
+        const epoch: u16 = try read_be_u16(record_packet[3:2]);
+
+        if epoch == 0u16 {
+            const parsed: DtlsRecord = try dtls_record_parse(record_packet);
+            if content_type == DTLS_CONTENT_TYPE_HANDSHAKE {
+                try direct_runtime_process_client_key_exchange(runtime, parsed.payload);
+                saw_key_exchange = true;
+            } else if content_type == DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC {
+                if parsed.payload.len != 1usize || parsed.payload[0] != 1 as byte {
+                    return error.DirectRuntimeInvalidPacket;
+                }
+                saw_change_cipher_spec = true;
+            } else {
+                return error.DirectRuntimeInvalidPacket;
+            }
+        } else if epoch == 1u16 {
+            if !saw_key_exchange || !saw_change_cipher_spec {
+                return error.DirectRuntimeInvalidPacket;
+            }
+            ready_output = try direct_runtime_process_client_finished(runtime, record_packet, out);
+        } else {
+            return error.DirectRuntimeInvalidPacket;
+        }
+
+        offset = offset + record_len;
+    }
+
+    if ready_output.bytes_written == 0usize {
+        return DirectRuntimeOutput{
+            kind: DIRECT_RUNTIME_OUTPUT_KIND_NONE,
+            bytes_written: 0usize,
+            dtls_srtp_ready: false,
+        };
+    }
+    return ready_output;
+}
+
+export fn direct_runtime_process_dtls_datagram(
+    runtime: &DirectRuntime,
+    datagram: &[byte],
+    out: &[byte],
+) !DirectRuntimeOutput {
+    if runtime == null || datagram.len < DTLS_RECORD_HEADER_BYTES || out.len < DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    if runtime.dtls_state == DIRECT_RUNTIME_DTLS_STATE_NEW {
+        const record_len: usize = try direct_runtime_record_total_len(datagram, 0usize);
+        if record_len != datagram.len {
+            return error.DirectRuntimeInvalidPacket;
+        }
+        return direct_runtime_process_client_hello(runtime, datagram, out);
+    }
+
+    if runtime.dtls_state == DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT {
+        const first_record_len: usize = try direct_runtime_record_total_len(datagram, 0usize);
+        if first_record_len == datagram.len && datagram[0] == DTLS_CONTENT_TYPE_HANDSHAKE as byte {
+            const first_fragment: DtlsHandshakeFragment = try dtls_handshake_fragment_parse(datagram[DTLS_RECORD_HEADER_BYTES:datagram.len - DTLS_RECORD_HEADER_BYTES]);
+            if first_fragment.handshake_type == DTLS_HANDSHAKE_TYPE_CLIENT_HELLO {
+                return direct_runtime_retransmit_server_first_flight(runtime, datagram, out);
+            }
+        }
+        return direct_runtime_process_client_flight(runtime, datagram, out);
+    }
+
+    if runtime.dtls_state == DIRECT_RUNTIME_DTLS_STATE_READY {
+        return DirectRuntimeOutput{
+            kind: DIRECT_RUNTIME_OUTPUT_KIND_NONE,
+            bytes_written: 0usize,
+            dtls_srtp_ready: true,
+        };
+    }
+
+    return error.DirectRuntimeDtlsNotReady;
+}
+
+export fn direct_runtime_process_srtcp_feedback(
+    runtime: &DirectRuntime,
+    srtcp_packet: &[byte],
+    rtcp_packet: &[byte],
+) !DirectRuntimeRtcpFeedback {
+    if runtime == null || srtcp_packet.len == 0usize || rtcp_packet.len == 0usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    var audio_candidate: SrtcpContext = runtime.audio_srtcp_recv;
+    const audio_unprotect: !usize = srtcp_unprotect(&audio_candidate, srtcp_packet, rtcp_packet);
+    if audio_unprotect.error_id == 0 {
+        const feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
+            runtime,
+            rtcp_packet[0:audio_unprotect.value],
+        );
+        if feedback.media_kind == MEDIA_KIND_VIDEO {
+            var video_candidate_after_audio: SrtcpContext = runtime.video_srtcp_recv;
+            const video_unprotect_after_audio: !usize = srtcp_unprotect(&video_candidate_after_audio, srtcp_packet, rtcp_packet);
+            if video_unprotect_after_audio.error_id == 0 {
+                runtime.video_srtcp_recv = video_candidate_after_audio;
+                return feedback;
+            }
+            return error.DirectRuntimeInvalidPacket;
+        }
+        runtime.audio_srtcp_recv = audio_candidate;
+        return feedback;
+    }
+
+    var video_candidate: SrtcpContext = runtime.video_srtcp_recv;
+    const video_unprotect: !usize = srtcp_unprotect(&video_candidate, srtcp_packet, rtcp_packet);
+    if video_unprotect.error_id == 0 {
+        const feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
+            runtime,
+            rtcp_packet[0:video_unprotect.value],
+        );
+        runtime.video_srtcp_recv = video_candidate;
+        return feedback;
+    }
+
+    return error.DirectRuntimeInvalidPacket;
+}
