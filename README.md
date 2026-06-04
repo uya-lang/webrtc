@@ -1,6 +1,6 @@
 # 纯 Uya WebRTC
 
-本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前仓库仍处于设计和项目基座阶段，详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前发布版本为 `v0.1.0` 里程碑，已经覆盖纯 Uya WebRTC transport、DataChannel、RTP/SRTP、RTCP feedback、Chrome 音视频直推验证和显式 FFmpeg codec 测试边界；详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
 
 ## 项目目标
 
@@ -20,7 +20,7 @@
 
 ## 构建方式
 
-当前仓库已经落地 Phase 0 的 `Makefile` 构建入口，但 `src/` 目录和 Uya 源码实现仍未开始，因此现阶段提供的是可运行的占位构建与验证流程。
+当前仓库以 `Makefile` 作为统一入口，默认 runtime 仍保持纯 Uya transport 边界；FFmpeg 只在显式 codec / Chrome interop 测试目标中作为 reference codec 使用，不进入默认运行路径。
 
 项目已经约定当前统一的构建入口，以以下命令作为标准接口：
 
@@ -32,8 +32,9 @@ make bench
 
 对应目标如下：
 
-- `make build`：生成占位可执行文件 `build/webrtc-uya`，当前支持 `--help` 与 `version`。
-- `make test`：运行当前基座级 smoke test，验证占位 CLI 可执行。
-- `make bench`：输出占位 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+- `make build`：生成里程碑 CLI wrapper `build/webrtc-uya`，当前支持 `--help`、`version` 与 `dump-stats`。
+- `make test`：运行 transport、parser、crypto、DTLS/SRTP、RTP/RTCP、SCTP、PeerConnection、统计和 benchmark 入口检查。
+- `make bench`：输出 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+- `make test-ffmpeg-chrome-call`：显式启用 FFmpeg reference codec，验证 Uya direct sender 向 Chrome recvonly peer 推送音视频。
 
-随着 `src/main.uya` 等源码落地，上述入口会切换到真实的 Uya build/test/bench 流程。
+发布记录见 [CHANGELOG.md](CHANGELOG.md)。

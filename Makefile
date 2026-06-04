@@ -5,6 +5,8 @@ BIN := $(BUILD_DIR)/webrtc-uya
 BENCH_DIR := $(BUILD_DIR)/benchmarks
 BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
 BENCH_RUNNER := benchmarks/run.sh
+VERSION := $(shell cat VERSION)
+UYA ?= $(abspath ../uya/bin/uya)
 
 .PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call preview-ffmpeg-chrome-call clean
 
@@ -12,7 +14,7 @@ all: build
 
 build: $(BIN)
 
-$(BIN): Makefile src/main.uya src/webrtc/time.uya
+$(BIN): Makefile VERSION src/main.uya src/webrtc/time.uya
 	mkdir -p $(BUILD_DIR)
 	rm -f $@
 	{ \
@@ -22,10 +24,10 @@ $(BIN): Makefile src/main.uya src/webrtc/time.uya
 		printf '%s\n' 'script_dir="$$(cd "$$(dirname "$$0")" && pwd)"; repo_root="$$(cd "$$script_dir/.." && pwd)"'; \
 		printf '%s\n' 'case "$${1:-}" in'; \
 		printf '%s\n' '  ""|--help|-h)'; \
-		printf '%s\n' '    printf "%s\n" "webrtc-uya placeholder CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"'; \
+		printf '%s\n' '    printf "%s\n" "webrtc-uya $(VERSION) milestone CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  version)'; \
-		printf '%s\n' '    printf "%s\n" "webrtc-uya 0.0.0-placeholder"'; \
+		printf '%s\n' '    printf "%s\n" "webrtc-uya $(VERSION)"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  dump-stats)'; \
 		printf '%s\n' '    exec "$${repo_root}/../uya/bin/uya" run "$${repo_root}/src/webrtc_dump_stats_main.uya"'; \
@@ -215,8 +217,8 @@ test-codec-bridge:
 		printf '%s\n' "codec bridge tests skipped: sibling ../opus or ../vp8 repository missing"; \
 		exit 0; \
 	fi
-	$(MAKE) -C ../opus smoke
-	$(MAKE) -C ../vp8 build check-toolchain
+	env UYA="$(UYA)" $(MAKE) -C ../opus smoke
+	env UYA="$(UYA)" $(MAKE) -C ../vp8 build check-toolchain
 	bash tests/check_phase21_fixture_manifest.sh
 	bash tests/check_phase21_opus_bridge_api.sh
 	bash tests/check_phase21_vp8_bridge_api.sh

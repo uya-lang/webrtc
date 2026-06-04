@@ -46,7 +46,7 @@
       "id": "vp8-raw-container",
       "path": "../vp8/src/vp8/container/raw.uya",
       "source": "Sibling ../vp8 raw VP8 frame container",
-      "sha256": "686f9bc1601779aecb82b06a89baeac52be037ebc91d0cbfabc886a4a79ad5c9",
+      "sha256": "b1dece8dbf50eea3fd804c8c9d7e57df2115dd56b59a315225f53c5e921943f2",
       "license": "sibling repository-local source; no explicit LICENSE file present",
       "phase": "Phase 21 VP8 frame bridge boundary"
     },
