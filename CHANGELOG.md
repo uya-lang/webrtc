@@ -4,6 +4,8 @@
 
 纯 Uya WebRTC transport 里程碑版本。该版本聚焦 Linux 默认平台、浏览器互通、DataChannel、encoded-frame RTP/SRTP 媒体路径，以及显式 reference codec 测试边界。
 
+详细版本说明：[docs/release-v0.1.0.md](docs/release-v0.1.0.md)
+
 ### 发布能力
 
 - 完成 SDP、STUN/TURN、ICE、DTLS 1.2、SRTP/SRTCP、RTP/RTCP、SCTP DataChannel、PeerConnection、Stats/Trace、拥塞控制和 jitter/reassembly 基础能力。
