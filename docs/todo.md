@@ -541,11 +541,13 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
 - [x] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
 - [x] 接入纯 Uya `../vp8` sibling codec bridge：`src/webrtc/media/vp8_codec_bridge.uya` 将 sibling VP8 encoder/decoder API 适配为 WebRTC `EncodedFrame`，并由 `src/webrtc_media_vp8_codec_bridge_test_main.uya` 覆盖 I420 -> VP8 -> I420 roundtrip。
 - [x] 增加 `make test-ffmpeg-codec-flow`，用 FFmpeg `libopus` / `libvpx` 验证泛型 codec 推拉流准确性。
-- [x] 增加 `make test-ffmpeg-chrome-call`，用 FFmpeg 生成 VP8/Opus WebM，Chrome recvonly `RTCPeerConnection` + Uya direct sender 验证 audio/video 通话、SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
+- [x] 增加 `make test-ffmpeg-chrome-call`，Chrome recvonly `RTCPeerConnection` + Uya direct sender 验证 audio/video 通话；sender 在发送循环中用 FFmpeg reference codec 将 raw PCM/I420 实时编码为 Opus/VP8，覆盖 SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
 - [~] 增加浏览器 one-way audio 示例，可选择直接发送 encoded Opus 或通过 Opus bridge 编码。
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
-- [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
-  - blocked: VP8 bridge encode/decode 路径已经接入 `../vp8` sibling，但尚未把该 bridge sender 接到 Chrome recvonly 示例；当前 Chrome 直推证明仍来自显式 FFmpeg reference codec 路径。
+- [x] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
+  - verified 2026-06-04: `make test-uya-vp8-chrome-call` legacy-staging `../vp8/src/vp8`，由 `src/webrtc_uya_vp8_direct_sender_main.uya` 在发送循环中通过纯 Uya VP8 bridge 将 32x18 raw I420 实时编码为 VP8 `EncodedFrame`，再经 Uya direct sender RTP/SRTP/UDP 推给 Chrome recvonly peer；本地样例 Chrome 解码 `chrome_video_packets=82`、`chrome_video_frames=81`，sender 输出 `sender_rtp_packets=91`、`sender_srtp_packets=91`、`sender_srtcp_packets=3`、`sender_udp_packets=94`。Chrome decoded frame 计数会随本机调度轻微波动，验证以 inbound RTP、decoded frames 非零和 sender RTP/SRTP 计数为准。
+- [x] 增加纯 Uya VP8 MP4 手工预览入口。
+  - verified 2026-06-04: `python3 tests/uya_vp8_chrome_call.py --manual-preview-e2e --source-mp4 build/uya-vp8-mp4-smoke/tiny.mp4 --max-video-width 160 --max-duration-seconds 2` 通过；`make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4` 会显式用 FFmpeg 将 MP4 转成 raw I420，再由 `../vp8` 纯 Uya bridge 在 sender live loop 中编码 VP8，Uya direct sender 推给 Chrome video-only recvonly peer。默认用 `UYA_VP8_PREVIEW_MAX_WIDTH=160`、`UYA_VP8_PREVIEW_MAX_DURATION=2` 做降采样短预览，避免当前纯 Uya VP8 scalar encoder 对完整 1080p/长视频长时间占满 CPU。smoke 统计：`preview_size=32x18`、`preview_duration_us=999990`、`chrome_video_packets=31`、`chrome_video_frames=31`、`sender_rtp_packets=31`、`sender_srtp_packets=31`、`sender_udp_packets=32`。
 - [x] 打通 Uya 进程直连 Chrome 的 FFmpeg codec 音视频通话：FFmpeg raw/encoded frame -> WebRTC RTP payload packetizer -> SRTP -> UDP -> Chrome inbound RTP，且不经浏览器内部 `pc1`/`pc2` loopback。
   - [x] 建立 `test-ffmpeg-chrome-call` 的 Uya direct sender 验收壳：Chrome 只做 recvonly inbound peer，测试禁止 `captureStream`、浏览器内部 `pc1`/`pc2` loopback 和 Pion/aiortc/wrtc 等外部 WebRTC sender。
   - [x] 增加 Uya sender CLI 入口 `uya_ffmpeg_direct_sender`，dry-run 可读取 Chrome offer / media 参数并输出诊断 JSON；非 dry-run 在 DTLS-SRTP 未接通前拒绝写假 SDP answer。
@@ -555,7 +557,7 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
     - [x] 接入 FFmpeg Opus encoder：PCM/s16le -> Opus packet -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
     - [x] 接入 FFmpeg VP8 encoder：I420 -> VP8 frame -> `EncodedFrame`，并进入 `rtp_packetize_encoded_frame`。
     - [x] 接入 FFmpeg decoder 验证路径：Opus/VP8 `EncodedFrame` -> decoded PCM/I420，用于后续 Uya 自研 encoder/decoder A/B 验证。
-  - [x] 建立 FFmpeg/Uya codec provider 可切换入口：direct sender CLI 支持 `--codec ffmpeg|uya`，FFmpeg provider 继续走已验证的 extern codec ingest，Uya provider 通过纯 `codec_bridge` ready 位保留切换入口；当前 Uya sibling encoder/decoder 尚未接入时 dry-run 诊断明确报告 `codecProviderReady=false`。
+  - [x] 建立 FFmpeg/Uya codec provider 可切换入口：FFmpeg provider 继续走已验证的 extern codec ingest；Uya VP8 provider 通过 `src/webrtc_uya_vp8_direct_sender_main.uya` live sender 接入 raw I420 -> 纯 Uya VP8 -> RTP/SRTP/UDP 的 video-only source；完整 Uya audio+video provider 仍因 Opus bridge 缺失而报告 `codecProviderReady=false`。
     - verified 2026-06-04: `bash tests/check_phase11_media.sh`、`bash tests/check_phase21_ffmpeg_codec_extern.sh`、`bash tests/check_phase21_ffmpeg_direct_sender_cli.sh`、`bash tests/check_phase21_ffmpeg_direct_sender.sh`、`bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过；Chrome E2E 使用 `--codec ffmpeg`，`chrome_audio_packets=235`、`chrome_video_packets=141`、`chrome_video_frames=141`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=6`、`sender_rtcp_receiver_reports=6`、`sender_udp_packets=491`。
   - [x] 在 Uya sender 中接通 Chrome host ICE/STUN 和 DTLS-SRTP exporter，生成真实 SRTP/SRTCP key。
     - [x] 约束 direct sender 新增 session / DTLS identity 路径保持纯 Uya；FFmpeg codec 是唯一允许的 extern codec 边界。

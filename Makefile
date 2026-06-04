@@ -7,8 +7,10 @@ BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
 BENCH_RUNNER := benchmarks/run.sh
 VERSION := $(shell cat VERSION)
 UYA ?= $(abspath ../uya/bin/uya)
+UYA_VP8_PREVIEW_MAX_WIDTH ?= 160
+UYA_VP8_PREVIEW_MAX_DURATION ?= 2
 
-.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call preview-ffmpeg-chrome-call clean
+.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call test-uya-vp8-chrome-call preview-ffmpeg-chrome-call preview-uya-vp8-chrome-call clean
 
 all: build
 
@@ -241,11 +243,22 @@ test-ffmpeg-chrome-call:
 	test -x tests/check_phase21_ffmpeg_chrome_call.sh
 	bash tests/check_phase21_ffmpeg_chrome_call.sh
 
+test-uya-vp8-chrome-call:
+	test -x tests/check_phase21_uya_vp8_chrome_call.sh
+	bash tests/check_phase21_uya_vp8_chrome_call.sh
+
 preview-ffmpeg-chrome-call:
 	if [[ -n "$(MP4)" ]]; then \
 		python3 tests/ffmpeg_chrome_call.py --preview-dir build/ffmpeg-chrome-preview --source-mp4 "$(MP4)" --serve-preview; \
 	else \
 		python3 tests/ffmpeg_chrome_call.py --preview-dir build/ffmpeg-chrome-preview --serve-preview; \
+	fi
+
+preview-uya-vp8-chrome-call:
+	if [[ -n "$(MP4)" ]]; then \
+		python3 tests/uya_vp8_chrome_call.py --preview-dir build/uya-vp8-chrome-preview --source-mp4 "$(MP4)" --max-video-width "$(UYA_VP8_PREVIEW_MAX_WIDTH)" --max-duration-seconds "$(UYA_VP8_PREVIEW_MAX_DURATION)" --serve-preview; \
+	else \
+		python3 tests/uya_vp8_chrome_call.py --preview-dir build/uya-vp8-chrome-preview --serve-preview; \
 	fi
 
 clean:

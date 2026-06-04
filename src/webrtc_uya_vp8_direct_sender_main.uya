@@ -13,15 +13,15 @@ use libc.sys_lseek;
 use libc.sys_open;
 use libc.sys_read;
 use libc.sys_write;
+use vp8.api;
 use webrtc.binary;
 use webrtc.dtls.identity;
 use webrtc.media.codec;
 use webrtc.media.direct_runtime;
 use webrtc.media.direct_sender;
 use webrtc.media.direct_session;
-use webrtc.media.ffmpeg_codec;
-use webrtc.media.ffmpeg_direct_ingest;
 use webrtc.media.model;
+use webrtc.media.vp8_codec_bridge;
 use webrtc.net.udp;
 
 export error DirectSenderCliInvalidArgs;
@@ -42,10 +42,7 @@ const CLI_LOCAL_UDP_PORT: u16 = 49999u16;
 const CLI_LIVE_TIMEOUT_US: u64 = 15_000_000u64;
 const CLI_LIVE_MEDIA_DURATION_US: u64 = 6_000_000u64;
 const CLI_LIVE_TIMEOUT_GRACE_US: u64 = 15_000_000u64;
-const CLI_AUDIO_FRAME_DURATION_US: u32 = 20_000u32;
 const CLI_VIDEO_FRAME_DURATION_US: u32 = 33_333u32;
-const CLI_AUDIO_SAMPLES_PER_CHANNEL: usize = 960usize;
-const CLI_AUDIO_PCM_BYTES: usize = 1920usize;
 const CLI_DEFAULT_VIDEO_WIDTH: u32 = 32u32;
 const CLI_DEFAULT_VIDEO_HEIGHT: u32 = 18u32;
 const CLI_ENCODED_PACKET_BYTES: usize = 4_194_304usize;
@@ -308,7 +305,7 @@ fn read_exact_looping(fd: i32, out: &[byte]) !void {
 }
 
 fn print_usage() void {
-    cli_write_stderr("uya_ffmpeg_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--raw-video-i420 <path>] [--raw-audio-s16le <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--codec ffmpeg|uya] [--dry-run]\n" as &[byte]);
+    cli_write_stderr("uya_vp8_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--raw-video-i420 <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--codec uya] [--dry-run]\n" as &[byte]);
 }
 
 fn parse_args(
@@ -319,14 +316,13 @@ fn parse_args(
     answer_path: &&byte,
     diagnostics_path: &&byte,
     raw_video_path: &&byte,
-    raw_audio_path: &&byte,
     video_width: &u32,
     video_height: &u32,
     media_duration_us: &u64,
     dry_run: &bool,
     codec_provider_id: &u8,
 ) !void {
-    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || raw_video_path == null || raw_audio_path == null || video_width == null || video_height == null || media_duration_us == null || dry_run == null || codec_provider_id == null {
+    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || raw_video_path == null || video_width == null || video_height == null || media_duration_us == null || dry_run == null || codec_provider_id == null {
         return error.DirectSenderCliInvalidArgs;
     }
 
@@ -343,9 +339,7 @@ fn parse_args(
                 return error.DirectSenderCliInvalidArgs;
             }
             const provider_arg: &byte = argv[index + 1];
-            if cstr_eq(provider_arg, "ffmpeg\0" as &byte) {
-                *codec_provider_id = CODEC_PROVIDER_FFMPEG;
-            } else if cstr_eq(provider_arg, "uya\0" as &byte) {
+            if cstr_eq(provider_arg, "uya\0" as &byte) {
                 *codec_provider_id = CODEC_PROVIDER_UYA;
             } else {
                 return error.DirectSenderCliInvalidArgs;
@@ -380,12 +374,6 @@ fn parse_args(
                 return error.DirectSenderCliInvalidArgs;
             }
             *raw_video_path = argv[index + 1];
-            index = index + 2;
-        } else if cstr_eq(arg, "--raw-audio-s16le\0" as &byte) {
-            if index + 1 >= argc {
-                return error.DirectSenderCliInvalidArgs;
-            }
-            *raw_audio_path = argv[index + 1];
             index = index + 2;
         } else if cstr_eq(arg, "--video-width\0" as &byte) {
             if index + 1 >= argc {
@@ -595,9 +583,6 @@ fn cli_codec_provider_make(provider_id: u8, uya_vp8_video_ready: bool) CodecProv
     if provider_id == CODEC_PROVIDER_UYA {
         return codec_provider_uya_make(false, uya_vp8_video_ready);
     }
-    if provider_id == CODEC_PROVIDER_FFMPEG {
-        return codec_provider_ffmpeg_make();
-    }
     return CodecProviderSelection{};
 }
 
@@ -608,12 +593,13 @@ fn write_diagnostics_counts(
     answer_ready: bool,
     codec_provider_id: u8,
     uya_vp8_video_ready: bool,
+    raw_video_path_seen: bool,
     encoded_video_path_seen: bool,
 ) !void {
     const provider: CodecProviderSelection = cli_codec_provider_make(codec_provider_id, uya_vp8_video_ready);
     var json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
     var cursor: usize = 0usize;
-    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "{\"sender\":\"uya_ffmpeg_direct_sender\",\"offerParsed\":true,\"audioMLine\":true,\"videoMLine\":true,\"codecProvider\":\"" as &[byte]);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "{\"sender\":\"uya_vp8_direct_sender\",\"offerParsed\":true,\"audioMLine\":true,\"videoMLine\":true,\"codecProvider\":\"" as &[byte]);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, codec_provider_name(provider.provider_id));
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "\",\"codecProviderSwitchable\":true,\"codecProviderReady\":" as &[byte]);
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, codec_provider_selection_ready(&provider));
@@ -622,11 +608,13 @@ fn write_diagnostics_counts(
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"codecBridgeRequired\":" as &[byte]);
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.requires_codec_bridge);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"ffmpegMediaPathSeen\":" as &[byte]);
-    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.provider_id == CODEC_PROVIDER_FFMPEG);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, false);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"uyaCodecPathReady\":" as &[byte]);
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, provider.provider_id == CODEC_PROVIDER_UYA && codec_provider_selection_ready(&provider));
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"uyaVp8VideoReady\":" as &[byte]);
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, uya_vp8_video_ready);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rawVideoPathSeen\":" as &[byte]);
+    try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, raw_video_path_seen);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"encodedVideoPathSeen\":" as &[byte]);
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, encoded_video_path_seen);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpPacketizer\":\"rtp_packetize_encoded_frame\",\"dtlsIdentityReady\":true,\"dtlsSrtpReady\":" as &[byte]);
@@ -817,137 +805,74 @@ fn cli_send_udp_payload(socket: &UdpSocket, addr: &[byte], addr_len: u32, payloa
     }
 }
 
-fn cli_audio_config_make() FfmpegCodecEncoderConfig {
-    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
-    config.media_kind = MEDIA_KIND_AUDIO;
-    config.codec_id = CODEC_ID_OPUS;
-    config.sample_rate_hz = FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ;
-    config.channels = 1u8;
-    config.bitrate_bps = 80000u32;
-    return config;
-}
-
-fn cli_video_config_make(video_config: &CliVideoSourceConfig) FfmpegCodecEncoderConfig {
-    var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
-    config.media_kind = MEDIA_KIND_VIDEO;
-    config.codec_id = CODEC_ID_VP8;
-    config.width = video_config.width;
-    config.height = video_config.height;
-    config.bitrate_bps = cli_video_bitrate_bps(video_config.width, video_config.height);
-    config.fps_num = 30u32;
-    config.fps_den = 1u32;
-    return config;
-}
-
-fn cli_fill_pcm(pcm: &[byte], frame_index: u64) void {
+fn cli_fill_i420_planes(
+    y_plane: &[byte],
+    u_plane: &[byte],
+    v_plane: &[byte],
+    frame_index: u64,
+) void {
     var index: usize = 0usize;
-    while index + 1usize < pcm.len {
-        const sample_index: usize = ((index / 2usize) + ((frame_index as usize) * CLI_AUDIO_SAMPLES_PER_CHANNEL)) & 0x3fusize;
-        var sample: u16 = 0x1800u16;
-        if sample_index >= 32usize {
-            sample = 0xe800u16;
-        }
-        pcm[index] = (sample & 0xffu16) as byte;
-        pcm[index + 1usize] = ((sample >> 8i32) & 0xffu16) as byte;
-        index = index + 2usize;
-    }
-}
-
-fn cli_fill_i420(i420: &[byte], width: u32, height: u32, frame_index: u64) void {
-    const y_len: usize = (width as usize) * (height as usize);
-    const uv_len: usize = y_len / 4usize;
-    var index: usize = 0usize;
-    while index < y_len {
-        i420[index] = ((index * 13usize + (frame_index as usize) * 7usize + 31usize) & 0xffusize) as byte;
+    while index < y_plane.len {
+        y_plane[index] = ((index * 13usize + (frame_index as usize) * 7usize + 31usize) & 0xffusize) as byte;
         index = index + 1usize;
     }
     index = 0usize;
-    while index < uv_len {
-        i420[y_len + index] = 96 as byte;
-        i420[y_len + uv_len + index] = 160 as byte;
+    while index < u_plane.len {
+        u_plane[index] = 96 as byte;
+        v_plane[index] = 160 as byte;
         index = index + 1usize;
     }
 }
 
-fn cli_send_audio_frame(
+fn cli_send_uya_vp8_live_frame(
     socket: &UdpSocket,
     selected_addr: &[byte],
     selected_addr_len: u32,
     sender: &UyaDirectSender,
     runtime: &DirectRuntime,
-    encoder: &FfmpegCodecEncoder,
-    raw_audio_fd: i32,
-    frame_index: u64,
-) !void {
-    var pcm: [byte: CLI_AUDIO_PCM_BYTES] = [];
-    if raw_audio_fd >= 0i32 {
-        try read_exact_looping(raw_audio_fd, pcm[0:CLI_AUDIO_PCM_BYTES]);
-    } else {
-        cli_fill_pcm(pcm[0:CLI_AUDIO_PCM_BYTES], frame_index);
-    }
-    const timestamp_us: u64 = frame_index * (CLI_AUDIO_FRAME_DURATION_US as u64);
-    const raw: FfmpegCodecRawAudioView = try ffmpeg_codec_raw_audio_view_make(
-        pcm[0:CLI_AUDIO_PCM_BYTES],
-        timestamp_us,
-        CLI_AUDIO_FRAME_DURATION_US,
-        FFMPEG_CODEC_OPUS_SAMPLE_RATE_HZ,
-        1u8,
-        CLI_AUDIO_SAMPLES_PER_CHANNEL,
-    );
-    var encoded_packet: [byte: CLI_ENCODED_PACKET_BYTES] = [];
-    var rtp_packet: [byte: CLI_RTP_PACKET_BYTES] = [];
-    const packetized: FfmpegDirectSenderIngestResult = try ffmpeg_direct_sender_encode_opus_rtp(
-        sender,
-        encoder,
-        &raw,
-        encoded_packet[0:CLI_ENCODED_PACKET_BYTES],
-        rtp_packet[0:CLI_RTP_PACKET_BYTES],
-    );
-    var srtp_packet: [byte: CLI_SRTP_PACKET_BYTES] = [];
-    const srtp_len: usize = try direct_sender_protect_rtp_packet(
-        sender,
-        &runtime.audio_srtp_send,
-        rtp_packet[0:packetized.rtp.rtp_len],
-        srtp_packet[0:CLI_SRTP_PACKET_BYTES],
-    );
-    try cli_send_udp_payload(socket, selected_addr, selected_addr_len, srtp_packet[0:srtp_len]);
-    sender.diagnostics.udp_packets = sender.diagnostics.udp_packets + 1u64;
-}
-
-fn cli_send_video_frame(
-    socket: &UdpSocket,
-    selected_addr: &[byte],
-    selected_addr_len: u32,
-    sender: &UyaDirectSender,
-    runtime: &DirectRuntime,
-    encoder: &FfmpegCodecEncoder,
+    encoder: &Vp8Encoder,
     raw_video_fd: i32,
     video_config: &CliVideoSourceConfig,
-    raw_i420: &[byte],
+    y_plane: &[byte],
+    u_plane: &[byte],
+    v_plane: &[byte],
     encoded_packet: &[byte],
     frame_index: u64,
 ) !void {
-    if video_config == null || raw_i420.len < video_config.i420_bytes || encoded_packet.len == 0usize {
+    if video_config == null || encoder == null || y_plane.len == 0usize || u_plane.len == 0usize || v_plane.len == 0usize || encoded_packet.len == 0usize {
         return error.DirectSenderCliRuntimeFailed;
     }
     if raw_video_fd >= 0i32 {
-        try read_exact_looping(raw_video_fd, raw_i420[0:video_config.i420_bytes]);
+        try read_exact_looping(raw_video_fd, y_plane);
+        try read_exact_looping(raw_video_fd, u_plane);
+        try read_exact_looping(raw_video_fd, v_plane);
     } else {
-        cli_fill_i420(raw_i420[0:video_config.i420_bytes], video_config.width, video_config.height, frame_index);
+        cli_fill_i420_planes(y_plane, u_plane, v_plane, frame_index);
     }
+
     const timestamp_us: u64 = frame_index * (CLI_VIDEO_FRAME_DURATION_US as u64);
-    const raw: FfmpegCodecRawVideoI420View = try ffmpeg_codec_raw_video_i420_view_make(
-        raw_i420[0:video_config.i420_bytes],
-        timestamp_us,
-        CLI_VIDEO_FRAME_DURATION_US,
+    const raw: RawVideoFrame = raw_video_i420_frame_make(
+        y_plane,
+        u_plane,
+        v_plane,
         video_config.width,
         video_config.height,
-    );
-    const frame: EncodedFrame = try ffmpeg_codec_encode_video_i420_to_frame(
+        video_config.width as usize,
+        (video_config.width / 2u32) as usize,
+        (video_config.width / 2u32) as usize,
+        timestamp_us,
+        CLI_VIDEO_FRAME_DURATION_US,
+        frame_index
+    ) catch {
+        return error.DirectSenderCliRuntimeFailed;
+    };
+    const frame: EncodedFrame = vp8_codec_bridge_encode_i420_to_frame(
         encoder,
         &raw,
-        encoded_packet,
-    );
+        encoded_packet
+    ) catch {
+        return error.DirectSenderCliRuntimeFailed;
+    };
 
     const max_fragment_len: usize = try direct_sender_vp8_max_fragment_payload_bytes(sender, &frame);
     if max_fragment_len == 0usize {
@@ -1102,16 +1027,19 @@ fn cli_process_control_datagram(
     return DirectRuntimeOutput{};
 }
 
-fn run_live_sender(
+fn run_live_uya_vp8_sender(
     socket: &UdpSocket,
     offer: &DirectSessionOffer,
     diagnostics_path: &byte,
     raw_video_path: &byte,
-    raw_audio_path: &byte,
     video_source: &CliVideoSourceConfig,
     media_duration_us: u64,
     codec_provider_id: u8,
 ) !UyaDirectSenderDiagnostics {
+    if video_source == null || codec_provider_id != CODEC_PROVIDER_UYA {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+
     var sender: UyaDirectSender = uya_direct_sender_make();
     var sender_config: UyaDirectSenderConfig = uya_direct_sender_config_make();
     const audio_ssrc: u32 = DIRECT_SENDER_DEFAULT_AUDIO_SSRC;
@@ -1129,58 +1057,55 @@ fn run_live_sender(
     var runtime: DirectRuntime = direct_runtime_make();
     try direct_runtime_init(&runtime, audio_ssrc, video_ssrc);
 
-    if codec_provider_id != CODEC_PROVIDER_FFMPEG {
-        _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, false, true, codec_provider_id, false, false) catch {};
-        return error.DirectSenderCliRuntimeFailed;
-    }
-
-    var audio_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_audio_config_make());
-    if audio_encoder_result.error_id != 0 {
-        return error.DirectSenderCliRuntimeFailed;
-    }
-    var audio_encoder: FfmpegCodecEncoder = audio_encoder_result.value;
-
-    var video_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_video_config_make(video_source));
-    if video_encoder_result.error_id != 0 {
-        ffmpeg_codec_encoder_close(&audio_encoder);
-        return error.DirectSenderCliRuntimeFailed;
-    }
-    var video_encoder: FfmpegCodecEncoder = video_encoder_result.value;
-
     const raw_video_fd_result: !i32 = open_optional_read_fd(raw_video_path);
     if raw_video_fd_result.error_id != 0 {
-        ffmpeg_codec_encoder_close(&video_encoder);
-        ffmpeg_codec_encoder_close(&audio_encoder);
         return error.DirectSenderCliFileOpenFailed;
     }
     const raw_video_fd: i32 = raw_video_fd_result.value;
 
-    const raw_audio_fd_result: !i32 = open_optional_read_fd(raw_audio_path);
-    if raw_audio_fd_result.error_id != 0 {
+    const y_bytes: usize = (video_source.width as usize) * (video_source.height as usize);
+    const uv_bytes: usize = y_bytes / 4usize;
+    const y_storage: &byte = malloc(y_bytes) as &byte;
+    if y_storage == null {
         close_optional_fd(raw_video_fd);
-        ffmpeg_codec_encoder_close(&video_encoder);
-        ffmpeg_codec_encoder_close(&audio_encoder);
-        return error.DirectSenderCliFileOpenFailed;
+        return error.DirectSenderCliRuntimeFailed;
     }
-    const raw_audio_fd: i32 = raw_audio_fd_result.value;
+    const u_storage: &byte = malloc(uv_bytes) as &byte;
+    if u_storage == null {
+        free(y_storage as &void);
+        close_optional_fd(raw_video_fd);
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    const v_storage: &byte = malloc(uv_bytes) as &byte;
+    if v_storage == null {
+        free(u_storage as &void);
+        free(y_storage as &void);
+        close_optional_fd(raw_video_fd);
+        return error.DirectSenderCliRuntimeFailed;
+    }
 
-    const raw_video_storage: &byte = malloc(video_source.i420_bytes) as &byte;
-    if raw_video_storage == null {
-        close_optional_fd(raw_audio_fd);
-        close_optional_fd(raw_video_fd);
-        ffmpeg_codec_encoder_close(&video_encoder);
-        ffmpeg_codec_encoder_close(&audio_encoder);
-        return error.DirectSenderCliRuntimeFailed;
+    var output_capacity: usize = video_source.encoded_bytes;
+    const bridge_capacity: !usize = vp8_codec_bridge_default_output_capacity(video_source.width, video_source.height);
+    if bridge_capacity.error_id == 0 && bridge_capacity.value > output_capacity {
+        output_capacity = bridge_capacity.value;
     }
-    const encoded_video_storage: &byte = malloc(video_source.encoded_bytes) as &byte;
+    const encoded_video_storage: &byte = malloc(output_capacity) as &byte;
     if encoded_video_storage == null {
-        free(raw_video_storage as &void);
-        close_optional_fd(raw_audio_fd);
+        free(v_storage as &void);
+        free(u_storage as &void);
+        free(y_storage as &void);
         close_optional_fd(raw_video_fd);
-        ffmpeg_codec_encoder_close(&video_encoder);
-        ffmpeg_codec_encoder_close(&audio_encoder);
         return error.DirectSenderCliRuntimeFailed;
     }
+
+    var encoder: Vp8Encoder = vp8_codec_bridge_encoder_init(video_source.width, video_source.height) catch {
+        free(encoded_video_storage as &void);
+        free(v_storage as &void);
+        free(u_storage as &void);
+        free(y_storage as &void);
+        close_optional_fd(raw_video_fd);
+        return error.DirectSenderCliRuntimeFailed;
+    };
 
     var selected_addr: [byte: UDP_SOCKADDR_BYTES] = [];
     var selected_addr_len: u32 = 0u32;
@@ -1188,23 +1113,21 @@ fn run_live_sender(
     const start_us: u64 = cli_now_us();
     var dtls_ready: bool = false;
     var media_start_us: u64 = 0u64;
-    var next_audio_us: u64 = 0u64;
     var next_video_us: u64 = 0u64;
     var next_rtcp_us: u64 = 0u64;
-    var audio_frames_sent: u64 = 0u64;
     var video_frames_sent: u64 = 0u64;
     const live_timeout_us: u64 = cli_live_timeout_us(media_duration_us);
 
     while true {
         const now_us: u64 = cli_now_us();
         if now_us > start_us && now_us - start_us > live_timeout_us {
-            _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, dtls_ready, true, codec_provider_id, false, false) catch {};
+            _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, dtls_ready, true, codec_provider_id, true, raw_video_path != null, false) catch {};
+            vp8_codec_bridge_encoder_deinit(&encoder);
             free(encoded_video_storage as &void);
-            free(raw_video_storage as &void);
-            close_optional_fd(raw_audio_fd);
+            free(v_storage as &void);
+            free(u_storage as &void);
+            free(y_storage as &void);
             close_optional_fd(raw_video_fd);
-            ffmpeg_codec_encoder_close(&video_encoder);
-            ffmpeg_codec_encoder_close(&audio_encoder);
             return error.DirectSenderCliRuntimeFailed;
         }
 
@@ -1243,7 +1166,6 @@ fn run_live_sender(
                 if control_out.value.dtls_srtp_ready && !dtls_ready {
                     dtls_ready = true;
                     media_start_us = now_us;
-                    next_audio_us = now_us;
                     next_video_us = now_us;
                     next_rtcp_us = now_us;
                 }
@@ -1255,46 +1177,42 @@ fn run_live_sender(
         if dtls_ready && selected_addr_len != 0u32 {
             const media_elapsed_us: u64 = if now_us > media_start_us { now_us - media_start_us } else { 0u64 };
             if media_elapsed_us <= media_duration_us {
-                if now_us >= next_audio_us {
-                    try cli_send_audio_frame(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, &audio_encoder, raw_audio_fd, audio_frames_sent);
-                    audio_frames_sent = audio_frames_sent + 1u64;
-                    next_audio_us = next_audio_us + (CLI_AUDIO_FRAME_DURATION_US as u64);
-                }
                 if now_us >= next_video_us {
-                    try cli_send_video_frame(
+                    try cli_send_uya_vp8_live_frame(
                         socket,
                         selected_addr[0:UDP_SOCKADDR_BYTES],
                         selected_addr_len,
                         &sender,
                         &runtime,
-                        &video_encoder,
+                        &encoder,
                         raw_video_fd,
                         video_source,
-                        raw_video_storage[0:video_source.i420_bytes],
-                        encoded_video_storage[0:video_source.encoded_bytes],
+                        y_storage[0:y_bytes],
+                        u_storage[0:uv_bytes],
+                        v_storage[0:uv_bytes],
+                        encoded_video_storage[0:output_capacity],
                         video_frames_sent,
                     );
                     video_frames_sent = video_frames_sent + 1u64;
                     next_video_us = next_video_us + (CLI_VIDEO_FRAME_DURATION_US as u64);
                 }
                 if now_us >= next_rtcp_us {
-                    try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_AUDIO, now_us);
                     try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_VIDEO, now_us);
                     next_rtcp_us = next_rtcp_us + CLI_RTCP_REPORT_INTERVAL_US;
                 }
-            } else if audio_frames_sent > 0u64 && video_frames_sent > 0u64 {
+            } else if video_frames_sent > 0u64 {
                 break;
             }
         }
     }
 
+    vp8_codec_bridge_encoder_deinit(&encoder);
     free(encoded_video_storage as &void);
-    free(raw_video_storage as &void);
-    close_optional_fd(raw_audio_fd);
+    free(v_storage as &void);
+    free(u_storage as &void);
+    free(y_storage as &void);
     close_optional_fd(raw_video_fd);
-    ffmpeg_codec_encoder_close(&video_encoder);
-    ffmpeg_codec_encoder_close(&audio_encoder);
-    try write_diagnostics_counts(diagnostics_path, &sender.diagnostics, true, true, codec_provider_id, false, false);
+    try write_diagnostics_counts(diagnostics_path, &sender.diagnostics, true, true, codec_provider_id, true, raw_video_path != null, false);
     return sender.diagnostics;
 }
 
@@ -1304,12 +1222,11 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var answer_path: &byte = null;
     var diagnostics_path: &byte = null;
     var raw_video_path: &byte = null;
-    var raw_audio_path: &byte = null;
     var video_width: u32 = CLI_DEFAULT_VIDEO_WIDTH;
     var video_height: u32 = CLI_DEFAULT_VIDEO_HEIGHT;
     var media_duration_us: u64 = CLI_LIVE_MEDIA_DURATION_US;
     var dry_run: bool = false;
-    var codec_provider_id: u8 = CODEC_PROVIDER_FFMPEG;
+    var codec_provider_id: u8 = CODEC_PROVIDER_UYA;
 
     const args_result: !void = parse_args(
         argc,
@@ -1319,7 +1236,6 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         &answer_path,
         &diagnostics_path,
         &raw_video_path,
-        &raw_audio_path,
         &video_width,
         &video_height,
         &media_duration_us,
@@ -1342,12 +1258,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var offer_len: usize = 0usize;
     const read_result: !void = read_file_bytes(offer_path, offer_buf[0:CLI_MAX_OFFER_BYTES], &offer_len);
     if read_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to read offer JSON\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: failed to read offer JSON\n" as &[byte]);
         return 3;
     }
     const offer_result: !void = validate_offer(offer_buf[0:offer_len]);
     if offer_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: Chrome offer missing Opus/VP8 audio/video media\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: Chrome offer missing Opus/VP8 audio/video media\n" as &[byte]);
         return 4;
     }
 
@@ -1355,12 +1271,12 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var offer_sdp_len: usize = 0usize;
     const extract_result: !void = extract_offer_sdp_json(offer_buf[0:offer_len], offer_sdp[0:CLI_MAX_SDP_BYTES], &offer_sdp_len);
     if extract_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to extract Chrome offer SDP JSON string\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: failed to extract Chrome offer SDP JSON string\n" as &[byte]);
         return 4;
     }
     const session_result: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp(offer_sdp[0:offer_sdp_len]);
     if session_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: Chrome offer SDP is not a recvonly Opus/VP8 host-ICE offer\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: Chrome offer SDP is not a recvonly Opus/VP8 host-ICE offer\n" as &[byte]);
         return 4;
     }
 
@@ -1374,7 +1290,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         socket_config.reuse_port = false;
         const socket_result: !UdpSocket = udp_socket_open(socket_config);
         if socket_result.error_id != 0 {
-            cli_write_stderr("uya_ffmpeg_direct_sender: failed to open UDP socket\n" as &[byte]);
+            cli_write_stderr("uya_vp8_direct_sender: failed to open UDP socket\n" as &[byte]);
             return 5;
         }
         live_socket = socket_result.value;
@@ -1392,7 +1308,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         answer_sdp[0:CLI_MAX_ANSWER_SDP_BYTES],
     );
     if answer_len.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to build Uya passive SDP answer\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: failed to build Uya passive SDP answer\n" as &[byte]);
         if !dry_run {
             udp_socket_close(&live_socket);
         }
@@ -1400,7 +1316,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
     const answer_result: !void = write_answer_json(answer_path, answer_sdp[0:answer_len.value]);
     if answer_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to write answer JSON\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: failed to write answer JSON\n" as &[byte]);
         if !dry_run {
             udp_socket_close(&live_socket);
         }
@@ -1408,9 +1324,9 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     var empty_diagnostics: UyaDirectSenderDiagnostics = uya_direct_sender_diagnostics_make();
-    const diagnostics_result: !void = write_diagnostics_counts(diagnostics_path, &empty_diagnostics, false, true, codec_provider_id, false, false);
+    const diagnostics_result: !void = write_diagnostics_counts(diagnostics_path, &empty_diagnostics, false, true, codec_provider_id, codec_provider_id == CODEC_PROVIDER_UYA, raw_video_path != null, false);
     if diagnostics_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to write diagnostics JSON\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: failed to write diagnostics JSON\n" as &[byte]);
         if !dry_run {
             udp_socket_close(&live_socket);
         }
@@ -1420,17 +1336,25 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     _ = media_path;
     _ = answer_path;
     if dry_run {
-        cli_write_stderr("uya_ffmpeg_direct_sender dry-run diagnostics written\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender dry-run diagnostics written\n" as &[byte]);
         return 0;
     }
 
-    const live_result: !UyaDirectSenderDiagnostics = run_live_sender(&live_socket, &session_result.value, diagnostics_path, raw_video_path, raw_audio_path, &video_source, media_duration_us, codec_provider_id);
+    const live_result: !UyaDirectSenderDiagnostics = run_live_uya_vp8_sender(
+        &live_socket,
+        &session_result.value,
+        diagnostics_path,
+        raw_video_path,
+        &video_source,
+        media_duration_us,
+        codec_provider_id,
+    );
     udp_socket_close(&live_socket);
     if live_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: live Chrome send failed before media completed\n" as &[byte]);
+        cli_write_stderr("uya_vp8_direct_sender: live Chrome send failed before media completed\n" as &[byte]);
         return 6;
     }
 
-    cli_write_stderr("uya_ffmpeg_direct_sender: live Chrome media send completed\n" as &[byte]);
+    cli_write_stderr("uya_vp8_direct_sender: live Chrome media send completed\n" as &[byte]);
     return 0;
 }
