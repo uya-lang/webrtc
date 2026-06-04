@@ -63,10 +63,13 @@ UYA_DIRECT_SENDER_MAIN = REPO_ROOT / "src" / "webrtc_uya_vp8_direct_sender_main.
 VIDEO_WIDTH = 32
 VIDEO_HEIGHT = 18
 MEDIA_DURATION_US = 3_000_000
-UYA_VP8_PREVIEW_FPS = 30
-UYA_VP8_FRAME_DURATION_US = 33_333
+UYA_VP8_DEFAULT_PREVIEW_FPS = 30
+UYA_VP8_AUTO_PREVIEW_FPS = 0
+UYA_VP8_DEFAULT_FRAME_DURATION_US = 33_333
 UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH = 160
 UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS = 2.0
+UYA_VP8_FORCE_SCALAR_ENV = "UYA_VP8_FORCE_SCALAR"
+UYA_VP8_PREVIEW_CFLAGS_ENV = "UYA_VP8_PREVIEW_CFLAGS"
 
 
 @dataclass
@@ -86,6 +89,7 @@ class UyaVp8PreviewAssets:
     video_width: int
     video_height: int
     media_duration_us: int
+    video_frame_duration_us: int = UYA_VP8_DEFAULT_FRAME_DURATION_US
 
 
 @dataclass
@@ -93,6 +97,14 @@ class ManualVp8PreviewSession:
     session_id: str
     handle: SenderHandle
     workdir: Path
+
+
+@dataclass
+class PreviewSenderExecutable:
+    path: Path
+    stage_src: Path
+    stdout_path: Path
+    stderr_path: Path
 
 
 def make_video_only_page() -> str:
@@ -632,9 +644,28 @@ def stage_vp8_package(stage_root: Path) -> Path:
     shutil.copytree(REPO_ROOT / "src", stage_src, dirs_exist_ok=True)
     (stage_src / "vp8").mkdir(parents=True, exist_ok=True)
     shutil.copytree(VP8_REPO / "src" / "vp8", stage_src / "vp8", dirs_exist_ok=True)
-    force_staged_vp8_scalar_kernels(stage_src)
+    if vp8_force_scalar_enabled():
+        force_staged_vp8_scalar_kernels(stage_src)
     stage_uya_lib(stage_root / "lib")
     return stage_src
+
+
+def vp8_force_scalar_enabled() -> bool:
+    value = os.environ.get(UYA_VP8_FORCE_SCALAR_ENV, "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+def preview_sender_cflags() -> str:
+    return os.environ.get(UYA_VP8_PREVIEW_CFLAGS_ENV, "").strip()
+
+
+def uya_sender_env(stage_src: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["UYA_ROOT"] = str(stage_src.parent / "lib")
+    cflags = preview_sender_cflags()
+    if cflags:
+        env["CFLAGS"] = cflags
+    return env
 
 
 def stage_uya_lib(stage_lib: Path) -> None:
@@ -734,14 +765,16 @@ def prepare_synthetic_uya_vp8_preview(workdir: Path) -> UyaVp8PreviewAssets:
         video_width=VIDEO_WIDTH,
         video_height=VIDEO_HEIGHT,
         media_duration_us=MEDIA_DURATION_US,
+        video_frame_duration_us=UYA_VP8_DEFAULT_FRAME_DURATION_US,
         source_stats={
             "source_kind": "synthetic",
             "source_video_codec": "raw-i420",
             "encoder": "uya-vp8-live",
             "preview_width": VIDEO_WIDTH,
             "preview_height": VIDEO_HEIGHT,
-            "preview_fps": UYA_VP8_PREVIEW_FPS,
+            "preview_fps": UYA_VP8_DEFAULT_PREVIEW_FPS,
             "preview_duration_us": MEDIA_DURATION_US,
+            "preview_frame_duration_us": UYA_VP8_DEFAULT_FRAME_DURATION_US,
             "preview_video_bytes": raw_video_path.stat().st_size,
         },
     )
@@ -774,12 +807,29 @@ def preview_duration_seconds(source_duration_seconds: float, max_duration_second
     return source_duration_seconds
 
 
+def resolve_preview_fps(video_width: int, requested_fps: int) -> int:
+    if requested_fps > 0:
+        return requested_fps
+    if video_width >= 640:
+        return 10
+    if video_width >= 320:
+        return 15
+    return UYA_VP8_DEFAULT_PREVIEW_FPS
+
+
+def preview_frame_duration_us(preview_fps: int) -> int:
+    if preview_fps <= 0:
+        raise AssertionError(f"Uya VP8 preview FPS must be positive: {preview_fps}")
+    return max(1, int(1_000_000 / preview_fps))
+
+
 def prepare_mp4_uya_vp8_preview(
     source_mp4: Path,
     workdir: Path,
     *,
     max_video_width: int = UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH,
     max_duration_seconds: float = UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS,
+    preview_fps: int = UYA_VP8_AUTO_PREVIEW_FPS,
 ) -> UyaVp8PreviewAssets:
     source_mp4 = source_mp4.expanduser().resolve()
     if not source_mp4.exists():
@@ -797,10 +847,12 @@ def prepare_mp4_uya_vp8_preview(
     clipped_duration_seconds = preview_duration_seconds(source_duration_seconds, max_duration_seconds)
     duration_text = f"{clipped_duration_seconds:.6f}".rstrip("0").rstrip(".")
     video_width, video_height = scaled_preview_dimensions(source_width, source_height, max_video_width)
+    resolved_preview_fps = resolve_preview_fps(video_width, preview_fps)
+    frame_duration_us = preview_frame_duration_us(resolved_preview_fps)
     print(
         "preparing Uya VP8 MP4 preview: "
         f"source={source_width}x{source_height} duration={source_duration_seconds:.3f}s "
-        f"preview={video_width}x{video_height} duration={duration_text}s",
+        f"preview={video_width}x{video_height} duration={duration_text}s fps={resolved_preview_fps}",
         flush=True,
     )
 
@@ -823,7 +875,7 @@ def prepare_mp4_uya_vp8_preview(
             "-vf",
             f"scale={video_width}:{video_height}:flags=bicubic,format=yuv420p",
             "-r",
-            str(UYA_VP8_PREVIEW_FPS),
+            str(resolved_preview_fps),
             "-an",
             "-f",
             "rawvideo",
@@ -838,7 +890,7 @@ def prepare_mp4_uya_vp8_preview(
     if raw_size % frame_bytes != 0:
         raise AssertionError(f"raw MP4 video size is not frame-aligned: {raw_size} % {frame_bytes}")
     frame_count = raw_size // frame_bytes
-    media_duration_us = max(1, int(frame_count * UYA_VP8_FRAME_DURATION_US))
+    media_duration_us = max(1, int(frame_count * frame_duration_us))
     print(
         "prepared Uya VP8 live preview source: "
         f"frames={frame_count} size={video_width}x{video_height}",
@@ -850,6 +902,7 @@ def prepare_mp4_uya_vp8_preview(
         video_width=video_width,
         video_height=video_height,
         media_duration_us=media_duration_us,
+        video_frame_duration_us=frame_duration_us,
         source_stats={
             "source_kind": "mp4",
             "source_path": str(source_mp4),
@@ -861,10 +914,12 @@ def prepare_mp4_uya_vp8_preview(
             "source_height": source_height,
             "preview_width": video_width,
             "preview_height": video_height,
-            "preview_fps": UYA_VP8_PREVIEW_FPS,
+            "preview_fps": resolved_preview_fps,
+            "preview_requested_fps": preview_fps,
             "preview_max_width": max_video_width,
             "preview_max_duration_seconds": str(max_duration_seconds),
             "preview_duration_us": media_duration_us,
+            "preview_frame_duration_us": frame_duration_us,
             "preview_frame_count": frame_count,
             "preview_video_bytes": raw_size,
             "encoder": "uya-vp8-live",
@@ -878,6 +933,7 @@ def prepare_uya_vp8_preview(
     *,
     max_video_width: int = UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH,
     max_duration_seconds: float = UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS,
+    preview_fps: int = UYA_VP8_AUTO_PREVIEW_FPS,
 ) -> UyaVp8PreviewAssets:
     if source_mp4 is not None:
         return prepare_mp4_uya_vp8_preview(
@@ -885,6 +941,7 @@ def prepare_uya_vp8_preview(
             workdir,
             max_video_width=max_video_width,
             max_duration_seconds=max_duration_seconds,
+            preview_fps=preview_fps,
         )
     return prepare_synthetic_uya_vp8_preview(workdir)
 
@@ -898,6 +955,55 @@ def sender_failure_message(message: str, handle: SenderHandle | None, stdout_pat
     )
 
 
+def build_failure_message(message: str, returncode: int, stdout_path: Path, stderr_path: Path) -> str:
+    return (
+        f"{message}\n"
+        f"returncode={returncode}\n"
+        f"stdout:\n{read_text_tail(stdout_path)}\n"
+        f"stderr:\n{read_text_tail(stderr_path)}"
+    )
+
+
+def build_uya_vp8_sender(build_root: Path) -> PreviewSenderExecutable:
+    if not UYA_BIN.exists():
+        raise AssertionError(f"Uya compiler/runtime not found at {UYA_BIN}")
+    shutil.rmtree(build_root, ignore_errors=True)
+    build_root.mkdir(parents=True, exist_ok=True)
+    stage_src = stage_vp8_package(build_root / "legacy-uya-vp8-live-source")
+    exe_path = build_root / "uya_vp8_direct_sender"
+    stdout_path = build_root / "uya_vp8_sender_build.stdout.log"
+    stderr_path = build_root / "uya_vp8_sender_build.stderr.log"
+    command = [
+        str(UYA_BIN),
+        "build",
+        str(stage_src / UYA_DIRECT_SENDER_MAIN.name),
+        "--no-split-c",
+        "-o",
+        str(exe_path),
+    ]
+    with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env=uya_sender_env(stage_src),
+            text=True,
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+    if completed.returncode != 0:
+        raise AssertionError(
+            build_failure_message(
+                "uya_vp8 direct sender build failed",
+                completed.returncode,
+                stdout_path,
+                stderr_path,
+            )
+        )
+    if not exe_path.exists():
+        raise AssertionError(f"uya_vp8 direct sender build did not create executable: {exe_path}")
+    return PreviewSenderExecutable(exe_path, stage_src, stdout_path, stderr_path)
+
+
 def start_uya_sender(
     offer: dict[str, str],
     raw_video_path: Path,
@@ -906,6 +1012,8 @@ def start_uya_sender(
     video_width: int = VIDEO_WIDTH,
     video_height: int = VIDEO_HEIGHT,
     media_duration_us: int = MEDIA_DURATION_US,
+    video_frame_duration_us: int = UYA_VP8_DEFAULT_FRAME_DURATION_US,
+    sender_executable: PreviewSenderExecutable | None = None,
 ) -> SenderHandle:
     offer_path = workdir / "chrome_offer.json"
     answer_path = workdir / "uya_answer.json"
@@ -917,16 +1025,14 @@ def start_uya_sender(
         raise AssertionError(f"Uya compiler/runtime not found at {UYA_BIN}")
     if not raw_video_path.exists():
         raise AssertionError(f"raw Uya VP8 source is missing: {raw_video_path}")
-    stage_src = stage_vp8_package(workdir / "legacy-uya-vp8-live-source")
+    stage_src: Path | None = None
+    if sender_executable is None:
+        stage_src = stage_vp8_package(workdir / "legacy-uya-vp8-live-source")
 
     stdout_file = stdout_path.open("w", encoding="utf-8")
     stderr_file = stderr_path.open("w", encoding="utf-8")
     try:
-        command = [
-            str(UYA_BIN),
-            "run",
-            str(stage_src / UYA_DIRECT_SENDER_MAIN.name),
-            "--",
+        program_args = [
             "--offer-json",
             str(offer_path),
             "--media",
@@ -945,9 +1051,22 @@ def start_uya_sender(
             str(video_height),
             "--media-duration-us",
             str(media_duration_us),
+            "--video-frame-duration-us",
+            str(video_frame_duration_us),
         ]
-        env = os.environ.copy()
-        env["UYA_ROOT"] = str(stage_src.parent / "lib")
+        if sender_executable is None:
+            assert stage_src is not None
+            command = [
+                str(UYA_BIN),
+                "run",
+                str(stage_src / UYA_DIRECT_SENDER_MAIN.name),
+                "--",
+                *program_args,
+            ]
+            env = uya_sender_env(stage_src)
+        else:
+            command = [str(sender_executable.path), *program_args]
+            env = os.environ.copy()
         proc = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
@@ -1030,12 +1149,16 @@ class ManualVp8PreviewState:
         video_width: int,
         video_height: int,
         media_duration_us: int,
+        video_frame_duration_us: int,
+        sender_executable: PreviewSenderExecutable | None = None,
     ) -> None:
         self.preview_dir = preview_dir
         self.raw_video_path = raw_video_path
         self.video_width = video_width
         self.video_height = video_height
         self.media_duration_us = media_duration_us
+        self.video_frame_duration_us = video_frame_duration_us
+        self.sender_executable = sender_executable
         self.sessions_dir = preview_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, ManualVp8PreviewSession] = {}
@@ -1052,6 +1175,8 @@ class ManualVp8PreviewState:
             video_width=self.video_width,
             video_height=self.video_height,
             media_duration_us=self.media_duration_us,
+            video_frame_duration_us=self.video_frame_duration_us,
+            sender_executable=self.sender_executable,
         )
         with self.lock:
             self.sessions[session_id] = ManualVp8PreviewSession(session_id, handle, workdir)
@@ -1153,13 +1278,20 @@ def start_manual_preview_server(
     video_width: int,
     video_height: int,
     media_duration_us: int,
+    video_frame_duration_us: int,
 ) -> tuple[ThreadingHTTPServer, threading.Thread, int, ManualVp8PreviewState]:
+    cflags_note = f" cflags={preview_sender_cflags()}" if preview_sender_cflags() else ""
+    print(f"building Uya VP8 preview sender:{cflags_note}", flush=True)
+    sender_executable = build_uya_vp8_sender(preview_dir / "sender-build")
+    print(f"built Uya VP8 preview sender: {sender_executable.path}", flush=True)
     state = ManualVp8PreviewState(
         preview_dir,
         raw_video_path,
         video_width,
         video_height,
         media_duration_us,
+        video_frame_duration_us,
+        sender_executable=sender_executable,
     )
     port = find_free_port()
     handler = partial(ManualVp8PreviewHandler, directory=str(preview_dir), state=state)
@@ -1281,6 +1413,7 @@ def run_manual_preview_chrome_page(preview_dir: Path, assets: UyaVp8PreviewAsset
         assets.video_width,
         assets.video_height,
         assets.media_duration_us,
+        assets.video_frame_duration_us,
     )
     browser_user_data_dir = preview_dir / "manual-profile"
     browser_user_data_dir.mkdir(exist_ok=True)
@@ -1391,6 +1524,7 @@ def write_preview_manifest(preview_dir: Path, assets: UyaVp8PreviewAssets) -> No
         "video_width": assets.video_width,
         "video_height": assets.video_height,
         "media_duration_us": assets.media_duration_us,
+        "video_frame_duration_us": assets.video_frame_duration_us,
         "source_stats": assets.source_stats,
     }
     (preview_dir / "preview_manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
@@ -1412,6 +1546,7 @@ def read_preview_manifest(preview_dir: Path) -> UyaVp8PreviewAssets:
         video_width=int(manifest.get("video_width") or 0),
         video_height=int(manifest.get("video_height") or 0),
         media_duration_us=int(manifest.get("media_duration_us") or MEDIA_DURATION_US),
+        video_frame_duration_us=int(manifest.get("video_frame_duration_us") or UYA_VP8_DEFAULT_FRAME_DURATION_US),
         source_stats=source_stats,
     )
 
@@ -1422,6 +1557,7 @@ def write_preview(
     *,
     max_video_width: int = UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH,
     max_duration_seconds: float = UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS,
+    preview_fps: int = UYA_VP8_AUTO_PREVIEW_FPS,
 ) -> str:
     preview_dir.mkdir(parents=True, exist_ok=True)
     assets = prepare_uya_vp8_preview(
@@ -1429,6 +1565,7 @@ def write_preview(
         source_mp4=source_mp4,
         max_video_width=max_video_width,
         max_duration_seconds=max_duration_seconds,
+        preview_fps=preview_fps,
     )
     page_path = preview_dir / "index.html"
     page_path.write_text(make_manual_preview_page(assets.source_stats), encoding="utf-8")
@@ -1445,6 +1582,7 @@ def serve_preview(preview_dir: Path) -> int:
         assets.video_width,
         assets.video_height,
         assets.media_duration_us,
+        assets.video_frame_duration_us,
     )
     url = f"http://127.0.0.1:{http_port}/"
     print(f"uya vp8 chrome direct preview serving: {url}", flush=True)
@@ -1468,6 +1606,7 @@ def run_manual_preview_flow(
     *,
     max_video_width: int = UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH,
     max_duration_seconds: float = UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS,
+    preview_fps: int = UYA_VP8_AUTO_PREVIEW_FPS,
 ) -> str:
     with tempfile.TemporaryDirectory(prefix="webrtc-uya-vp8-chrome-manual-preview-") as tmp:
         tempdir_path = Path(tmp)
@@ -1476,6 +1615,7 @@ def run_manual_preview_flow(
             source_mp4=source_mp4,
             max_video_width=max_video_width,
             max_duration_seconds=max_duration_seconds,
+            preview_fps=preview_fps,
         )
         (tempdir_path / "index.html").write_text(make_manual_preview_page(assets.source_stats), encoding="utf-8")
         write_preview_manifest(tempdir_path, assets)
@@ -1521,6 +1661,7 @@ def main() -> int:
     parser.add_argument("--source-mp4", type=Path, help="prepare this MP4 as the raw source for pure Uya VP8 preview")
     parser.add_argument("--max-video-width", type=int, default=UYA_VP8_DEFAULT_PREVIEW_MAX_WIDTH, help="downscale MP4 preview to this width before pure Uya VP8 encoding; use 0 to keep source width")
     parser.add_argument("--max-duration-seconds", type=float, default=UYA_VP8_DEFAULT_PREVIEW_MAX_DURATION_SECONDS, help="clip MP4 preview duration before pure Uya VP8 encoding; use 0 for full source duration")
+    parser.add_argument("--preview-fps", type=int, default=UYA_VP8_AUTO_PREVIEW_FPS, help="sample MP4 preview at this FPS and send frames at the matching interval; use 0 for automatic width-based preview FPS")
     parser.add_argument("--serve-preview", action="store_true", help="serve the manual preview page and wait until Ctrl-C")
     parser.add_argument("--manual-preview-e2e", action="store_true", help="launch Chrome, click the manual preview button, and verify Uya VP8 media")
     args = parser.parse_args()
@@ -1532,6 +1673,7 @@ def main() -> int:
                     source_mp4=args.source_mp4,
                     max_video_width=args.max_video_width,
                     max_duration_seconds=args.max_duration_seconds,
+                    preview_fps=args.preview_fps,
                 ),
                 flush=True,
             )
@@ -1544,6 +1686,7 @@ def main() -> int:
                     source_mp4=args.source_mp4,
                     max_video_width=args.max_video_width,
                     max_duration_seconds=args.max_duration_seconds,
+                    preview_fps=args.preview_fps,
                 ),
                 flush=True,
             )

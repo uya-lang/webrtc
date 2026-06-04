@@ -26,13 +26,22 @@ fi
 rg -Fq "preview-uya-vp8-chrome-call" Makefile
 rg -Fq "UYA_VP8_PREVIEW_MAX_WIDTH" Makefile
 rg -Fq "UYA_VP8_PREVIEW_MAX_DURATION" Makefile
+rg -Fq "UYA_VP8_PREVIEW_FPS" Makefile
+rg -Fq "UYA_VP8_FORCE_SCALAR" Makefile
+rg -Fq "UYA_VP8_PREVIEW_CFLAGS" Makefile
 rg -Fq -- "--source-mp4" tests/uya_vp8_chrome_call.py
 rg -Fq -- "--max-video-width" tests/uya_vp8_chrome_call.py
 rg -Fq -- "--max-duration-seconds" tests/uya_vp8_chrome_call.py
+rg -Fq -- "--preview-fps" tests/uya_vp8_chrome_call.py
+rg -Fq -- "--video-frame-duration-us" tests/uya_vp8_chrome_call.py
 rg -Fq "make_manual_preview_page" tests/uya_vp8_chrome_call.py
 rg -Fq "stage_uya_lib" tests/uya_vp8_chrome_call.py
 rg -Fq 'env["UYA_ROOT"]' tests/uya_vp8_chrome_call.py
+rg -Fq "vp8_force_scalar_enabled" tests/uya_vp8_chrome_call.py
 rg -Fq "force_staged_vp8_scalar_kernels" tests/uya_vp8_chrome_call.py
+rg -Fq "build_uya_vp8_sender" tests/uya_vp8_chrome_call.py
+rg -Fq "PreviewSenderExecutable" tests/uya_vp8_chrome_call.py
+rg -Fq -- "--video-frame-duration-us" src/webrtc_uya_vp8_direct_sender_main.uya
 rg -Fq "patch_staged_tls_ec_calls" tests/uya_vp8_chrome_call.py
 rg -Fq "codecProviderUsesExtern" tests/uya_vp8_chrome_call.py
 rg -Fq "uyaVp8VideoReady" tests/uya_vp8_chrome_call.py

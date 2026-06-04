@@ -18,7 +18,7 @@ FFmpeg 只作为显式 reference codec / Chrome interop 测试边界使用，用
 - Uya direct sender：支持在发送循环中通过显式 FFmpeg reference codec 将 raw PCM/I420 实时编码为 Opus/VP8 encoded frames，再由 Uya 侧完成 RTP、SRTP、SRTCP、UDP 发送给 Chrome recvonly peer。
 - 纯 Uya VP8 bridge：显式 codec bridge gate 已 legacy-staging `../vp8` sibling，覆盖 I420 -> VP8 `EncodedFrame` -> I420 roundtrip 以及 RTP VP8 descriptor/reassembly 语义。
 - 纯 Uya VP8 Chrome gate：`make test-uya-vp8-chrome-call` 显式 legacy-staging `../vp8` sibling，Uya sender 在发送循环中将 raw I420 编码为 VP8 `EncodedFrame` 后推给 Chrome recvonly peer，并验证 video-only inbound RTP 与 decoded frames。
-- 纯 Uya VP8 手工预览：`make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4` 支持 MP4 源 video-only 预览；默认将 MP4 预览缩到 160px 宽并截取 2s，避免当前纯 Uya VP8 scalar encoder 在 live send loop 中长时间占满 CPU；FFmpeg 只用于显式 MP4 -> raw I420 源转换，VP8 编码、RTP/SRTP/UDP 发送与 Chrome 解码验证走 Uya direct sender。
+- 纯 Uya VP8 手工预览：`make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4` 支持 MP4 源 video-only 预览；默认将 MP4 预览缩到 160px 宽并截取 2s，并按宽度自动选择 FPS，可用 `UYA_VP8_PREVIEW_FPS` 覆盖以降低纯 Uya keyframe 编码负载；preview server 先用 `UYA_VP8_PREVIEW_CFLAGS` 预构建 Uya sender，点击 Start 时直接运行 executable；默认保留 VP8 SIMD/asm dispatch，可用 `UYA_VP8_FORCE_SCALAR=1` 复现 scalar 路径；FFmpeg 只用于显式 MP4 -> raw I420 源转换，VP8 编码、RTP/SRTP/UDP 发送与 Chrome 解码验证走 Uya direct sender。
 - 手工预览：`make preview-ffmpeg-chrome-call` 可启动本地预览页，播放 Chrome remote `<video>`，并显示 Chrome inbound stats 与 Uya sender diagnostics。
 - MP4 源预览：预览命令支持指定 MP4，按源视频实际尺寸和 duration 转换为 raw I420 + mono s16le 后推给 Chrome。
 - 版本化 CLI：`build/webrtc-uya version` 输出 `webrtc-uya 0.1.0`。
@@ -48,6 +48,9 @@ make preview-ffmpeg-chrome-call
 make preview-ffmpeg-chrome-call MP4=/absolute/path/to/source.mp4
 make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4
 make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4 UYA_VP8_PREVIEW_MAX_WIDTH=320 UYA_VP8_PREVIEW_MAX_DURATION=3
+make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4 UYA_VP8_PREVIEW_MAX_WIDTH=640 UYA_VP8_PREVIEW_MAX_DURATION=20 UYA_VP8_PREVIEW_FPS=10
+make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4 UYA_VP8_FORCE_SCALAR=1
+make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4 UYA_VP8_PREVIEW_CFLAGS='-std=c99 -O2 -g -fno-builtin'
 ```
 
 ## 发布验证

@@ -38,6 +38,6 @@ make bench
 - `make test-codec-bridge`：显式运行 codec bridge gate；当前会 legacy-staging `../vp8` 纯 Uya sibling，验证 I420 -> VP8 `EncodedFrame` -> I420 以及 RTP VP8 descriptor/reassembly 语义。
 - `make test-ffmpeg-chrome-call`：显式启用 FFmpeg reference codec，Uya direct sender 在发送循环中将 raw PCM/I420 实时编码成 Opus/VP8 后推给 Chrome recvonly peer。
 - `make test-uya-vp8-chrome-call`：显式 legacy-staging `../vp8` 纯 Uya sibling，Uya sender 在发送循环中将 raw I420 实时编码为 VP8 `EncodedFrame`，再通过 RTP/SRTP/UDP 推给 Chrome recvonly peer；当前验证 video-only，Opus 音频 bridge 仍未接入。
-- `make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4`：显式将 MP4 转成 raw I420 源，再由 Uya VP8 live sender 调用 `../vp8` 纯 Uya bridge 实时编码并推给浏览器预览；默认预览会缩到 160px 宽、截取 2s，可用 `UYA_VP8_PREVIEW_MAX_WIDTH=320 UYA_VP8_PREVIEW_MAX_DURATION=3` 调整；该路径 video-only，不启用 Opus。
+- `make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4`：显式将 MP4 转成 raw I420 源，再由 Uya VP8 live sender 调用 `../vp8` 纯 Uya bridge 实时编码并推给浏览器预览；默认预览会缩到 160px 宽、截取 2s，并按宽度自动选择 FPS（640px 走 10fps，320px 走 15fps，小尺寸走 30fps），可用 `UYA_VP8_PREVIEW_MAX_WIDTH=320 UYA_VP8_PREVIEW_MAX_DURATION=3 UYA_VP8_PREVIEW_FPS=15` 调整；preview server 会先用 `UYA_VP8_PREVIEW_CFLAGS`（默认 `-std=c99 -O3 -g -fno-builtin`）构建 sender，点击 Start 时直接运行该 executable；默认保留 VP8 SIMD/asm dispatch，必要时可用 `UYA_VP8_FORCE_SCALAR=1` 复现 scalar 路径；该路径 video-only，不启用 Opus。
 
 发布记录见 [CHANGELOG.md](CHANGELOG.md)。

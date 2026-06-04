@@ -14,7 +14,7 @@
 - `make test-codec-bridge` 已接入纯 Uya `../vp8` sibling 的显式 bridge gate，覆盖 I420 -> VP8 `EncodedFrame` -> I420 roundtrip 以及 RTP VP8 descriptor/reassembly 语义。
 - `make test-uya-vp8-chrome-call` 已接入纯 Uya `../vp8` sibling 的 video-only Chrome E2E：Uya VP8 live sender 在发送循环中调用 `../vp8` bridge 将 raw I420 编码为 VP8 `EncodedFrame`，再完成 RTP/SRTP/UDP 发送，Chrome recvonly peer 验证 inbound RTP 和 decoded VP8 frames。
 - `make preview-ffmpeg-chrome-call` 提供手工预览入口，支持默认测试源和指定 MP4 源。
-- `make preview-uya-vp8-chrome-call` 提供纯 Uya VP8 video-only 手工预览入口，支持 `MP4=/absolute/path/to/source.mp4`；默认将 MP4 预览缩到 160px 宽并截取 2s，避免当前纯 Uya VP8 scalar encoder 在 live send loop 中长时间占满 CPU；FFmpeg 只用于显式 MP4 -> raw I420 源转换，VP8 编码与 RTP/SRTP/UDP 发送仍走 Uya。
+- `make preview-uya-vp8-chrome-call` 提供纯 Uya VP8 video-only 手工预览入口，支持 `MP4=/absolute/path/to/source.mp4`；默认将 MP4 预览缩到 160px 宽并截取 2s，并按宽度自动选择 FPS，可用 `UYA_VP8_PREVIEW_FPS` 覆盖以降低纯 Uya keyframe 编码负载；preview server 先用 `UYA_VP8_PREVIEW_CFLAGS` 预构建 Uya sender，点击 Start 时直接运行 executable；默认保留 VP8 SIMD/asm dispatch，可用 `UYA_VP8_FORCE_SCALAR=1` 复现 scalar 路径；FFmpeg 只用于显式 MP4 -> raw I420 源转换，VP8 编码与 RTP/SRTP/UDP 发送仍走 Uya。
 - `build/webrtc-uya version` 输出 `webrtc-uya 0.1.0`。
 
 ### 已知阻塞

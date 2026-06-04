@@ -305,7 +305,7 @@ fn read_exact_looping(fd: i32, out: &[byte]) !void {
 }
 
 fn print_usage() void {
-    cli_write_stderr("uya_vp8_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--raw-video-i420 <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--codec uya] [--dry-run]\n" as &[byte]);
+    cli_write_stderr("uya_vp8_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--raw-video-i420 <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--video-frame-duration-us <us>] [--codec uya] [--dry-run]\n" as &[byte]);
 }
 
 fn parse_args(
@@ -319,10 +319,11 @@ fn parse_args(
     video_width: &u32,
     video_height: &u32,
     media_duration_us: &u64,
+    video_frame_duration_us: &u32,
     dry_run: &bool,
     codec_provider_id: &u8,
 ) !void {
-    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || raw_video_path == null || video_width == null || video_height == null || media_duration_us == null || dry_run == null || codec_provider_id == null {
+    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || raw_video_path == null || video_width == null || video_height == null || media_duration_us == null || video_frame_duration_us == null || dry_run == null || codec_provider_id == null {
         return error.DirectSenderCliInvalidArgs;
     }
 
@@ -393,6 +394,15 @@ fn parse_args(
             }
             *media_duration_us = try cstr_parse_u64(argv[index + 1]);
             if *media_duration_us == 0u64 {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            index = index + 2;
+        } else if cstr_eq(arg, "--video-frame-duration-us\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *video_frame_duration_us = try cstr_parse_u32(argv[index + 1]);
+            if *video_frame_duration_us == 0u32 {
                 return error.DirectSenderCliInvalidArgs;
             }
             index = index + 2;
@@ -838,6 +848,7 @@ fn cli_send_uya_vp8_live_frame(
     v_plane: &[byte],
     encoded_packet: &[byte],
     frame_index: u64,
+    video_frame_duration_us: u32,
 ) !void {
     if video_config == null || encoder == null || y_plane.len == 0usize || u_plane.len == 0usize || v_plane.len == 0usize || encoded_packet.len == 0usize {
         return error.DirectSenderCliRuntimeFailed;
@@ -850,7 +861,7 @@ fn cli_send_uya_vp8_live_frame(
         cli_fill_i420_planes(y_plane, u_plane, v_plane, frame_index);
     }
 
-    const timestamp_us: u64 = frame_index * (CLI_VIDEO_FRAME_DURATION_US as u64);
+    const timestamp_us: u64 = frame_index * (video_frame_duration_us as u64);
     const raw: RawVideoFrame = raw_video_i420_frame_make(
         y_plane,
         u_plane,
@@ -861,7 +872,7 @@ fn cli_send_uya_vp8_live_frame(
         (video_config.width / 2u32) as usize,
         (video_config.width / 2u32) as usize,
         timestamp_us,
-        CLI_VIDEO_FRAME_DURATION_US,
+        video_frame_duration_us,
         frame_index
     ) catch {
         return error.DirectSenderCliRuntimeFailed;
@@ -1034,6 +1045,7 @@ fn run_live_uya_vp8_sender(
     raw_video_path: &byte,
     video_source: &CliVideoSourceConfig,
     media_duration_us: u64,
+    video_frame_duration_us: u32,
     codec_provider_id: u8,
 ) !UyaDirectSenderDiagnostics {
     if video_source == null || codec_provider_id != CODEC_PROVIDER_UYA {
@@ -1192,9 +1204,10 @@ fn run_live_uya_vp8_sender(
                         v_storage[0:uv_bytes],
                         encoded_video_storage[0:output_capacity],
                         video_frames_sent,
+                        video_frame_duration_us,
                     );
                     video_frames_sent = video_frames_sent + 1u64;
-                    next_video_us = next_video_us + (CLI_VIDEO_FRAME_DURATION_US as u64);
+                    next_video_us = next_video_us + (video_frame_duration_us as u64);
                 }
                 if now_us >= next_rtcp_us {
                     try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_VIDEO, now_us);
@@ -1225,6 +1238,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var video_width: u32 = CLI_DEFAULT_VIDEO_WIDTH;
     var video_height: u32 = CLI_DEFAULT_VIDEO_HEIGHT;
     var media_duration_us: u64 = CLI_LIVE_MEDIA_DURATION_US;
+    var video_frame_duration_us: u32 = CLI_VIDEO_FRAME_DURATION_US;
     var dry_run: bool = false;
     var codec_provider_id: u8 = CODEC_PROVIDER_UYA;
 
@@ -1239,6 +1253,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         &video_width,
         &video_height,
         &media_duration_us,
+        &video_frame_duration_us,
         &dry_run,
         &codec_provider_id,
     );
@@ -1347,6 +1362,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         raw_video_path,
         &video_source,
         media_duration_us,
+        video_frame_duration_us,
         codec_provider_id,
     );
     udp_socket_close(&live_socket);
