@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -45,10 +46,11 @@ from ffmpeg_codec_flow import SkipFlow, probe_packets, require_ffmpeg_codec, req
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UYA_DIRECT_SENDER_MAIN = REPO_ROOT / "src" / "webrtc_ffmpeg_direct_sender_main.uya"
 UYA_BIN = REPO_ROOT.parent / "uya" / "bin" / "uya"
-RAW_PREVIEW_WIDTH = 32
-RAW_PREVIEW_HEIGHT = 18
 RAW_PREVIEW_FPS = 30
 RAW_PREVIEW_DURATION_SECONDS = 6
+RAW_PREVIEW_DURATION_US = RAW_PREVIEW_DURATION_SECONDS * 1_000_000
+SYNTHETIC_PREVIEW_WIDTH = 32
+SYNTHETIC_PREVIEW_HEIGHT = 18
 
 
 @dataclass
@@ -58,6 +60,7 @@ class UyaDirectSenderHandle:
     diagnostics_path: Path
     stdout_path: Path
     stderr_path: Path
+    media_duration_us: int = RAW_PREVIEW_DURATION_US
 
 
 @dataclass
@@ -73,6 +76,9 @@ class PreviewMediaAssets:
     ffmpeg_stats: dict[str, int | str]
     raw_video_path: Path | None = None
     raw_audio_path: Path | None = None
+    raw_video_width: int = 0
+    raw_video_height: int = 0
+    media_duration_us: int = RAW_PREVIEW_DURATION_US
 
 
 def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
@@ -195,6 +201,85 @@ def first_video_stream(probe: dict[str, Any]) -> dict[str, Any]:
     raise AssertionError("MP4 source contains no video stream")
 
 
+def parse_rotation_degrees(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(round(float(str(value))))
+    except (TypeError, ValueError):
+        return None
+
+
+def stream_rotation_degrees(video_stream: dict[str, Any]) -> int:
+    side_data = video_stream.get("side_data_list")
+    if isinstance(side_data, list):
+        for item in side_data:
+            if not isinstance(item, dict):
+                continue
+            rotation = parse_rotation_degrees(item.get("rotation"))
+            if rotation is not None:
+                return rotation
+    tags = video_stream.get("tags")
+    if isinstance(tags, dict):
+        rotation = parse_rotation_degrees(tags.get("rotate"))
+        if rotation is not None:
+            return rotation
+    return 0
+
+
+def stream_display_dimensions(video_stream: dict[str, Any]) -> tuple[int, int]:
+    width = int(video_stream.get("width") or 0)
+    height = int(video_stream.get("height") or 0)
+    rotation = abs(stream_rotation_degrees(video_stream)) % 180
+    if rotation == 90:
+        return height, width
+    return width, height
+
+
+def parse_duration_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        duration = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(duration) or duration <= 0.0:
+        return None
+    return duration
+
+
+def mp4_duration_seconds(probe: dict[str, Any], video_stream: dict[str, Any]) -> float:
+    format_info = probe.get("format") if isinstance(probe.get("format"), dict) else {}
+    for value in (format_info.get("duration"), video_stream.get("duration")):
+        duration = parse_duration_seconds(value)
+        if duration is not None:
+            return duration
+
+    duration_ts = video_stream.get("duration_ts")
+    time_base = str(video_stream.get("time_base") or "")
+    if duration_ts is not None and "/" in time_base:
+        num_text, den_text = time_base.split("/", 1)
+        try:
+            num = int(num_text)
+            den = int(den_text)
+            ticks = int(str(duration_ts))
+        except ValueError:
+            num = 0
+            den = 0
+            ticks = 0
+        if num > 0 and den > 0 and ticks > 0:
+            duration = (ticks * num) / den
+            if math.isfinite(duration) and duration > 0.0:
+                return duration
+
+    raise AssertionError("MP4 source duration is required for full-source push")
+
+
+def media_duration_timeout_seconds(media_duration_us: int) -> float:
+    media_seconds = max(0.0, media_duration_us / 1_000_000.0)
+    return max(DEFAULT_TIMEOUT_SECONDS, media_seconds + 20.0)
+
+
 def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAssets:
     source_mp4 = source_mp4.expanduser().resolve()
     if not source_mp4.exists():
@@ -209,17 +294,22 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
     require_ffmpeg_codec(ffmpeg, "decoder", "vp8")
     probe = probe_streams(source_mp4)
     video_stream = first_video_stream(probe)
+    coded_width = int(video_stream.get("width") or 0)
+    coded_height = int(video_stream.get("height") or 0)
+    source_width, source_height = stream_display_dimensions(video_stream)
+    duration_seconds = mp4_duration_seconds(probe, video_stream)
+    duration_text = f"{duration_seconds:.6f}".rstrip("0").rstrip(".")
+    media_duration_us = max(1, int(math.ceil(duration_seconds * 1_000_000.0)))
+    if source_width <= 0 or source_height <= 0:
+        raise AssertionError(f"MP4 source has invalid video dimensions: {source_width}x{source_height}")
+    if source_width % 2 != 0 or source_height % 2 != 0:
+        raise AssertionError(f"MP4 source dimensions must be even for I420 preview: {source_width}x{source_height}")
 
     raw_dir = workdir / "mp4-raw-preview"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    raw_video_path = raw_dir / "video_32x18_i420.raw"
+    raw_video_path = raw_dir / f"video_{source_width}x{source_height}_i420.raw"
     raw_audio_path = raw_dir / "audio_48000_mono_s16le.raw"
 
-    vf = (
-        f"scale={RAW_PREVIEW_WIDTH}:{RAW_PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease,"
-        f"pad={RAW_PREVIEW_WIDTH}:{RAW_PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
-        "format=yuv420p"
-    )
     run(
         [
             ffmpeg,
@@ -227,16 +317,12 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
             "-loglevel",
             "error",
             "-y",
-            "-stream_loop",
-            "-1",
-            "-t",
-            str(RAW_PREVIEW_DURATION_SECONDS),
             "-i",
             str(source_mp4),
             "-map",
             "0:v:0",
             "-vf",
-            vf,
+            "format=yuv420p",
             "-r",
             str(RAW_PREVIEW_FPS),
             "-an",
@@ -254,10 +340,6 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
                 "-loglevel",
                 "error",
                 "-y",
-                "-stream_loop",
-                "-1",
-                "-t",
-                str(RAW_PREVIEW_DURATION_SECONDS),
                 "-i",
                 str(source_mp4),
                 "-map",
@@ -286,7 +368,7 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
                 "-i",
                 "anullsrc=channel_layout=mono:sample_rate=48000",
                 "-t",
-                str(RAW_PREVIEW_DURATION_SECONDS),
+                duration_text,
                 "-f",
                 "s16le",
                 str(raw_audio_path),
@@ -294,7 +376,7 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
         )
         audio_source = "silence"
 
-    min_video_bytes = RAW_PREVIEW_WIDTH * RAW_PREVIEW_HEIGHT * 3 // 2
+    min_video_bytes = source_width * source_height * 3 // 2
     min_audio_bytes = 960 * 2
     if raw_video_path.stat().st_size < min_video_bytes:
         raise AssertionError(f"raw video preview is too short: {raw_video_path.stat().st_size} < {min_video_bytes}")
@@ -306,17 +388,23 @@ def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAsse
         media_path=source_mp4,
         raw_video_path=raw_video_path,
         raw_audio_path=raw_audio_path,
+        raw_video_width=source_width,
+        raw_video_height=source_height,
+        media_duration_us=media_duration_us,
         ffmpeg_stats={
             "source_kind": "mp4",
             "source_path": str(source_mp4),
             "source_duration": str(format_info.get("duration", "")),
             "source_video_codec": str(video_stream.get("codec_name", "")),
-            "source_width": int(video_stream.get("width") or 0),
-            "source_height": int(video_stream.get("height") or 0),
-            "preview_width": RAW_PREVIEW_WIDTH,
-            "preview_height": RAW_PREVIEW_HEIGHT,
+            "source_coded_width": coded_width,
+            "source_coded_height": coded_height,
+            "source_width": source_width,
+            "source_height": source_height,
+            "preview_width": source_width,
+            "preview_height": source_height,
             "preview_fps": RAW_PREVIEW_FPS,
-            "preview_duration_seconds": RAW_PREVIEW_DURATION_SECONDS,
+            "preview_duration_seconds": duration_text,
+            "preview_duration_us": media_duration_us,
             "preview_video_bytes": raw_video_path.stat().st_size,
             "preview_audio_bytes": raw_audio_path.stat().st_size,
             "preview_audio_source": audio_source,
@@ -330,6 +418,10 @@ def prepare_preview_media(workdir: Path, source_mp4: Path | None = None) -> Prev
     media_path, ffmpeg_stats = generate_ffmpeg_media(workdir)
     ffmpeg_stats = dict(ffmpeg_stats)
     ffmpeg_stats["source_kind"] = "synthetic"
+    ffmpeg_stats["preview_width"] = SYNTHETIC_PREVIEW_WIDTH
+    ffmpeg_stats["preview_height"] = SYNTHETIC_PREVIEW_HEIGHT
+    ffmpeg_stats["preview_duration_seconds"] = RAW_PREVIEW_DURATION_SECONDS
+    ffmpeg_stats["preview_duration_us"] = RAW_PREVIEW_DURATION_US
     return PreviewMediaAssets(media_path=media_path, ffmpeg_stats=ffmpeg_stats)
 
 
@@ -411,21 +503,23 @@ def make_call_page() -> str:
               if (stat.kind !== kind && stat.mediaType !== kind) continue;
               const packets = stat.packetsReceived || 0;
               const frames = stat.framesDecoded || stat.framesReceived || 0;
+              const frameWidth = stat.frameWidth || 0;
+              const frameHeight = stat.frameHeight || 0;
               let codecMimeType = '';
               if (stat.codecId) {
                 const codec = stats.get(stat.codecId);
                 if (codec && codec.mimeType) codecMimeType = String(codec.mimeType);
               }
               if (kind === 'audio' && packets > 0) {
-                return {packetsReceived: packets, framesDecoded: frames, codecMimeType};
+                return {packetsReceived: packets, framesDecoded: frames, frameWidth, frameHeight, codecMimeType};
               }
               if (kind === 'video' && packets > 0 && frames > 0) {
-                return {packetsReceived: packets, framesDecoded: frames, codecMimeType};
+                return {packetsReceived: packets, framesDecoded: frames, frameWidth, frameHeight, codecMimeType};
               }
             }
             await delay(100);
           }
-          return {packetsReceived: 0, framesDecoded: 0, codecMimeType: ''};
+          return {packetsReceived: 0, framesDecoded: 0, frameWidth: 0, frameHeight: 0, codecMimeType: ''};
         }
 
         async function runReceiver() {
@@ -502,6 +596,8 @@ def make_call_page() -> str:
               audioCodecMimeType: finalAudioStats.codecMimeType,
               videoPacketsReceived: finalVideoStats.packetsReceived,
               videoFramesDecoded: finalVideoStats.framesDecoded,
+              videoFrameWidth: finalVideoStats.frameWidth,
+              videoFrameHeight: finalVideoStats.frameHeight,
               videoCodecMimeType: finalVideoStats.codecMimeType,
               offerSdp: window.__uyaDirectOffer.sdp,
               answerSdp: typeof answer === 'string' ? answer : String(answer.sdp || ''),
@@ -564,7 +660,6 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
             aspect-ratio: 16 / 9;
             background: #020617;
             display: block;
-            image-rendering: pixelated;
             min-height: 280px;
             object-fit: contain;
             width: 100%;
@@ -736,10 +831,12 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
             return {
               packetsReceived: stat.packetsReceived || 0,
               framesDecoded: stat.framesDecoded || stat.framesReceived || 0,
+              frameWidth: stat.frameWidth || 0,
+              frameHeight: stat.frameHeight || 0,
               codecMimeType
             };
           }
-          return {packetsReceived: 0, framesDecoded: 0, codecMimeType: ''};
+          return {packetsReceived: 0, framesDecoded: 0, frameWidth: 0, frameHeight: 0, codecMimeType: ''};
         }
 
         async function waitForMedia(audioReceiver, videoReceiver) {
@@ -852,6 +949,10 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
             audioCodecMimeType: finalAudioStats.codecMimeType || firstStats.audioStats.codecMimeType,
             videoPacketsReceived: finalVideoStats.packetsReceived || firstStats.videoStats.packetsReceived,
             videoFramesDecoded: finalVideoStats.framesDecoded || firstStats.videoStats.framesDecoded,
+            videoFrameWidth: finalVideoStats.frameWidth || firstStats.videoStats.frameWidth || remoteVideo.videoWidth || 0,
+            videoFrameHeight: finalVideoStats.frameHeight || firstStats.videoStats.frameHeight || remoteVideo.videoHeight || 0,
+            remoteVideoWidth: remoteVideo.videoWidth || 0,
+            remoteVideoHeight: remoteVideo.videoHeight || 0,
             videoCodecMimeType: finalVideoStats.codecMimeType || firstStats.videoStats.codecMimeType,
             offerSdp: receiver.localDescription ? receiver.localDescription.sdp : '',
             answerSdp: started.answer.sdp,
@@ -1055,8 +1156,8 @@ def read_manual_preview_state(client: CDPClient, session_id: str) -> dict[str, A
     return {}
 
 
-def wait_for_manual_preview_result(client: CDPClient, session_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + 35.0
+def wait_for_manual_preview_result(client: CDPClient, session_id: str, timeout_seconds: float = 35.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         result = evaluate_json(
             client,
@@ -1131,6 +1232,9 @@ def start_uya_direct_sender(
     workdir: Path,
     raw_video_path: Path | None = None,
     raw_audio_path: Path | None = None,
+    raw_video_width: int = 0,
+    raw_video_height: int = 0,
+    media_duration_us: int = RAW_PREVIEW_DURATION_US,
 ) -> UyaDirectSenderHandle:
     if not UYA_DIRECT_SENDER_MAIN.exists():
         raise AssertionError(
@@ -1168,6 +1272,12 @@ def start_uya_direct_sender(
         ]
         if raw_video_path is not None:
             command.extend(["--raw-video-i420", str(raw_video_path)])
+            if raw_video_width <= 0 or raw_video_height <= 0:
+                raise AssertionError("raw video preview dimensions are required when raw video is supplied")
+            command.extend(["--video-width", str(raw_video_width), "--video-height", str(raw_video_height)])
+        if media_duration_us <= 0:
+            raise AssertionError("media duration must be positive")
+        command.extend(["--media-duration-us", str(media_duration_us)])
         if raw_audio_path is not None:
             command.extend(["--raw-audio-s16le", str(raw_audio_path)])
         proc = subprocess.Popen(
@@ -1198,6 +1308,7 @@ def start_uya_direct_sender(
         diagnostics_path=diagnostics_path,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        media_duration_us=media_duration_us,
     )
 
 
@@ -1212,7 +1323,7 @@ def read_sender_diagnostics(path: Path) -> dict[str, Any]:
 
 def wait_for_uya_direct_sender(handle: UyaDirectSenderHandle) -> dict[str, Any]:
     try:
-        returncode = handle.proc.wait(timeout=DEFAULT_TIMEOUT_SECONDS)
+        returncode = handle.proc.wait(timeout=media_duration_timeout_seconds(handle.media_duration_us))
     except subprocess.TimeoutExpired as exc:
         handle.proc.terminate()
         try:
@@ -1258,11 +1369,17 @@ class ManualPreviewState:
         media_path: Path,
         raw_video_path: Path | None = None,
         raw_audio_path: Path | None = None,
+        raw_video_width: int = 0,
+        raw_video_height: int = 0,
+        media_duration_us: int = RAW_PREVIEW_DURATION_US,
     ) -> None:
         self.preview_dir = preview_dir
         self.media_path = media_path
         self.raw_video_path = raw_video_path
         self.raw_audio_path = raw_audio_path
+        self.raw_video_width = raw_video_width
+        self.raw_video_height = raw_video_height
+        self.media_duration_us = media_duration_us
         self.sessions_dir = preview_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, ManualPreviewSession] = {}
@@ -1278,6 +1395,9 @@ class ManualPreviewState:
             workdir,
             raw_video_path=self.raw_video_path,
             raw_audio_path=self.raw_audio_path,
+            raw_video_width=self.raw_video_width,
+            raw_video_height=self.raw_video_height,
+            media_duration_us=self.media_duration_us,
         )
         with self.lock:
             self.sessions[session_id] = ManualPreviewSession(session_id, handle, workdir)
@@ -1379,8 +1499,19 @@ def start_manual_preview_server(
     media_path: Path,
     raw_video_path: Path | None = None,
     raw_audio_path: Path | None = None,
+    raw_video_width: int = 0,
+    raw_video_height: int = 0,
+    media_duration_us: int = RAW_PREVIEW_DURATION_US,
 ) -> tuple[ThreadingHTTPServer, threading.Thread, int, ManualPreviewState]:
-    state = ManualPreviewState(preview_dir, media_path, raw_video_path, raw_audio_path)
+    state = ManualPreviewState(
+        preview_dir,
+        media_path,
+        raw_video_path,
+        raw_audio_path,
+        raw_video_width,
+        raw_video_height,
+        media_duration_us,
+    )
     port = find_free_port()
     handler = partial(ManualPreviewHandler, directory=str(preview_dir), state=state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -1462,6 +1593,9 @@ def run_manual_preview_chrome_page(
     media_path: Path,
     raw_video_path: Path | None = None,
     raw_audio_path: Path | None = None,
+    raw_video_width: int = 0,
+    raw_video_height: int = 0,
+    media_duration_us: int = RAW_PREVIEW_DURATION_US,
 ) -> dict[str, Any]:
     browser_exe = find_browser_executable()
     server, thread, http_port, state = start_manual_preview_server(
@@ -1469,6 +1603,9 @@ def run_manual_preview_chrome_page(
         media_path,
         raw_video_path=raw_video_path,
         raw_audio_path=raw_audio_path,
+        raw_video_width=raw_video_width,
+        raw_video_height=raw_video_height,
+        media_duration_us=media_duration_us,
     )
     browser_user_data_dir = preview_dir / "manual-profile"
     browser_user_data_dir.mkdir(exist_ok=True)
@@ -1515,7 +1652,11 @@ def run_manual_preview_chrome_page(
             client.command("Page.navigate", {"url": f"http://127.0.0.1:{http_port}/index.html"}, session_id=session_id)
             wait_for_manual_preview_ready(client, session_id)
             click_manual_preview_start(client, session_id)
-            return wait_for_manual_preview_result(client, session_id)
+            return wait_for_manual_preview_result(
+                client,
+                session_id,
+                timeout_seconds=max(35.0, media_duration_timeout_seconds(media_duration_us)),
+            )
         finally:
             client.close()
     finally:
@@ -1597,11 +1738,27 @@ def assert_contract() -> str:
         "--source-mp4",
         "--raw-video-i420",
         "--raw-audio-s16le",
+        "--video-width",
+        "--video-height",
+        "--media-duration-us",
+        "media_duration_us",
+        "stream_display_dimensions",
+        "videoFrameWidth",
         "preview_manifest.json",
     ]
     missing = [item for item in required if item not in source]
     if missing:
         raise AssertionError(f"direct sender harness missing required tokens: {missing}")
+    forbidden = [
+        "RAW_PREVIEW_MAX_" + "WIDTH",
+        "RAW_PREVIEW_MAX_" + "HEIGHT",
+        "scale" + "=",
+        "pad" + "=",
+        "stream_" + "loop",
+    ]
+    present = [item for item in forbidden if item in source]
+    if present:
+        raise AssertionError(f"direct sender harness must preserve MP4 source dimensions, found forbidden tokens: {present}")
     return "ffmpeg chrome direct sender harness contract checks passed"
 
 
@@ -1660,8 +1817,19 @@ def run_manual_preview_flow(keep_temp: bool = False, source_mp4: Path | None = N
             assets.media_path,
             raw_video_path=assets.raw_video_path,
             raw_audio_path=assets.raw_audio_path,
+            raw_video_width=assets.raw_video_width,
+            raw_video_height=assets.raw_video_height,
+            media_duration_us=assets.media_duration_us,
         )
         validate_manual_preview_result(result)
+        if assets.raw_video_width and assets.raw_video_height:
+            decoded_width = int(result.get("videoFrameWidth") or result.get("remoteVideoWidth") or 0)
+            decoded_height = int(result.get("videoFrameHeight") or result.get("remoteVideoHeight") or 0)
+            require(
+                decoded_width == assets.raw_video_width and decoded_height == assets.raw_video_height,
+                f"Chrome decoded preview at {decoded_width}x{decoded_height}, expected "
+                f"{assets.raw_video_width}x{assets.raw_video_height}",
+            )
         diagnostics = result.get("senderDiagnostics")
         if not isinstance(diagnostics, dict):
             diagnostics = {}
@@ -1681,6 +1849,9 @@ def run_manual_preview_flow(keep_temp: bool = False, source_mp4: Path | None = N
         return (
             "ffmpeg chrome manual preview checks passed: "
             f"source_kind={assets.ffmpeg_stats.get('source_kind')} "
+            f"preview_size={assets.ffmpeg_stats.get('preview_width')}x{assets.ffmpeg_stats.get('preview_height')} "
+            f"preview_duration_us={assets.media_duration_us} "
+            f"chrome_video_size={result.get('videoFrameWidth') or result.get('remoteVideoWidth')}x{result.get('videoFrameHeight') or result.get('remoteVideoHeight')} "
             f"chrome_audio_packets={result.get('audioPacketsReceived')} "
             f"chrome_video_packets={result.get('videoPacketsReceived')} "
             f"chrome_video_frames={result.get('videoFramesDecoded')}"
@@ -1702,6 +1873,9 @@ def write_preview_manifest(preview_dir: Path, assets: PreviewMediaAssets) -> Non
         "media_path": str(assets.media_path),
         "raw_video_path": str(assets.raw_video_path) if assets.raw_video_path is not None else "",
         "raw_audio_path": str(assets.raw_audio_path) if assets.raw_audio_path is not None else "",
+        "raw_video_width": assets.raw_video_width,
+        "raw_video_height": assets.raw_video_height,
+        "media_duration_us": assets.media_duration_us,
         "ffmpeg_stats": assets.ffmpeg_stats,
     }
     (preview_dir / "preview_manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
@@ -1719,11 +1893,17 @@ def read_preview_manifest(preview_dir: Path) -> PreviewMediaAssets:
         raise AssertionError(f"invalid manual preview manifest: {manifest_path}")
     raw_video_text = str(manifest.get("raw_video_path") or "")
     raw_audio_text = str(manifest.get("raw_audio_path") or "")
+    raw_video_width = int(manifest.get("raw_video_width") or 0)
+    raw_video_height = int(manifest.get("raw_video_height") or 0)
+    media_duration_us = int(manifest.get("media_duration_us") or RAW_PREVIEW_DURATION_US)
     ffmpeg_stats = manifest.get("ffmpeg_stats") if isinstance(manifest.get("ffmpeg_stats"), dict) else {}
     return PreviewMediaAssets(
         media_path=Path(str(manifest["media_path"])),
         raw_video_path=Path(raw_video_text) if raw_video_text else None,
         raw_audio_path=Path(raw_audio_text) if raw_audio_text else None,
+        raw_video_width=raw_video_width,
+        raw_video_height=raw_video_height,
+        media_duration_us=media_duration_us,
         ffmpeg_stats=ffmpeg_stats,
     )
 
@@ -1745,6 +1925,9 @@ def serve_preview(preview_dir: Path) -> int:
         assets.media_path,
         raw_video_path=assets.raw_video_path,
         raw_audio_path=assets.raw_audio_path,
+        raw_video_width=assets.raw_video_width,
+        raw_video_height=assets.raw_video_height,
+        media_duration_us=assets.media_duration_us,
     )
     url = f"http://127.0.0.1:{http_port}/"
     print(f"ffmpeg chrome direct preview serving: {url}", flush=True)

@@ -23,6 +23,12 @@ rg -Fq "prepare_mp4_raw_preview" tests/ffmpeg_chrome_call.py
 rg -Fq -- "--source-mp4" tests/ffmpeg_chrome_call.py
 rg -Fq -- "--raw-video-i420" tests/ffmpeg_chrome_call.py
 rg -Fq -- "--raw-audio-s16le" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--video-width" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--video-height" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--media-duration-us" tests/ffmpeg_chrome_call.py
+rg -Fq "media_duration_us" tests/ffmpeg_chrome_call.py
+rg -Fq "stream_display_dimensions" tests/ffmpeg_chrome_call.py
+rg -Fq "videoFrameWidth" tests/ffmpeg_chrome_call.py
 rg -Fq "preview_manifest.json" tests/ffmpeg_chrome_call.py
 rg -Fq "Start Uya Video" tests/ffmpeg_chrome_call.py
 rg -Fq "remoteVideo" tests/ffmpeg_chrome_call.py
@@ -36,6 +42,18 @@ if rg -Fq "subprocess.run(" tests/ffmpeg_chrome_call.py; then
 fi
 if rg -Fq "captureStream" tests/ffmpeg_chrome_call.py; then
 	printf '%s\n' "ffmpeg chrome call must not use browser media captureStream loopback" >&2
+	exit 1
+fi
+if rg -Fq "RAW_PREVIEW_MAX_WIDTH" tests/ffmpeg_chrome_call.py || rg -Fq "RAW_PREVIEW_MAX_HEIGHT" tests/ffmpeg_chrome_call.py; then
+	printf '%s\n' "mp4 preview must preserve the source dimensions instead of using a fixed preview resolution cap" >&2
+	exit 1
+fi
+if rg -Fq "scale=" tests/ffmpeg_chrome_call.py || rg -Fq "pad=" tests/ffmpeg_chrome_call.py; then
+	printf '%s\n' "mp4 preview must not scale or pad the input video before sending it to Chrome" >&2
+	exit 1
+fi
+if rg -Fq -- "-stream_loop" tests/ffmpeg_chrome_call.py; then
+	printf '%s\n' "mp4 preview must send the whole source instead of looping a short clipped preview" >&2
 	exit 1
 fi
 if rg -Fq "const pc1 =" tests/ffmpeg_chrome_call.py || rg -Fq "const pc2 =" tests/ffmpeg_chrome_call.py; then

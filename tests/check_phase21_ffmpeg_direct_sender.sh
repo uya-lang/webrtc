@@ -10,6 +10,8 @@ test -f src/webrtc_ffmpeg_direct_sender_test_main.uya
 test -f src/webrtc_ffmpeg_direct_runtime_test_main.uya
 rg -Fq "export struct UyaDirectSender" src/webrtc/media/direct_sender.uya
 rg -Fq "export fn rtp_packetize_encoded_frame" src/webrtc/media/direct_sender.uya
+rg -Fq "export fn rtp_packetize_encoded_frame_fragment" src/webrtc/media/direct_sender.uya
+rg -Fq "export fn direct_sender_vp8_max_fragment_payload_bytes" src/webrtc/media/direct_sender.uya
 rg -Fq "export fn direct_sender_protect_rtp_packet" src/webrtc/media/direct_sender.uya
 rg -Fq "export fn direct_sender_write_sender_report" src/webrtc/media/direct_sender.uya
 rg -Fq "export fn direct_sender_protect_srtcp_packet" src/webrtc/media/direct_sender.uya
@@ -32,6 +34,7 @@ rg -Fq "webrtc.rtcp.rtcp_packet" src/webrtc/media/direct_runtime.uya
 rg -Fq "Uya FFmpeg direct sender RTP/SRTCP packetizer tests passed" src/webrtc_ffmpeg_direct_sender_test_main.uya
 rg -Fq "Uya FFmpeg direct runtime STUN/DTLS/SRTP/SRTCP tests passed" src/webrtc_ffmpeg_direct_runtime_test_main.uya
 rg -Fq "direct_sender_protect_rtp_packet" src/webrtc_ffmpeg_direct_sender_test_main.uya
+rg -Fq "check_vp8_frame_fragment_packetize" src/webrtc_ffmpeg_direct_sender_test_main.uya
 rg -Fq "direct_sender_write_sender_report" src/webrtc_ffmpeg_direct_sender_test_main.uya
 rg -Fq "direct_runtime_process_srtcp_feedback" src/webrtc_ffmpeg_direct_runtime_test_main.uya
 

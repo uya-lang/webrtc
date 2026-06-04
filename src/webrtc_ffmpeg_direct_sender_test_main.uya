@@ -23,9 +23,10 @@ fn bytes_equal(lhs: &[byte], rhs: &[byte]) bool {
     return true;
 }
 
-fn sender_make() !UyaDirectSender {
+fn sender_make_with_mtu(mtu_bytes: usize) !UyaDirectSender {
     var sender: UyaDirectSender = uya_direct_sender_make();
     var config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    config.mtu_bytes = mtu_bytes;
     config.audio_ssrc = 0x01020304u32;
     config.video_ssrc = 0x11223344u32;
     config.audio_initial_sequence = 10u16;
@@ -38,6 +39,10 @@ fn sender_make() !UyaDirectSender {
     config.video_mid = "1" as &[byte];
     try uya_direct_sender_init(&sender, config);
     return sender;
+}
+
+fn sender_make() !UyaDirectSender {
+    return sender_make_with_mtu(DIRECT_SENDER_DEFAULT_MTU_BYTES);
 }
 
 fn init_srtp_pair(tx: &SrtpContext, rx: &SrtpContext, ssrc: u32) i32 {
@@ -236,6 +241,91 @@ fn check_vp8_frame_packetize() i32 {
     return 0i32;
 }
 
+fn check_vp8_frame_fragment_packetize() i32 {
+    var sender_result: !UyaDirectSender = sender_make_with_mtu(28usize);
+    if sender_result.error_id != 0 {
+        return 60i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+
+    var vp8_payload: [byte: 10] = [
+        0x00 as byte, 0x9d as byte, 0x01 as byte, 0x2a as byte, 0x10 as byte,
+        0x11 as byte, 0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte,
+    ];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.codec_id = CODEC_ID_VP8;
+    frame.payload = vp8_payload[0:10];
+    frame.duration_us = 33333u32;
+    frame.sequence_id = 0x0123u64;
+    frame.marker = true;
+
+    const max_fragment: !usize = direct_sender_vp8_max_fragment_payload_bytes(&sender, &frame);
+    if max_fragment.error_id != 0 || max_fragment.value != 4usize {
+        return 61i32;
+    }
+
+    var packet0: [byte: 64] = [];
+    const summary0: !DirectSenderPacket = rtp_packetize_encoded_frame_fragment(&sender, &frame, 0usize, 4usize, false, packet0[0:64]);
+    if summary0.error_id != 0 || summary0.value.marker || summary0.value.sequence_number != 20u16 || summary0.value.timestamp != 900u32 {
+        return 62i32;
+    }
+
+    var packet1: [byte: 64] = [];
+    const summary1: !DirectSenderPacket = rtp_packetize_encoded_frame_fragment(&sender, &frame, 4usize, 4usize, false, packet1[0:64]);
+    if summary1.error_id != 0 || summary1.value.marker || summary1.value.sequence_number != 21u16 || summary1.value.timestamp != 900u32 {
+        return 63i32;
+    }
+
+    var packet2: [byte: 64] = [];
+    const summary2: !DirectSenderPacket = rtp_packetize_encoded_frame_fragment(&sender, &frame, 8usize, 2usize, true, packet2[0:64]);
+    if summary2.error_id != 0 || !summary2.value.marker || summary2.value.sequence_number != 22u16 || summary2.value.timestamp != 900u32 {
+        return 64i32;
+    }
+    if sender.video_sender.next_sequence != 23u16 || sender.video_sender.next_timestamp != 3899u32 {
+        return 65i32;
+    }
+    if sender.diagnostics.ffmpeg_encoded_frames != 1u64
+        || sender.diagnostics.rtp_packets != 3u64
+        || sender.diagnostics.video_rtp_packets != 3u64 {
+        return 66i32;
+    }
+
+    const parsed0: !RtpPacket = rtp_packet_parse(packet0[0:summary0.value.rtp_len]);
+    const parsed1: !RtpPacket = rtp_packet_parse(packet1[0:summary1.value.rtp_len]);
+    const parsed2: !RtpPacket = rtp_packet_parse(packet2[0:summary2.value.rtp_len]);
+    if parsed0.error_id != 0 || parsed1.error_id != 0 || parsed2.error_id != 0 {
+        return 67i32;
+    }
+
+    const desc0: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(parsed0.value.header.payload);
+    const desc1: !Vp8RtpDescriptor = vp8_rtp_descriptor_parse(parsed1.value.header.payload);
+    if desc0.error_id != 0 || desc1.error_id != 0 {
+        return 68i32;
+    }
+    if !desc0.value.start_of_partition || desc1.value.start_of_partition
+        || desc0.value.picture_id != 0x0123u16
+        || desc1.value.picture_id != 0x0123u16 {
+        return 69i32;
+    }
+
+    var reassembly: Vp8RtpFrameReassemblyState = vp8_rtp_frame_reassembly_state_make();
+    var reassembled: [byte: 16] = [];
+    const absorb0: !usize = vp8_rtp_frame_reassembly_absorb(&reassembly, parsed0.value.header.payload, false, reassembled[0:16]);
+    const absorb1: !usize = vp8_rtp_frame_reassembly_absorb(&reassembly, parsed1.value.header.payload, false, reassembled[0:16]);
+    const absorb2: !usize = vp8_rtp_frame_reassembly_absorb(&reassembly, parsed2.value.header.payload, true, reassembled[0:16]);
+    if absorb0.error_id != 0 || absorb0.value != 0usize
+        || absorb1.error_id != 0 || absorb1.value != 0usize
+        || absorb2.error_id != 0 || absorb2.value != 10usize {
+        return 70i32;
+    }
+    if !bytes_equal(reassembled[0:10], vp8_payload[0:10]) {
+        return 71i32;
+    }
+
+    return 0i32;
+}
+
 fn check_sender_limits_and_errors() i32 {
     var sender_result: !UyaDirectSender = sender_make();
     if sender_result.error_id != 0 {
@@ -365,6 +455,12 @@ fn main() i32 {
     result = check_vp8_frame_packetize();
     if result != 0i32 {
         printf("Uya FFmpeg direct sender VP8 packetize tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_vp8_frame_fragment_packetize();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender VP8 fragment tests failed: %d\n", result);
         return 1i32;
     }
 

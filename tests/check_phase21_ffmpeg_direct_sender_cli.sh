@@ -28,14 +28,25 @@ rg -Fq "direct_sender_write_sender_report" src/webrtc_ffmpeg_direct_sender_main.
 rg -Fq "direct_sender_protect_srtcp_packet" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_sender_record_rtcp_feedback" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_direct_sender_encode_opus_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
-rg -Fq "ffmpeg_direct_sender_encode_vp8_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "ffmpeg_codec_encode_video_i420_to_frame" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--raw-video-i420" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--raw-audio-s16le" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--video-width" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--video-height" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--media-duration-us" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "read_exact_looping" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "open_optional_read_fd" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "rtp_packetize_encoded_frame_fragment" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "direct_sender_vp8_max_fragment_payload_bytes" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "encoded_bytes" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "media_duration_us" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--codec ffmpeg|uya" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "codec_provider_ffmpeg_make" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "codec_provider_uya_make" src/webrtc_ffmpeg_direct_sender_main.uya
+if rg -Fq "CLI_MAX_VIDEO_WIDTH" src/webrtc_ffmpeg_direct_sender_main.uya || rg -Fq "CLI_MAX_VIDEO_HEIGHT" src/webrtc_ffmpeg_direct_sender_main.uya; then
+	printf '%s\n' "direct sender must size raw preview video from the input MP4 dimensions instead of a fixed 1080p cap" >&2
+	exit 1
+fi
 if rg -n "@c_import|extern fn uya_ffmpeg_codec_|extern \"libav|libavcodec|libavutil" src/webrtc_ffmpeg_direct_sender_main.uya; then
 	printf '%s\n' "direct sender must import FFmpeg only through webrtc.media.ffmpeg_codec" >&2
 	exit 1
@@ -80,6 +91,7 @@ printf '%s\n' 'ffmpeg encoded media placeholder' >"$tmpdir/media.webm"
 	--media "$tmpdir/media.webm" \
 	--answer-json "$tmpdir/answer.json" \
 	--diagnostics-json "$tmpdir/diagnostics.json" \
+	--media-duration-us 1000000 \
 	--codec ffmpeg \
 	--dry-run
 
@@ -116,6 +128,7 @@ rg -Fq 'a=fingerprint:sha-256 31:48:5F:0F:03:87:1A:59:FA:D4:1E:90:E6:47:E4:30:88
 	--media "$tmpdir/media.webm" \
 	--answer-json "$tmpdir/uya_answer.json" \
 	--diagnostics-json "$tmpdir/uya_diagnostics.json" \
+	--media-duration-us 1000000 \
 	--codec uya \
 	--dry-run
 
