@@ -45,6 +45,10 @@ from ffmpeg_codec_flow import SkipFlow, probe_packets, require_ffmpeg_codec, req
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UYA_DIRECT_SENDER_MAIN = REPO_ROOT / "src" / "webrtc_ffmpeg_direct_sender_main.uya"
 UYA_BIN = REPO_ROOT.parent / "uya" / "bin" / "uya"
+RAW_PREVIEW_WIDTH = 32
+RAW_PREVIEW_HEIGHT = 18
+RAW_PREVIEW_FPS = 30
+RAW_PREVIEW_DURATION_SECONDS = 6
 
 
 @dataclass
@@ -61,6 +65,14 @@ class ManualPreviewSession:
     session_id: str
     handle: UyaDirectSenderHandle
     workdir: Path
+
+
+@dataclass
+class PreviewMediaAssets:
+    media_path: Path
+    ffmpeg_stats: dict[str, int | str]
+    raw_video_path: Path | None = None
+    raw_audio_path: Path | None = None
 
 
 def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
@@ -140,6 +152,185 @@ def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
         "width": int(video_stream.get("width") or 0),
         "height": int(video_stream.get("height") or 0),
     }
+
+
+def probe_streams(media_path: Path) -> dict[str, Any]:
+    ffprobe = require_tool("ffprobe")
+    output = run(
+        [
+            ffprobe,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(media_path),
+        ]
+    )
+    parsed = json.loads(output.stdout)
+    if not isinstance(parsed, dict):
+        raise AssertionError(f"ffprobe returned invalid JSON for {media_path}")
+    return parsed
+
+
+def source_has_audio(probe: dict[str, Any]) -> bool:
+    streams = probe.get("streams")
+    if not isinstance(streams, list):
+        return False
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("codec_type") == "audio":
+            return True
+    return False
+
+
+def first_video_stream(probe: dict[str, Any]) -> dict[str, Any]:
+    streams = probe.get("streams")
+    if not isinstance(streams, list):
+        raise AssertionError("MP4 probe contains no streams")
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("codec_type") == "video":
+            return stream
+    raise AssertionError("MP4 source contains no video stream")
+
+
+def prepare_mp4_raw_preview(source_mp4: Path, workdir: Path) -> PreviewMediaAssets:
+    source_mp4 = source_mp4.expanduser().resolve()
+    if not source_mp4.exists():
+        raise AssertionError(f"MP4 source does not exist: {source_mp4}")
+    if not source_mp4.is_file():
+        raise AssertionError(f"MP4 source is not a file: {source_mp4}")
+
+    ffmpeg = require_tool("ffmpeg")
+    require_ffmpeg_codec(ffmpeg, "encoder", "libopus")
+    require_ffmpeg_codec(ffmpeg, "encoder", "libvpx")
+    require_ffmpeg_codec(ffmpeg, "decoder", "opus")
+    require_ffmpeg_codec(ffmpeg, "decoder", "vp8")
+    probe = probe_streams(source_mp4)
+    video_stream = first_video_stream(probe)
+
+    raw_dir = workdir / "mp4-raw-preview"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_video_path = raw_dir / "video_32x18_i420.raw"
+    raw_audio_path = raw_dir / "audio_48000_mono_s16le.raw"
+
+    vf = (
+        f"scale={RAW_PREVIEW_WIDTH}:{RAW_PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease,"
+        f"pad={RAW_PREVIEW_WIDTH}:{RAW_PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
+        "format=yuv420p"
+    )
+    run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-stream_loop",
+            "-1",
+            "-t",
+            str(RAW_PREVIEW_DURATION_SECONDS),
+            "-i",
+            str(source_mp4),
+            "-map",
+            "0:v:0",
+            "-vf",
+            vf,
+            "-r",
+            str(RAW_PREVIEW_FPS),
+            "-an",
+            "-f",
+            "rawvideo",
+            str(raw_video_path),
+        ]
+    )
+
+    if source_has_audio(probe):
+        run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-stream_loop",
+                "-1",
+                "-t",
+                str(RAW_PREVIEW_DURATION_SECONDS),
+                "-i",
+                str(source_mp4),
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-f",
+                "s16le",
+                str(raw_audio_path),
+            ]
+        )
+        audio_source = "mp4"
+    else:
+        run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=mono:sample_rate=48000",
+                "-t",
+                str(RAW_PREVIEW_DURATION_SECONDS),
+                "-f",
+                "s16le",
+                str(raw_audio_path),
+            ]
+        )
+        audio_source = "silence"
+
+    min_video_bytes = RAW_PREVIEW_WIDTH * RAW_PREVIEW_HEIGHT * 3 // 2
+    min_audio_bytes = 960 * 2
+    if raw_video_path.stat().st_size < min_video_bytes:
+        raise AssertionError(f"raw video preview is too short: {raw_video_path.stat().st_size} < {min_video_bytes}")
+    if raw_audio_path.stat().st_size < min_audio_bytes:
+        raise AssertionError(f"raw audio preview is too short: {raw_audio_path.stat().st_size} < {min_audio_bytes}")
+
+    format_info = probe.get("format") if isinstance(probe.get("format"), dict) else {}
+    return PreviewMediaAssets(
+        media_path=source_mp4,
+        raw_video_path=raw_video_path,
+        raw_audio_path=raw_audio_path,
+        ffmpeg_stats={
+            "source_kind": "mp4",
+            "source_path": str(source_mp4),
+            "source_duration": str(format_info.get("duration", "")),
+            "source_video_codec": str(video_stream.get("codec_name", "")),
+            "source_width": int(video_stream.get("width") or 0),
+            "source_height": int(video_stream.get("height") or 0),
+            "preview_width": RAW_PREVIEW_WIDTH,
+            "preview_height": RAW_PREVIEW_HEIGHT,
+            "preview_fps": RAW_PREVIEW_FPS,
+            "preview_duration_seconds": RAW_PREVIEW_DURATION_SECONDS,
+            "preview_video_bytes": raw_video_path.stat().st_size,
+            "preview_audio_bytes": raw_audio_path.stat().st_size,
+            "preview_audio_source": audio_source,
+        },
+    )
+
+
+def prepare_preview_media(workdir: Path, source_mp4: Path | None = None) -> PreviewMediaAssets:
+    if source_mp4 is not None:
+        return prepare_mp4_raw_preview(source_mp4, workdir)
+    media_path, ffmpeg_stats = generate_ffmpeg_media(workdir)
+    ffmpeg_stats = dict(ffmpeg_stats)
+    ffmpeg_stats["source_kind"] = "synthetic"
+    return PreviewMediaAssets(media_path=media_path, ffmpeg_stats=ffmpeg_stats)
 
 
 def make_call_page() -> str:
@@ -934,7 +1125,13 @@ def wait_for_answer(
     raise TimeoutError("uya_ffmpeg_direct_sender did not write an SDP answer before timeout")
 
 
-def start_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Path) -> UyaDirectSenderHandle:
+def start_uya_direct_sender(
+    offer: dict[str, str],
+    media_path: Path,
+    workdir: Path,
+    raw_video_path: Path | None = None,
+    raw_audio_path: Path | None = None,
+) -> UyaDirectSenderHandle:
     if not UYA_DIRECT_SENDER_MAIN.exists():
         raise AssertionError(
             "Uya direct sender CLI is not implemented yet: expected "
@@ -953,23 +1150,28 @@ def start_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Pa
     stdout_file = stdout_path.open("w", encoding="utf-8")
     stderr_file = stderr_path.open("w", encoding="utf-8")
     try:
+        command = [
+            str(UYA_BIN),
+            "run",
+            str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
+            "--",
+            "--offer-json",
+            str(offer_path),
+            "--media",
+            str(media_path),
+            "--answer-json",
+            str(answer_path),
+            "--diagnostics-json",
+            str(diagnostics_path),
+            "--codec",
+            "ffmpeg",
+        ]
+        if raw_video_path is not None:
+            command.extend(["--raw-video-i420", str(raw_video_path)])
+        if raw_audio_path is not None:
+            command.extend(["--raw-audio-s16le", str(raw_audio_path)])
         proc = subprocess.Popen(
-            [
-                str(UYA_BIN),
-                "run",
-                str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
-                "--",
-                "--offer-json",
-                str(offer_path),
-                "--media",
-                str(media_path),
-                "--answer-json",
-                str(answer_path),
-                "--diagnostics-json",
-                str(diagnostics_path),
-                "--codec",
-                "ffmpeg",
-            ],
+            command,
             cwd=REPO_ROOT,
             text=True,
             stdout=stdout_file,
@@ -1050,9 +1252,17 @@ def stop_uya_direct_sender(handle: UyaDirectSenderHandle | None) -> None:
 
 
 class ManualPreviewState:
-    def __init__(self, preview_dir: Path, media_path: Path) -> None:
+    def __init__(
+        self,
+        preview_dir: Path,
+        media_path: Path,
+        raw_video_path: Path | None = None,
+        raw_audio_path: Path | None = None,
+    ) -> None:
         self.preview_dir = preview_dir
         self.media_path = media_path
+        self.raw_video_path = raw_video_path
+        self.raw_audio_path = raw_audio_path
         self.sessions_dir = preview_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, ManualPreviewSession] = {}
@@ -1062,7 +1272,13 @@ class ManualPreviewState:
         session_id = uuid.uuid4().hex[:12]
         workdir = self.sessions_dir / session_id
         workdir.mkdir(parents=True, exist_ok=False)
-        handle = start_uya_direct_sender(offer, self.media_path, workdir)
+        handle = start_uya_direct_sender(
+            offer,
+            self.media_path,
+            workdir,
+            raw_video_path=self.raw_video_path,
+            raw_audio_path=self.raw_audio_path,
+        )
         with self.lock:
             self.sessions[session_id] = ManualPreviewSession(session_id, handle, workdir)
         return session_id, handle.answer_sdp
@@ -1158,8 +1374,13 @@ class ManualPreviewHandler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def start_manual_preview_server(preview_dir: Path, media_path: Path) -> tuple[ThreadingHTTPServer, threading.Thread, int, ManualPreviewState]:
-    state = ManualPreviewState(preview_dir, media_path)
+def start_manual_preview_server(
+    preview_dir: Path,
+    media_path: Path,
+    raw_video_path: Path | None = None,
+    raw_audio_path: Path | None = None,
+) -> tuple[ThreadingHTTPServer, threading.Thread, int, ManualPreviewState]:
+    state = ManualPreviewState(preview_dir, media_path, raw_video_path, raw_audio_path)
     port = find_free_port()
     handler = partial(ManualPreviewHandler, directory=str(preview_dir), state=state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
@@ -1236,9 +1457,19 @@ def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
         thread.join(timeout=2.0)
 
 
-def run_manual_preview_chrome_page(preview_dir: Path, media_path: Path) -> dict[str, Any]:
+def run_manual_preview_chrome_page(
+    preview_dir: Path,
+    media_path: Path,
+    raw_video_path: Path | None = None,
+    raw_audio_path: Path | None = None,
+) -> dict[str, Any]:
     browser_exe = find_browser_executable()
-    server, thread, http_port, state = start_manual_preview_server(preview_dir, media_path)
+    server, thread, http_port, state = start_manual_preview_server(
+        preview_dir,
+        media_path,
+        raw_video_path=raw_video_path,
+        raw_audio_path=raw_audio_path,
+    )
     browser_user_data_dir = preview_dir / "manual-profile"
     browser_user_data_dir.mkdir(exist_ok=True)
     debug_port = find_free_port()
@@ -1362,6 +1593,11 @@ def assert_contract() -> str:
         "/api/finish-call",
         "window.__uyaManualPreviewResult",
         "run_manual_preview_chrome_page",
+        "prepare_mp4_raw_preview",
+        "--source-mp4",
+        "--raw-video-i420",
+        "--raw-audio-s16le",
+        "preview_manifest.json",
     ]
     missing = [item for item in required if item not in source]
     if missing:
@@ -1413,13 +1649,18 @@ def run_flow(keep_temp: bool = False) -> str:
         )
 
 
-def run_manual_preview_flow(keep_temp: bool = False) -> str:
+def run_manual_preview_flow(keep_temp: bool = False, source_mp4: Path | None = None) -> str:
     with tempfile.TemporaryDirectory(prefix="webrtc-ffmpeg-chrome-manual-preview-") as tmp:
         tempdir_path = Path(tmp)
-        media_path, ffmpeg_stats = generate_ffmpeg_media(tempdir_path)
+        assets = prepare_preview_media(tempdir_path, source_mp4=source_mp4)
         page_path = tempdir_path / "index.html"
-        page_path.write_text(make_preview_page(ffmpeg_stats), encoding="utf-8")
-        result = run_manual_preview_chrome_page(tempdir_path, media_path)
+        page_path.write_text(make_preview_page(assets.ffmpeg_stats), encoding="utf-8")
+        result = run_manual_preview_chrome_page(
+            tempdir_path,
+            assets.media_path,
+            raw_video_path=assets.raw_video_path,
+            raw_audio_path=assets.raw_audio_path,
+        )
         validate_manual_preview_result(result)
         diagnostics = result.get("senderDiagnostics")
         if not isinstance(diagnostics, dict):
@@ -1439,10 +1680,7 @@ def run_manual_preview_flow(keep_temp: bool = False) -> str:
 
         return (
             "ffmpeg chrome manual preview checks passed: "
-            f"source_audio_codec={ffmpeg_stats['audio_codec']} "
-            f"source_audio_packets={ffmpeg_stats['audio_packets']} "
-            f"source_video_codec={ffmpeg_stats['video_codec']} "
-            f"source_video_packets={ffmpeg_stats['video_packets']} "
+            f"source_kind={assets.ffmpeg_stats.get('source_kind')} "
             f"chrome_audio_packets={result.get('audioPacketsReceived')} "
             f"chrome_video_packets={result.get('videoPacketsReceived')} "
             f"chrome_video_frames={result.get('videoFramesDecoded')}"
@@ -1459,19 +1697,55 @@ def run_manual_preview_flow(keep_temp: bool = False) -> str:
         )
 
 
-def write_preview(preview_dir: Path) -> str:
+def write_preview_manifest(preview_dir: Path, assets: PreviewMediaAssets) -> None:
+    manifest = {
+        "media_path": str(assets.media_path),
+        "raw_video_path": str(assets.raw_video_path) if assets.raw_video_path is not None else "",
+        "raw_audio_path": str(assets.raw_audio_path) if assets.raw_audio_path is not None else "",
+        "ffmpeg_stats": assets.ffmpeg_stats,
+    }
+    (preview_dir / "preview_manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+
+def read_preview_manifest(preview_dir: Path) -> PreviewMediaAssets:
+    manifest_path = preview_dir / "preview_manifest.json"
+    if not manifest_path.exists():
+        media_path = preview_dir / "ffmpeg_chrome_direct.webm"
+        if not media_path.exists():
+            raise AssertionError(f"manual preview media file is missing: {media_path}")
+        return PreviewMediaAssets(media_path=media_path, ffmpeg_stats={})
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("media_path"), str):
+        raise AssertionError(f"invalid manual preview manifest: {manifest_path}")
+    raw_video_text = str(manifest.get("raw_video_path") or "")
+    raw_audio_text = str(manifest.get("raw_audio_path") or "")
+    ffmpeg_stats = manifest.get("ffmpeg_stats") if isinstance(manifest.get("ffmpeg_stats"), dict) else {}
+    return PreviewMediaAssets(
+        media_path=Path(str(manifest["media_path"])),
+        raw_video_path=Path(raw_video_text) if raw_video_text else None,
+        raw_audio_path=Path(raw_audio_text) if raw_audio_text else None,
+        ffmpeg_stats=ffmpeg_stats,
+    )
+
+
+def write_preview(preview_dir: Path, source_mp4: Path | None = None) -> str:
     preview_dir.mkdir(parents=True, exist_ok=True)
-    _, ffmpeg_stats = generate_ffmpeg_media(preview_dir)
+    assets = prepare_preview_media(preview_dir, source_mp4=source_mp4)
     page_path = preview_dir / "index.html"
-    page_path.write_text(make_preview_page(ffmpeg_stats), encoding="utf-8")
-    return f"ffmpeg chrome direct preview written: dir={preview_dir} page={page_path}"
+    page_path.write_text(make_preview_page(assets.ffmpeg_stats), encoding="utf-8")
+    write_preview_manifest(preview_dir, assets)
+    source_note = f" source={assets.media_path}" if source_mp4 is not None else ""
+    return f"ffmpeg chrome direct preview written: dir={preview_dir} page={page_path}{source_note}"
 
 
 def serve_preview(preview_dir: Path) -> int:
-    media_path = preview_dir / "ffmpeg_chrome_direct.webm"
-    if not media_path.exists():
-        raise AssertionError(f"manual preview media file is missing: {media_path}")
-    server, thread, http_port, state = start_manual_preview_server(preview_dir, media_path)
+    assets = read_preview_manifest(preview_dir)
+    server, thread, http_port, state = start_manual_preview_server(
+        preview_dir,
+        assets.media_path,
+        raw_video_path=assets.raw_video_path,
+        raw_audio_path=assets.raw_audio_path,
+    )
     url = f"http://127.0.0.1:{http_port}/"
     print(f"ffmpeg chrome direct preview serving: {url}", flush=True)
     print("press Ctrl-C to stop", flush=True)
@@ -1492,6 +1766,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep-temp", action="store_true", help="copy generated headless-test artifacts to a retained temp directory")
     parser.add_argument("--preview-dir", type=Path, help="write a manual Chrome receiver preview page into this directory")
+    parser.add_argument("--source-mp4", type=Path, help="prepare this MP4 as the raw preview source for the Uya sender")
     parser.add_argument("--serve-preview", action="store_true", help="serve the manual preview page and wait until Ctrl-C")
     parser.add_argument("--manual-preview-e2e", action="store_true", help="launch Chrome, click the manual preview button, and verify Uya-originated media")
     parser.add_argument("--contract-only", action="store_true", help="validate the direct sender harness contract without launching Chrome")
@@ -1501,11 +1776,11 @@ def main() -> int:
             print(assert_contract(), flush=True)
             return 0
         if args.manual_preview_e2e:
-            print(run_manual_preview_flow(args.keep_temp), flush=True)
+            print(run_manual_preview_flow(args.keep_temp, source_mp4=args.source_mp4), flush=True)
             return 0
         if args.preview_dir is not None or args.serve_preview:
             preview_dir = args.preview_dir or Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-direct-preview-"))
-            print(write_preview(preview_dir), flush=True)
+            print(write_preview(preview_dir, source_mp4=args.source_mp4), flush=True)
             if args.serve_preview:
                 return serve_preview(preview_dir)
             return 0

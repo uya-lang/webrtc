@@ -18,6 +18,12 @@ rg -Fq "SRTP/SRTCP -> UDP" tests/ffmpeg_chrome_call.py
 rg -Fq "start_uya_direct_sender" tests/ffmpeg_chrome_call.py
 rg -Fq "wait_for_uya_direct_sender" tests/ffmpeg_chrome_call.py
 rg -Fq "ManualPreviewState" tests/ffmpeg_chrome_call.py
+rg -Fq "PreviewMediaAssets" tests/ffmpeg_chrome_call.py
+rg -Fq "prepare_mp4_raw_preview" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--source-mp4" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--raw-video-i420" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--raw-audio-s16le" tests/ffmpeg_chrome_call.py
+rg -Fq "preview_manifest.json" tests/ffmpeg_chrome_call.py
 rg -Fq "Start Uya Video" tests/ffmpeg_chrome_call.py
 rg -Fq "remoteVideo" tests/ffmpeg_chrome_call.py
 rg -Fq "/api/start-call" tests/ffmpeg_chrome_call.py
@@ -45,6 +51,22 @@ rg -Fq "sender_udp_packets" tests/ffmpeg_chrome_call.py
 
 python3 tests/ffmpeg_chrome_call.py --contract-only
 python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e
+
+mp4_tmp="$(mktemp -d)"
+trap 'rm -rf "$mp4_tmp"' EXIT
+ffmpeg -hide_banner -loglevel error -y \
+	-f lavfi -i testsrc2=size=1920x1080:rate=30:duration=1 \
+	-f lavfi -i sine=frequency=660:sample_rate=48000:duration=1 \
+	-map 0:v:0 \
+	-map 1:a:0 \
+	-c:v mpeg4 \
+	-q:v 4 \
+	-pix_fmt yuv420p \
+	-c:a aac \
+	-shortest \
+	"$mp4_tmp/source.mp4"
+python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e --source-mp4 "$mp4_tmp/source.mp4"
+
 python3 tests/ffmpeg_chrome_call.py
 
 echo "Phase 21 FFmpeg Chrome call checks passed"

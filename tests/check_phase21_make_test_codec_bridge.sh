@@ -10,6 +10,7 @@ rg -Fq "test-ffmpeg-codec-flow:" Makefile
 rg -Fq "test-ffmpeg-codec-extern:" Makefile
 rg -Fq "test-ffmpeg-chrome-call:" Makefile
 rg -Fq "preview-ffmpeg-chrome-call:" Makefile
+rg -Fq -- '--source-mp4 "$(MP4)"' Makefile
 rg -Fq '$(MAKE) -C ../opus smoke' Makefile
 rg -Fq '$(MAKE) -C ../vp8 build check-toolchain' Makefile
 rg -Fq "bash tests/check_phase21_fixture_manifest.sh" Makefile

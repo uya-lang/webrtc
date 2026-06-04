@@ -29,6 +29,10 @@ rg -Fq "direct_sender_protect_srtcp_packet" src/webrtc_ffmpeg_direct_sender_main
 rg -Fq "direct_sender_record_rtcp_feedback" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_direct_sender_encode_opus_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_direct_sender_encode_vp8_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--raw-video-i420" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--raw-audio-s16le" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "read_exact_looping" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "open_optional_read_fd" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--codec ffmpeg|uya" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "codec_provider_ffmpeg_make" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "codec_provider_uya_make" src/webrtc_ffmpeg_direct_sender_main.uya

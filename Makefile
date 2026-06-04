@@ -240,7 +240,11 @@ test-ffmpeg-chrome-call:
 	bash tests/check_phase21_ffmpeg_chrome_call.sh
 
 preview-ffmpeg-chrome-call:
-	python3 tests/ffmpeg_chrome_call.py --preview-dir build/ffmpeg-chrome-preview --serve-preview
+	if [[ -n "$(MP4)" ]]; then \
+		python3 tests/ffmpeg_chrome_call.py --preview-dir build/ffmpeg-chrome-preview --source-mp4 "$(MP4)" --serve-preview; \
+	else \
+		python3 tests/ffmpeg_chrome_call.py --preview-dir build/ffmpeg-chrome-preview --serve-preview; \
+	fi
 
 clean:
 	rm -rf $(BUILD_DIR)

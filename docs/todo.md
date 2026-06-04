@@ -576,6 +576,10 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
     - verified 2026-06-04: `python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e --keep-temp` 通过，`chrome_audio_packets=237`、`chrome_video_packets=142`、`chrome_video_frames=142`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=10`、`sender_rtcp_packets_received=10`、`sender_rtcp_receiver_reports=10`、`sender_udp_packets=491`。
     - verified 2026-06-04: `bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过（含 `--manual-preview-e2e`），manual preview `chrome_audio_packets=234`、`chrome_video_packets=141`、`chrome_video_frames=141`、`sender_rtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_receiver_reports=8`、`sender_udp_packets=491`。
     - verified 2026-06-04: `make test-ffmpeg-chrome-call` 通过，manual preview `chrome_audio_packets=234`、`chrome_video_packets=140`、`chrome_video_frames=140`、`sender_rtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_receiver_reports=9`、`sender_udp_packets=491`。
+  - [x] 支持手工预览指定 MP4 源：`make preview-ffmpeg-chrome-call MP4=/absolute/path/to/source.mp4` 会用 FFmpeg probe/loop 将 MP4 转成 raw I420 + mono s16le，Uya sender 通过 `--raw-video-i420` / `--raw-audio-s16le` 连续读取并推给 Chrome。
+    - verified 2026-06-04: `make test-ffmpeg-chrome-call` 生成 1920x1080 MP4 并覆盖 `--source-mp4`，MP4 manual preview `source_kind=mp4`、`chrome_audio_packets=240`、`chrome_video_packets=144`、`chrome_video_frames=144`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_receiver_reports=9`、`sender_udp_packets=491`。
+    - note: 当前 MP4 源在预览准备阶段缩放为 32x18 I420，因为 direct sender 的 VP8 RTP packetizer 仍是单 RTP packet/frame；这验证“可指定 MP4 连续推流查看”，不代表原分辨率 1080p 传输已经完成。
+  - [ ] 实现 VP8 RTP fragmentation / pacing 和更大 encoded frame buffer，支持不降分辨率的 1080p MP4 源直推 Chrome。
 - [x] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
 - [x] AV1 仅保留 OBU/RTP 工具，编解码另行评估。
 
