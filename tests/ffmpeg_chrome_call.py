@@ -15,13 +15,18 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import textwrap
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +54,13 @@ class UyaDirectSenderHandle:
     diagnostics_path: Path
     stdout_path: Path
     stderr_path: Path
+
+
+@dataclass
+class ManualPreviewSession:
+    session_id: str
+    handle: UyaDirectSenderHandle
+    workdir: Path
 
 
 def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
@@ -319,21 +331,29 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
         """
         <!doctype html>
         <meta charset="utf-8">
-        <title>Uya FFmpeg Direct Receiver Preview</title>
+        <title>Uya FFmpeg Direct Chrome Preview</title>
         <style>
           :root {
             color-scheme: light;
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            background: #f7f8fb;
+            background: #f5f7fa;
             color: #1f2937;
           }
           body { margin: 0; min-height: 100vh; }
-          main { max-width: 1120px; margin: 0 auto; padding: 24px; }
-          h1 { margin: 0 0 16px; font-size: 22px; }
+          main { max-width: 1180px; margin: 0 auto; padding: 20px; }
+          header {
+            align-items: center;
+            display: flex;
+            gap: 12px;
+            justify-content: space-between;
+            margin-bottom: 12px;
+          }
+          h1 { margin: 0; font-size: 22px; }
+          .actions { display: flex; gap: 8px; }
           button {
             border: 0;
             border-radius: 6px;
-            background: #14532d;
+            background: #155e75;
             color: white;
             cursor: pointer;
             font: inherit;
@@ -341,9 +361,26 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
             min-height: 40px;
             padding: 0 16px;
           }
+          button.secondary { background: #475569; }
+          button:disabled { cursor: default; opacity: 0.55; }
+          .stage {
+            background: #0f172a;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            overflow: hidden;
+          }
+          video {
+            aspect-ratio: 16 / 9;
+            background: #020617;
+            display: block;
+            image-rendering: pixelated;
+            min-height: 280px;
+            object-fit: contain;
+            width: 100%;
+          }
           .status {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 8px;
             margin: 16px 0;
           }
@@ -360,36 +397,299 @@ def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
             border-radius: 8px;
             color: #e5e7eb;
             font-size: 12px;
+            min-height: 180px;
             overflow: auto;
             padding: 12px;
             white-space: pre-wrap;
           }
           @media (max-width: 760px) {
             main { padding: 16px; }
+            header { align-items: stretch; flex-direction: column; }
+            .actions { width: 100%; }
+            button { flex: 1; }
             .status { grid-template-columns: 1fr; }
+            video { min-height: 200px; }
           }
         </style>
         <main>
-          <h1>Uya FFmpeg Direct Receiver Preview</h1>
-          <button id="start">Create Chrome Offer</button>
+          <header>
+            <h1>Uya FFmpeg Direct Chrome Preview</h1>
+            <div class="actions">
+              <button id="start">Start Uya Video</button>
+              <button class="secondary" id="stop" disabled>Stop</button>
+            </div>
+          </header>
+          <section class="stage">
+            <video id="remoteVideo" autoplay playsinline controls muted></video>
+          </section>
           <section class="status">
             <div class="metric"><span class="label">State</span><span class="value" id="state">idle</span></div>
             <div class="metric"><span class="label">Audio Packets</span><span class="value" id="audioPackets">0</span></div>
             <div class="metric"><span class="label">Video Frames</span><span class="value" id="videoFrames">0</span></div>
+            <div class="metric"><span class="label">Sender RTP</span><span class="value" id="senderRtp">0</span></div>
           </section>
           <pre id="log"></pre>
         </main>
         <script>
         const sourceStats = __SOURCE_STATS__;
         const start = document.getElementById('start');
+        const stop = document.getElementById('stop');
         const state = document.getElementById('state');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const audioPackets = document.getElementById('audioPackets');
+        const videoFrames = document.getElementById('videoFrames');
+        const senderRtp = document.getElementById('senderRtp');
         const log = document.getElementById('log');
-        function writeLog(line) { log.textContent += line + '\\n'; }
+        const remoteStream = new MediaStream();
+        remoteVideo.srcObject = remoteStream;
+        let receiver = null;
+        let sessionId = '';
+        let finished = false;
+        window.__uyaManualPreviewProgress = [];
+        window.__uyaManualPreviewResult = null;
+
+        function writeLog(line) {
+          log.textContent += line + '\\n';
+          log.scrollTop = log.scrollHeight;
+        }
+
+        function setState(value) {
+          state.textContent = value;
+          window.__uyaManualPreviewProgress.push(value);
+        }
+
+        function delay(ms) {
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function fail(message, error) {
+          const detail = [];
+          if (error) {
+            if (error.name) detail.push(String(error.name));
+            if (error.message) detail.push(String(error.message));
+            detail.push(error.stack ? String(error.stack) : String(error));
+          }
+          setState('error');
+          const detailText = detail.join('\\n');
+          writeLog(message + (detailText ? '\\n' + detailText : ''));
+          window.__uyaManualPreviewResult = {
+            ok: false,
+            error: message,
+            detail: detailText,
+            progress: window.__uyaManualPreviewProgress.slice()
+          };
+        }
+
+        async function postJson(path, body) {
+          const response = await fetch(path, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+          });
+          let data = null;
+          try {
+            data = await response.json();
+          } catch (error) {
+            throw new Error(path + ' returned non-JSON status ' + response.status);
+          }
+          if (!response.ok || !data || data.ok !== true) {
+            throw new Error((data && data.error) || (path + ' failed with status ' + response.status));
+          }
+          return data;
+        }
+
+        function waitForEvent(target, name, predicate) {
+          return new Promise((resolve, reject) => {
+            const handler = event => {
+              try {
+                if (!predicate || predicate(event)) {
+                  target.removeEventListener(name, handler);
+                  resolve(event);
+                }
+              } catch (error) {
+                target.removeEventListener(name, handler);
+                reject(error);
+              }
+            };
+            target.addEventListener(name, handler);
+          });
+        }
+
+        async function waitForGatheringComplete(peer) {
+          if (peer.iceGatheringState === 'complete') {
+            return;
+          }
+          await waitForEvent(peer, 'icegatheringstatechange', () => peer.iceGatheringState === 'complete');
+        }
+
+        function preferredCodecs(kind, mimeType) {
+          const capabilities = RTCRtpReceiver.getCapabilities(kind);
+          if (!capabilities || !capabilities.codecs) {
+            return [];
+          }
+          const wanted = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase() === mimeType);
+          const helpers = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase().indexOf('rtx') >= 0);
+          return wanted.concat(helpers);
+        }
+
+        async function readInbound(kind, rtpReceiver) {
+          const stats = await rtpReceiver.getStats();
+          for (const stat of stats.values()) {
+            if (stat.type !== 'inbound-rtp') continue;
+            if (stat.kind !== kind && stat.mediaType !== kind) continue;
+            let codecMimeType = '';
+            if (stat.codecId) {
+              const codec = stats.get(stat.codecId);
+              if (codec && codec.mimeType) codecMimeType = String(codec.mimeType);
+            }
+            return {
+              packetsReceived: stat.packetsReceived || 0,
+              framesDecoded: stat.framesDecoded || stat.framesReceived || 0,
+              codecMimeType
+            };
+          }
+          return {packetsReceived: 0, framesDecoded: 0, codecMimeType: ''};
+        }
+
+        async function waitForMedia(audioReceiver, videoReceiver) {
+          const deadline = Date.now() + 12000;
+          while (Date.now() < deadline) {
+            const audioStats = await readInbound('audio', audioReceiver);
+            const videoStats = await readInbound('video', videoReceiver);
+            audioPackets.textContent = String(audioStats.packetsReceived);
+            videoFrames.textContent = String(videoStats.framesDecoded);
+            if (audioStats.packetsReceived > 0 && videoStats.packetsReceived > 0 && videoStats.framesDecoded > 0) {
+              return {audioStats, videoStats};
+            }
+            await delay(150);
+          }
+          throw new Error('Chrome did not decode Uya-originated Opus/VP8 media before timeout');
+        }
+
+        async function stopSession() {
+          if (sessionId) {
+            const id = sessionId;
+            sessionId = '';
+            await postJson('/api/stop-call', {sessionId: id}).catch(error => writeLog(String(error.message || error)));
+          }
+          if (receiver) {
+            receiver.close();
+          }
+          stop.disabled = true;
+          start.disabled = false;
+        }
+
+        async function runOneClickPreview() {
+          const states = [];
+          const tracks = [];
+          setState('offer');
+          writeLog('ffmpeg=' + JSON.stringify(sourceStats));
+          receiver = new RTCPeerConnection({iceServers: []});
+          window.__uyaManualPreviewPeer = receiver;
+          receiver.addEventListener('connectionstatechange', () => {
+            states.push('receiver:' + receiver.connectionState);
+            writeLog('connection=' + receiver.connectionState);
+          });
+          receiver.addEventListener('iceconnectionstatechange', () => {
+            states.push('ice:' + receiver.iceConnectionState);
+          });
+          receiver.addEventListener('track', event => {
+            tracks.push(event.track.kind);
+            remoteStream.addTrack(event.track);
+            remoteVideo.play().catch(error => writeLog('video.play: ' + String(error.message || error)));
+          });
+
+          const audioTransceiver = receiver.addTransceiver('audio', {direction: 'recvonly'});
+          const opus = preferredCodecs('audio', 'audio/opus');
+          if (opus.length > 0) {
+            audioTransceiver.setCodecPreferences(opus);
+          }
+          const videoTransceiver = receiver.addTransceiver('video', {direction: 'recvonly'});
+          const vp8 = preferredCodecs('video', 'video/vp8');
+          if (vp8.length > 0) {
+            videoTransceiver.setCodecPreferences(vp8);
+          }
+
+          const offer = await receiver.createOffer();
+          await receiver.setLocalDescription(offer);
+          await waitForGatheringComplete(receiver);
+          setState('sender');
+          const started = await postJson('/api/start-call', {
+            offer: {
+              type: receiver.localDescription.type,
+              sdp: receiver.localDescription.sdp
+            }
+          });
+          sessionId = String(started.sessionId || '');
+          if (!sessionId || !started.answer || !started.answer.sdp) {
+            throw new Error('preview server did not return a Uya SDP answer');
+          }
+          writeLog('uya_session=' + sessionId);
+          await receiver.setRemoteDescription({
+            type: 'answer',
+            sdp: String(started.answer.sdp)
+          });
+          setState('playing');
+
+          const audio = receiver.getReceivers().find(item => item.track && item.track.kind === 'audio');
+          const video = receiver.getReceivers().find(item => item.track && item.track.kind === 'video');
+          if (!audio || !video) {
+            throw new Error('Chrome receiver lookup failed');
+          }
+          const firstStats = await waitForMedia(audio, video);
+          await delay(4500);
+          const finalAudioStats = await readInbound('audio', audio);
+          const finalVideoStats = await readInbound('video', video);
+          audioPackets.textContent = String(finalAudioStats.packetsReceived);
+          videoFrames.textContent = String(finalVideoStats.framesDecoded);
+          setState('diagnostics');
+          const finishedCall = await postJson('/api/finish-call', {sessionId});
+          sessionId = '';
+          const diagnostics = finishedCall.diagnostics || {};
+          senderRtp.textContent = String(diagnostics.rtpPackets || 0);
+          writeLog('diagnostics=' + JSON.stringify(diagnostics));
+          setState('complete');
+          finished = true;
+          stop.disabled = false;
+          window.__uyaManualPreviewResult = {
+            ok: true,
+            browser: navigator.userAgent,
+            states,
+            tracks,
+            receiverConnectionState: receiver.connectionState,
+            audioPacketsReceived: finalAudioStats.packetsReceived || firstStats.audioStats.packetsReceived,
+            audioCodecMimeType: finalAudioStats.codecMimeType || firstStats.audioStats.codecMimeType,
+            videoPacketsReceived: finalVideoStats.packetsReceived || firstStats.videoStats.packetsReceived,
+            videoFramesDecoded: finalVideoStats.framesDecoded || firstStats.videoStats.framesDecoded,
+            videoCodecMimeType: finalVideoStats.codecMimeType || firstStats.videoStats.codecMimeType,
+            offerSdp: receiver.localDescription ? receiver.localDescription.sdp : '',
+            answerSdp: started.answer.sdp,
+            senderDiagnostics: diagnostics,
+            progress: window.__uyaManualPreviewProgress.slice()
+          };
+        }
+
         start.addEventListener('click', async () => {
           start.disabled = true;
-          state.textContent = 'offer';
-          writeLog('ffmpeg=' + JSON.stringify(sourceStats));
-          writeLog('Use the headless test to pass this offer into uya_ffmpeg_direct_sender.');
+          stop.disabled = false;
+          finished = false;
+          window.__uyaManualPreviewResult = null;
+          window.__uyaManualPreviewProgress = [];
+          try {
+            await runOneClickPreview();
+          } catch (error) {
+            await stopSession();
+            fail('Uya preview call failed', error);
+          }
+        });
+        stop.addEventListener('click', async () => {
+          if (!finished) {
+            setState('stopping');
+          }
+          await stopSession();
+          if (!finished) {
+            setState('stopped');
+          }
         });
         </script>
         """
@@ -495,6 +795,89 @@ def wait_for_result(client: CDPClient, session_id: str) -> dict[str, Any]:
     raise TimeoutError(f"Chrome did not publish inbound RTP result; state={read_chrome_debug_state(client, session_id)}")
 
 
+def evaluate_value(client: CDPClient, session_id: str, expression: str) -> Any:
+    response = client.command(
+        "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True},
+        session_id=session_id,
+    )
+    result = response.get("result")
+    if isinstance(result, dict):
+        return result.get("value")
+    return None
+
+
+def wait_for_manual_preview_ready(client: CDPClient, session_id: str) -> None:
+    deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
+    last_state: Any = None
+    while time.monotonic() < deadline:
+        last_state = evaluate_json(
+            client,
+            session_id,
+            textwrap.dedent(
+                """
+                JSON.stringify({
+                  ready: !!document.getElementById('start'),
+                  readyState: document.readyState,
+                  href: location.href,
+                  title: document.title,
+                  hasStart: !!document.getElementById('start'),
+                  bodyPrefix: document.body ? document.body.textContent.slice(0, 120) : ''
+                })
+                """
+            ),
+        )
+        if isinstance(last_state, dict) and last_state.get("ready") is True:
+            return
+        time.sleep(0.1)
+    raise TimeoutError(f"manual preview page did not become ready: {last_state}")
+
+
+def click_manual_preview_start(client: CDPClient, session_id: str) -> None:
+    clicked = evaluate_value(
+        client,
+        session_id,
+        "(() => { const button = document.getElementById('start'); if (!button) return false; button.click(); return true; })()",
+    )
+    require(clicked is True, "manual preview start button was not clickable")
+
+
+def read_manual_preview_state(client: CDPClient, session_id: str) -> dict[str, Any]:
+    state = evaluate_json(
+        client,
+        session_id,
+        textwrap.dedent(
+            """
+            JSON.stringify({
+              progress: window.__uyaManualPreviewProgress || [],
+              result: window.__uyaManualPreviewResult || null,
+              state: document.getElementById('state') ? document.getElementById('state').textContent : '',
+              audioPackets: document.getElementById('audioPackets') ? document.getElementById('audioPackets').textContent : '',
+              videoFrames: document.getElementById('videoFrames') ? document.getElementById('videoFrames').textContent : '',
+              senderRtp: document.getElementById('senderRtp') ? document.getElementById('senderRtp').textContent : ''
+            })
+            """
+        ),
+    )
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def wait_for_manual_preview_result(client: CDPClient, session_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 35.0
+    while time.monotonic() < deadline:
+        result = evaluate_json(
+            client,
+            session_id,
+            "window.__uyaManualPreviewResult ? JSON.stringify(window.__uyaManualPreviewResult) : null",
+        )
+        if isinstance(result, dict):
+            return result
+        time.sleep(0.2)
+    raise TimeoutError(f"manual preview did not publish a result; state={read_manual_preview_state(client, session_id)}")
+
+
 def read_text_tail(path: Path, limit: int = 12000) -> str:
     if not path.exists():
         return ""
@@ -596,7 +979,17 @@ def start_uya_direct_sender(offer: dict[str, str], media_path: Path, workdir: Pa
         stdout_file.close()
         stderr_file.close()
 
-    answer_sdp = wait_for_answer(proc, answer_path, stdout_path, stderr_path)
+    try:
+        answer_sdp = wait_for_answer(proc, answer_path, stdout_path, stderr_path)
+    except Exception:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+        raise
     return UyaDirectSenderHandle(
         proc=proc,
         answer_sdp=answer_sdp,
@@ -654,6 +1047,125 @@ def stop_uya_direct_sender(handle: UyaDirectSenderHandle | None) -> None:
     except subprocess.TimeoutExpired:
         handle.proc.kill()
         handle.proc.wait(timeout=5.0)
+
+
+class ManualPreviewState:
+    def __init__(self, preview_dir: Path, media_path: Path) -> None:
+        self.preview_dir = preview_dir
+        self.media_path = media_path
+        self.sessions_dir = preview_dir / "sessions"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.sessions: dict[str, ManualPreviewSession] = {}
+        self.lock = threading.Lock()
+
+    def start_call(self, offer: dict[str, str]) -> tuple[str, str]:
+        session_id = uuid.uuid4().hex[:12]
+        workdir = self.sessions_dir / session_id
+        workdir.mkdir(parents=True, exist_ok=False)
+        handle = start_uya_direct_sender(offer, self.media_path, workdir)
+        with self.lock:
+            self.sessions[session_id] = ManualPreviewSession(session_id, handle, workdir)
+        return session_id, handle.answer_sdp
+
+    def finish_call(self, session_id: str) -> dict[str, Any]:
+        session = self._pop_session(session_id)
+        diagnostics = wait_for_uya_direct_sender(session.handle)
+        return diagnostics
+
+    def stop_call(self, session_id: str) -> dict[str, Any]:
+        session = self._pop_session(session_id)
+        stop_uya_direct_sender(session.handle)
+        return read_sender_diagnostics(session.handle.diagnostics_path)
+
+    def stop_all(self) -> None:
+        with self.lock:
+            sessions = list(self.sessions.values())
+            self.sessions.clear()
+        for session in sessions:
+            stop_uya_direct_sender(session.handle)
+
+    def _pop_session(self, session_id: str) -> ManualPreviewSession:
+        with self.lock:
+            session = self.sessions.pop(session_id, None)
+        if session is None:
+            raise AssertionError(f"unknown manual preview session: {session_id}")
+        return session
+
+
+class ManualPreviewHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args: Any, directory: str, state: ManualPreviewState, **kwargs: Any) -> None:
+        self.preview_state = state
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def do_POST(self) -> None:
+        try:
+            if self.path == "/api/start-call":
+                body = self._read_json_body()
+                offer = body.get("offer") if isinstance(body, dict) else None
+                if not isinstance(offer, dict) or offer.get("type") != "offer" or not isinstance(offer.get("sdp"), str):
+                    raise AssertionError("manual preview start-call requires an offer SDP")
+                session_id, answer_sdp = self.preview_state.start_call(
+                    {"type": "offer", "sdp": str(offer["sdp"])}
+                )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "sessionId": session_id,
+                        "answer": {"type": "answer", "sdp": answer_sdp},
+                    },
+                )
+                return
+            if self.path == "/api/finish-call":
+                body = self._read_json_body()
+                session_id = self._body_session_id(body)
+                diagnostics = self.preview_state.finish_call(session_id)
+                self._send_json(200, {"ok": True, "diagnostics": diagnostics})
+                return
+            if self.path == "/api/stop-call":
+                body = self._read_json_body()
+                session_id = self._body_session_id(body)
+                diagnostics = self.preview_state.stop_call(session_id)
+                self._send_json(200, {"ok": True, "diagnostics": diagnostics})
+                return
+            self._send_json(404, {"ok": False, "error": "unknown preview endpoint"})
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "error": str(exc)})
+
+    def _read_json_body(self) -> Any:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            return {}
+        if content_length > 1024 * 1024:
+            raise AssertionError("manual preview request body is too large")
+        return json.loads(self.rfile.read(content_length).decode("utf-8"))
+
+    def _body_session_id(self, body: Any) -> str:
+        if not isinstance(body, dict) or not isinstance(body.get("sessionId"), str) or not body["sessionId"]:
+            raise AssertionError("manual preview endpoint requires sessionId")
+        return str(body["sessionId"])
+
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        data = json.dumps(payload, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def start_manual_preview_server(preview_dir: Path, media_path: Path) -> tuple[ThreadingHTTPServer, threading.Thread, int, ManualPreviewState]:
+    state = ManualPreviewState(preview_dir, media_path)
+    port = find_free_port()
+    handler = partial(ManualPreviewHandler, directory=str(preview_dir), state=state)
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, port, state
 
 
 def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
@@ -724,9 +1236,74 @@ def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
         thread.join(timeout=2.0)
 
 
-def validate_browser_result(result: dict[str, Any]) -> None:
+def run_manual_preview_chrome_page(preview_dir: Path, media_path: Path) -> dict[str, Any]:
+    browser_exe = find_browser_executable()
+    server, thread, http_port, state = start_manual_preview_server(preview_dir, media_path)
+    browser_user_data_dir = preview_dir / "manual-profile"
+    browser_user_data_dir.mkdir(exist_ok=True)
+    debug_port = find_free_port()
+    proc = subprocess.Popen(
+        [
+            str(browser_exe),
+            f"--remote-debugging-port={debug_port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--autoplay-policy=no-user-gesture-required",
+            "--user-data-dir=" + str(browser_user_data_dir),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        version_url = f"http://127.0.0.1:{debug_port}/json/version"
+        deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
+        version: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(version_url, timeout=1.0) as response:
+                    version = json.loads(response.read().decode("utf-8"))
+                break
+            except Exception:
+                time.sleep(0.2)
+        require(version is not None, "browser remote debugging endpoint did not become ready")
+        browser_ws_url = str(version.get("webSocketDebuggerUrl"))
+        require(browser_ws_url.startswith("ws://"), "browser version endpoint missing websocket url")
+
+        client = CDPClient(browser_ws_url)
+        client.connect()
+        try:
+            target = client.command("Target.createTarget", {"url": "about:blank"})
+            target_id = str(target["targetId"])
+            attached = client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+            session_id = str(attached["sessionId"])
+            client.command("Runtime.enable", session_id=session_id)
+            client.command("Page.enable", session_id=session_id)
+            client.command("Page.navigate", {"url": f"http://127.0.0.1:{http_port}/index.html"}, session_id=session_id)
+            wait_for_manual_preview_ready(client, session_id)
+            click_manual_preview_start(client, session_id)
+            return wait_for_manual_preview_result(client, session_id)
+        finally:
+            client.close()
+    finally:
+        state.stop_all()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def validate_media_result(result: dict[str, Any], require_closed: bool) -> None:
     require(result.get("ok") is True, f"browser page reported failure: {result}")
-    require(result.get("receiverConnectionState") == "closed", "Chrome receiver should be closed after cleanup")
+    if require_closed:
+        require(result.get("receiverConnectionState") == "closed", "Chrome receiver should be closed after cleanup")
     tracks = result.get("tracks")
     require(isinstance(tracks, list) and "audio" in tracks, "Chrome did not surface an audio track")
     require(isinstance(tracks, list) and "video" in tracks, "Chrome did not surface a video track")
@@ -758,6 +1335,17 @@ def validate_browser_result(result: dict[str, Any]) -> None:
     require(int(diagnostics.get("udpPackets", 0)) > 0, "Uya sender reported no UDP packets")
 
 
+def validate_browser_result(result: dict[str, Any]) -> None:
+    validate_media_result(result, require_closed=True)
+
+
+def validate_manual_preview_result(result: dict[str, Any]) -> None:
+    validate_media_result(result, require_closed=False)
+    progress = result.get("progress")
+    require(isinstance(progress, list) and "playing" in progress, "manual preview did not reach playing state")
+    require(isinstance(progress, list) and "complete" in progress, "manual preview did not reach complete state")
+
+
 def assert_contract() -> str:
     source = Path(__file__).read_text(encoding="utf-8")
     required = [
@@ -768,6 +1356,12 @@ def assert_contract() -> str:
         "rtcpSenderReports",
         "rtcpPacketsReceived",
         "recvonly",
+        "Start Uya Video",
+        "remoteVideo",
+        "/api/start-call",
+        "/api/finish-call",
+        "window.__uyaManualPreviewResult",
+        "run_manual_preview_chrome_page",
     ]
     missing = [item for item in required if item not in source]
     if missing:
@@ -819,6 +1413,52 @@ def run_flow(keep_temp: bool = False) -> str:
         )
 
 
+def run_manual_preview_flow(keep_temp: bool = False) -> str:
+    with tempfile.TemporaryDirectory(prefix="webrtc-ffmpeg-chrome-manual-preview-") as tmp:
+        tempdir_path = Path(tmp)
+        media_path, ffmpeg_stats = generate_ffmpeg_media(tempdir_path)
+        page_path = tempdir_path / "index.html"
+        page_path.write_text(make_preview_page(ffmpeg_stats), encoding="utf-8")
+        result = run_manual_preview_chrome_page(tempdir_path, media_path)
+        validate_manual_preview_result(result)
+        diagnostics = result.get("senderDiagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+
+        if keep_temp:
+            kept = Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-manual-preview-kept-"))
+            for path in tempdir_path.iterdir():
+                target = kept / path.name
+                if path.is_dir():
+                    shutil.copytree(path, target)
+                elif path.is_file():
+                    target.write_bytes(path.read_bytes())
+            temp_note = f" kept={kept}"
+        else:
+            temp_note = ""
+
+        return (
+            "ffmpeg chrome manual preview checks passed: "
+            f"source_audio_codec={ffmpeg_stats['audio_codec']} "
+            f"source_audio_packets={ffmpeg_stats['audio_packets']} "
+            f"source_video_codec={ffmpeg_stats['video_codec']} "
+            f"source_video_packets={ffmpeg_stats['video_packets']} "
+            f"chrome_audio_packets={result.get('audioPacketsReceived')} "
+            f"chrome_video_packets={result.get('videoPacketsReceived')} "
+            f"chrome_video_frames={result.get('videoFramesDecoded')}"
+            f" sender_ffmpeg_frames={diagnostics.get('ffmpegFrames')} "
+            f"sender_rtp_packets={diagnostics.get('rtpPackets')} "
+            f"sender_srtp_packets={diagnostics.get('srtpPackets')} "
+            f"sender_srtcp_packets={diagnostics.get('srtcpPackets')} "
+            f"sender_rtcp_sender_reports={diagnostics.get('rtcpSenderReports')} "
+            f"sender_srtcp_packets_received={diagnostics.get('srtcpPacketsReceived')} "
+            f"sender_rtcp_packets_received={diagnostics.get('rtcpPacketsReceived')} "
+            f"sender_rtcp_receiver_reports={diagnostics.get('rtcpReceiverReportsReceived')} "
+            f"sender_udp_packets={diagnostics.get('udpPackets')}"
+            f"{temp_note}"
+        )
+
+
 def write_preview(preview_dir: Path) -> str:
     preview_dir.mkdir(parents=True, exist_ok=True)
     _, ffmpeg_stats = generate_ffmpeg_media(preview_dir)
@@ -828,7 +1468,10 @@ def write_preview(preview_dir: Path) -> str:
 
 
 def serve_preview(preview_dir: Path) -> int:
-    server, thread, http_port = start_http_server(preview_dir)
+    media_path = preview_dir / "ffmpeg_chrome_direct.webm"
+    if not media_path.exists():
+        raise AssertionError(f"manual preview media file is missing: {media_path}")
+    server, thread, http_port, state = start_manual_preview_server(preview_dir, media_path)
     url = f"http://127.0.0.1:{http_port}/"
     print(f"ffmpeg chrome direct preview serving: {url}", flush=True)
     print("press Ctrl-C to stop", flush=True)
@@ -839,6 +1482,7 @@ def serve_preview(preview_dir: Path) -> int:
         print("ffmpeg chrome direct preview stopped", flush=True)
         return 0
     finally:
+        state.stop_all()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
@@ -849,11 +1493,15 @@ def main() -> int:
     parser.add_argument("--keep-temp", action="store_true", help="copy generated headless-test artifacts to a retained temp directory")
     parser.add_argument("--preview-dir", type=Path, help="write a manual Chrome receiver preview page into this directory")
     parser.add_argument("--serve-preview", action="store_true", help="serve the manual preview page and wait until Ctrl-C")
+    parser.add_argument("--manual-preview-e2e", action="store_true", help="launch Chrome, click the manual preview button, and verify Uya-originated media")
     parser.add_argument("--contract-only", action="store_true", help="validate the direct sender harness contract without launching Chrome")
     args = parser.parse_args()
     try:
         if args.contract_only:
             print(assert_contract(), flush=True)
+            return 0
+        if args.manual_preview_e2e:
+            print(run_manual_preview_flow(args.keep_temp), flush=True)
             return 0
         if args.preview_dir is not None or args.serve_preview:
             preview_dir = args.preview_dir or Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-direct-preview-"))

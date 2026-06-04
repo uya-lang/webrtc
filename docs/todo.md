@@ -540,7 +540,7 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
 - [x] 建立跨仓库 fixture manifest，记录样本来源、hash、授权和适用阶段。
 - [x] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
 - [x] 增加 `make test-ffmpeg-codec-flow`，用 FFmpeg `libopus` / `libvpx` 验证泛型 codec 推拉流准确性。
-- [x] 增加 `make test-ffmpeg-chrome-call`，用 FFmpeg 生成 VP8/Opus WebM，Chrome `captureStream()` + `RTCPeerConnection` 验证 audio/video 通话、SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
+- [x] 增加 `make test-ffmpeg-chrome-call`，用 FFmpeg 生成 VP8/Opus WebM，Chrome recvonly `RTCPeerConnection` + Uya direct sender 验证 audio/video 通话、SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
 - [~] 增加浏览器 one-way audio 示例，可选择直接发送 encoded Opus 或通过 Opus bridge 编码。
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
 - [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
@@ -572,6 +572,10 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
   - [x] 通过 Chrome inbound-rtp stats 和 decoded audio/video frames 验证观看成功，并记录 FFmpeg packet、RTP packet、SRTP packet、UDP packet 计数。
     - verified 2026-06-03: `python3 tests/ffmpeg_chrome_call.py --keep-temp` 通过，`source_audio_packets=201`、`source_video_packets=120`、`chrome_audio_packets=10`、`chrome_video_packets=6`、`chrome_video_frames=6`、`sender_ffmpegFrames=321`、`sender_rtpPackets=321`、`sender_srtpPackets=321`、`sender_udpPackets=321`。
     - verified 2026-06-04: `bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过，`source_audio_packets=201`、`source_video_packets=120`、`chrome_audio_packets=238`、`chrome_video_packets=143`、`chrome_video_frames=143`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=5`、`sender_rtcp_packets_received=5`、`sender_rtcp_receiver_reports=5`、`sender_udp_packets=491`。
+  - [x] 增加 `make preview-ffmpeg-chrome-call` 一键手工预览：Chrome 打开本地页后点击 `Start Uya Video`，页面通过本地 JSON API 启动 `uya_ffmpeg_direct_sender`、交换 SDP、播放 remote `<video>` 并显示 Chrome inbound stats / Uya sender diagnostics。
+    - verified 2026-06-04: `python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e --keep-temp` 通过，`chrome_audio_packets=237`、`chrome_video_packets=142`、`chrome_video_frames=142`、`sender_ffmpeg_frames=481`、`sender_rtp_packets=481`、`sender_srtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_sender_reports=10`、`sender_srtcp_packets_received=10`、`sender_rtcp_packets_received=10`、`sender_rtcp_receiver_reports=10`、`sender_udp_packets=491`。
+    - verified 2026-06-04: `bash tests/check_phase21_ffmpeg_chrome_call.sh` 通过（含 `--manual-preview-e2e`），manual preview `chrome_audio_packets=234`、`chrome_video_packets=141`、`chrome_video_frames=141`、`sender_rtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_receiver_reports=8`、`sender_udp_packets=491`。
+    - verified 2026-06-04: `make test-ffmpeg-chrome-call` 通过，manual preview `chrome_audio_packets=234`、`chrome_video_packets=140`、`chrome_video_frames=140`、`sender_rtp_packets=481`、`sender_srtcp_packets=10`、`sender_rtcp_receiver_reports=9`、`sender_udp_packets=491`。
 - [x] H264 仅保留 payload/Annex-B/AVCC 工具，编解码另行评估。
 - [x] AV1 仅保留 OBU/RTP 工具，编解码另行评估。
 

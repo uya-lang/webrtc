@@ -17,6 +17,12 @@ rg -Fq "rtp_packetize_encoded_frame" tests/ffmpeg_chrome_call.py
 rg -Fq "SRTP/SRTCP -> UDP" tests/ffmpeg_chrome_call.py
 rg -Fq "start_uya_direct_sender" tests/ffmpeg_chrome_call.py
 rg -Fq "wait_for_uya_direct_sender" tests/ffmpeg_chrome_call.py
+rg -Fq "ManualPreviewState" tests/ffmpeg_chrome_call.py
+rg -Fq "Start Uya Video" tests/ffmpeg_chrome_call.py
+rg -Fq "remoteVideo" tests/ffmpeg_chrome_call.py
+rg -Fq "/api/start-call" tests/ffmpeg_chrome_call.py
+rg -Fq "/api/finish-call" tests/ffmpeg_chrome_call.py
+rg -Fq "window.__uyaManualPreviewResult" tests/ffmpeg_chrome_call.py
 rg -Fq "subprocess.Popen" tests/ffmpeg_chrome_call.py
 if rg -Fq "subprocess.run(" tests/ffmpeg_chrome_call.py; then
 	printf '%s\n' "ffmpeg chrome call must keep the Uya sender alive with subprocess.Popen" >&2
@@ -37,6 +43,8 @@ rg -Fq "sender_rtcp_sender_reports" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_rtcp_packets_received" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_udp_packets" tests/ffmpeg_chrome_call.py
 
+python3 tests/ffmpeg_chrome_call.py --contract-only
+python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e
 python3 tests/ffmpeg_chrome_call.py
 
 echo "Phase 21 FFmpeg Chrome call checks passed"
