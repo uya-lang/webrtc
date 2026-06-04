@@ -1,0 +1,230 @@
+// webrtc.media.vp8_codec_bridge - optional adapter to the sibling pure Uya VP8 package
+// Module: src/webrtc/media/vp8_codec_bridge.uya -> use webrtc.media.vp8_codec_bridge;
+
+use vp8.api;
+use vp8.container.ivf;
+use vp8.container.rtp_vp8;
+
+use webrtc.media.codec;
+use webrtc.media.codec_bridge;
+use webrtc.media.model;
+
+export error Vp8CodecBridgeInvalidFrame;
+export error Vp8CodecBridgeInvalidOutput;
+export error Vp8CodecBridgeNoOutput;
+
+export fn vp8_codec_bridge_ready() bool {
+    return true;
+}
+
+export fn vp8_codec_bridge_default_output_capacity(width: u32, height: u32) !usize {
+    if width == 0u32 || height == 0u32 {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    return try vp8_encoder_default_packet_capacity(width as usize, height as usize);
+}
+
+export fn vp8_codec_bridge_encoder_init(width: u32, height: u32) !Vp8Encoder {
+    if width == 0u32 || height == 0u32 {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    var options: Vp8EncoderOptions = make_vp8_encoder_options(width as usize, height as usize);
+    return try vp8_encoder_init(&options);
+}
+
+export fn vp8_codec_bridge_encoder_deinit(encoder: &Vp8Encoder) void {
+    if encoder == null {
+        return;
+    }
+    vp8_encoder_deinit(encoder);
+}
+
+export fn vp8_codec_bridge_decoder_init(width: u32, height: u32) !Vp8Decoder {
+    if width == 0u32 || height == 0u32 {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    var options: Vp8DecoderOptions = try make_vp8_decoder_options(width as usize, height as usize);
+    return try vp8_decoder_init(&options);
+}
+
+export fn vp8_codec_bridge_decoder_deinit(decoder: &Vp8Decoder) void {
+    if decoder == null {
+        return;
+    }
+    vp8_decoder_deinit(decoder);
+}
+
+fn vp8_codec_bridge_raw_frame_to_vp8_view(frame: &RawVideoFrame) !Vp8YuvFrameView {
+    if frame == null || frame.format != CODEC_RAW_VIDEO_FORMAT_I420 {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    if frame.width == 0u32 || frame.height == 0u32 || frame.duration_us == 0u32 {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    if frame.y_plane.len == 0usize || frame.u_plane.len == 0usize || frame.v_plane.len == 0usize {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+
+    return try vp8_encoder_make_yuv420_frame_view(
+        &frame.y_plane[0] as &byte,
+        frame.y_plane.len,
+        &frame.u_plane[0] as &byte,
+        frame.u_plane.len,
+        &frame.v_plane[0] as &byte,
+        frame.v_plane.len,
+        frame.width as usize,
+        frame.height as usize,
+        frame.stride_y,
+        frame.stride_u,
+        frame.stride_v
+    );
+}
+
+fn vp8_codec_bridge_extract_single_vp8_payload(packet: &Vp8EncodedPacket) !&[byte] {
+    if packet == null || !packet.has_output || packet.data == null || packet.len == 0usize {
+        return error.Vp8CodecBridgeNoOutput;
+    }
+
+    const header: IvfHeader = try parse_ivf_header(packet.data, packet.len);
+    var iterator: IvfFrameIterator = try make_ivf_frame_iterator(packet.data, packet.len, &header);
+    const frame: IvfFrame = try ivf_frame_iterator_next(&iterator);
+    if frame.payload.len == 0usize || frame.payload.data == null {
+        return error.Vp8CodecBridgeNoOutput;
+    }
+    return frame.payload.data[0:frame.payload.len];
+}
+
+export fn vp8_codec_bridge_encode_i420_to_frame(
+    encoder: &Vp8Encoder,
+    raw_frame: &RawVideoFrame,
+    output_ivf: &[byte],
+) !EncodedFrame {
+    if encoder == null || output_ivf.len == 0usize {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+    const vp8_view: Vp8YuvFrameView = try vp8_codec_bridge_raw_frame_to_vp8_view(raw_frame);
+    const flags: Vp8EncodeFlags = make_vp8_encode_flags();
+    const packet: Vp8EncodedPacket = try vp8_encoder_encode_frame(
+        encoder,
+        &vp8_view,
+        &output_ivf[0] as &byte,
+        output_ivf.len,
+        &flags
+    );
+    const payload: &[byte] = try vp8_codec_bridge_extract_single_vp8_payload(&packet);
+    const vp8_frame: CodecBridgeVp8FrameView = try codec_bridge_vp8_frame_view_make(
+        payload,
+        raw_frame.timestamp,
+        raw_frame.duration_us,
+        raw_frame.sequence_id,
+        packet.key_frame,
+        ENCODED_FRAME_NO_TEMPORAL_ID
+    );
+    return try codec_bridge_vp8_frame_to_encoded_frame(&vp8_frame);
+}
+
+fn vp8_codec_bridge_checked_plane_len(width: usize, height: usize) !usize {
+    if width == 0usize || height == 0usize {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+    const len: usize = width * height;
+    if len / height != width {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+    return len;
+}
+
+fn vp8_codec_bridge_copy_plane(
+    dst: &[byte],
+    src: &byte,
+    width: usize,
+    height: usize,
+    stride: usize,
+) !void {
+    if src == null || stride < width {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+    const required: usize = try vp8_codec_bridge_checked_plane_len(width, height);
+    if dst.len < required {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+
+    var row: usize = 0usize;
+    while row < height {
+        var col: usize = 0usize;
+        const src_base: usize = row * stride;
+        const dst_base: usize = row * width;
+        while col < width {
+            dst[dst_base + col] = src[src_base + col];
+            col = col + 1usize;
+        }
+        row = row + 1usize;
+    }
+    return;
+}
+
+export fn vp8_codec_bridge_decode_frame_to_i420(
+    decoder: &Vp8Decoder,
+    encoded: &EncodedFrame,
+    output_y: &[byte],
+    output_u: &[byte],
+    output_v: &[byte],
+) !CodecBridgeVp8Yuv420View {
+    if decoder == null {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    const frame: CodecBridgeVp8FrameView = try codec_bridge_vp8_encoded_frame_to_frame(encoded);
+    var decoded: Vp8DecodedFrame = try vp8_decoder_decode_frame(decoder, &frame.frame[0] as &byte, frame.frame.len);
+    defer vp8_decoded_frame_release(&decoded) catch {};
+    if !decoded.has_output {
+        return error.Vp8CodecBridgeNoOutput;
+    }
+
+    const y_len: usize = try vp8_codec_bridge_checked_plane_len(decoded.view.y.width, decoded.view.y.height);
+    const u_len: usize = try vp8_codec_bridge_checked_plane_len(decoded.view.u.width, decoded.view.u.height);
+    const v_len: usize = try vp8_codec_bridge_checked_plane_len(decoded.view.v.width, decoded.view.v.height);
+    if output_y.len < y_len || output_u.len < u_len || output_v.len < v_len {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+
+    try vp8_codec_bridge_copy_plane(output_y[0:y_len], decoded.view.y.origin, decoded.view.y.width, decoded.view.y.height, decoded.view.y.stride);
+    try vp8_codec_bridge_copy_plane(output_u[0:u_len], decoded.view.u.origin, decoded.view.u.width, decoded.view.u.height, decoded.view.u.stride);
+    try vp8_codec_bridge_copy_plane(output_v[0:v_len], decoded.view.v.origin, decoded.view.v.width, decoded.view.v.height, decoded.view.v.stride);
+
+    return try codec_bridge_vp8_yuv420_view_make(
+        output_y[0:y_len],
+        output_u[0:u_len],
+        output_v[0:v_len],
+        decoded.view.width as u32,
+        decoded.view.height as u32,
+        decoded.view.y.width,
+        decoded.view.u.width,
+        decoded.view.v.width
+    );
+}
+
+export fn vp8_codec_bridge_parse_rtp_payload_descriptor(packet: &[byte]) !RtpVp8PayloadDescriptor {
+    if packet.len == 0usize {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    return try parse_rtp_vp8_payload_descriptor(&packet[0] as &byte, packet.len);
+}
+
+export fn vp8_codec_bridge_rtp_reassembler_make(output_frame: &[byte]) !RtpVp8Reassembler {
+    if output_frame.len == 0usize {
+        return error.Vp8CodecBridgeInvalidOutput;
+    }
+    return make_rtp_vp8_reassembler(&output_frame[0] as &byte, output_frame.len);
+}
+
+export fn vp8_codec_bridge_rtp_reassemble_packet(
+    assembler: &RtpVp8Reassembler,
+    sequence_number: u16,
+    marker: bool,
+    packet: &[byte],
+) !RtpVp8ReassembledFrame {
+    if assembler == null || packet.len == 0usize {
+        return error.Vp8CodecBridgeInvalidFrame;
+    }
+    return try rtp_vp8_reassembler_push_packet(assembler, sequence_number, marker, &packet[0] as &byte, packet.len);
+}

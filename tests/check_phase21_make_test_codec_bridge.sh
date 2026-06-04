@@ -16,5 +16,7 @@ rg -Fq '$(MAKE) -C ../vp8 build check-toolchain' Makefile
 rg -Fq "bash tests/check_phase21_fixture_manifest.sh" Makefile
 rg -Fq "bash tests/check_phase21_opus_bridge_api.sh" Makefile
 rg -Fq "bash tests/check_phase21_vp8_bridge_api.sh" Makefile
+rg -Fq "legacy-vp8-bridge-test" tests/check_phase21_vp8_bridge_api.sh
+rg -Fq 'cp -R ../vp8/src/vp8/.' tests/check_phase21_vp8_bridge_api.sh
 rg -Fq "bash tests/check_phase21_ffmpeg_codec_extern.sh" Makefile
 rg -Fq "bash tests/check_phase21_ffmpeg_chrome_call.sh" Makefile

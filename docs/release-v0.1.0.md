@@ -16,6 +16,7 @@ FFmpeg 只作为显式 reference codec / Chrome interop 测试边界使用，用
 - WebRTC transport 基座：SDP、STUN/TURN、ICE、DTLS 1.2、SRTP/SRTCP、RTP/RTCP、SCTP DataChannel、PeerConnection 生命周期、Stats/Trace、拥塞控制、jitter/reassembly。
 - 浏览器与生态互通：Chrome、Firefox、Pion、aiortc 相关脚本已纳入测试入口；GStreamer webrtcbin 仍因当前 GI runtime 无法形成真实 offer/answer 而记录为 blocked。
 - Uya direct sender：支持通过显式 FFmpeg reference codec 生成 Opus/VP8 encoded frames，再由 Uya 侧完成 RTP、SRTP、SRTCP、UDP 发送给 Chrome recvonly peer。
+- 纯 Uya VP8 bridge：显式 codec bridge gate 已 legacy-staging `../vp8` sibling，覆盖 I420 -> VP8 `EncodedFrame` -> I420 roundtrip 以及 RTP VP8 descriptor/reassembly 语义。
 - 手工预览：`make preview-ffmpeg-chrome-call` 可启动本地预览页，播放 Chrome remote `<video>`，并显示 Chrome inbound stats 与 Uya sender diagnostics。
 - MP4 源预览：预览命令支持指定 MP4，按源视频实际尺寸和 duration 转换为 raw I420 + mono s16le 后推给 Chrome。
 - 版本化 CLI：`build/webrtc-uya version` 输出 `webrtc-uya 0.1.0`。
@@ -101,7 +102,9 @@ Synthetic manual preview 验证统计：
 
 ## 已知限制
 
-- 纯 Uya Opus/VP8 codec bridge 的完整 sibling 对齐仍未作为默认 runtime 发布；当前发布只承诺 WebRTC 侧 bridge 边界、feature gate 和显式 reference codec 验证。
+- 纯 Uya VP8 codec bridge 只在显式 bridge gate 中接入 `../vp8` sibling；默认 runtime 不依赖该 sibling，Chrome 直推证明仍来自显式 FFmpeg reference codec 路径。
+- 纯 Uya Opus codec bridge 的完整 sibling encoder/decoder 与 RTP Opus 能力仍未作为生产路径发布。
+- `../vp8` UPM path dependency 仍待 sibling 仓库提供 package-mode manifest，并通过当前 Uya package-mode cast checks；本版本测试使用 legacy staging 验证源码级接入。
 - FFmpeg 只允许出现在显式测试目标和预览路径中，不能进入默认 runtime 或纯 Uya codec bridge。
 - SDP fuzz 真实 parser smoke 仍受 Uya C99 nested byte array field codegen 问题阻塞。
 - GStreamer webrtcbin interop 当前 blocked：本机 GI runtime 下 `webrtcbin` 无法形成真实 offer/answer。
@@ -111,11 +114,12 @@ Synthetic manual preview 验证统计：
 
 - 验证纯 Uya WebRTC transport 能完成浏览器互通和 encoded-frame RTP/SRTP 传输。
 - 验证 Uya direct sender 到 Chrome recvonly peer 的真实音视频推送路径。
+- 验证显式纯 Uya VP8 codec bridge 与 `../vp8` sibling 源码级接入。
 - 验证 DataChannel、RTP/RTCP、SRTP/SRTCP、Stats、benchmark 和 codec boundary 的当前集成状态。
 
 ## 不适合作为承诺的场景
 
 - 不承诺完整跨平台后端可用性。
 - 不承诺默认 runtime 内置 FFmpeg/libopus/libvpx。
-- 不承诺纯 Uya Opus/VP8 encoder/decoder 已接入生产路径。
+- 不承诺纯 Uya Opus encoder/decoder 或 VP8 bridge 到 Chrome 直推路径已接入生产路径。
 - 不把浏览器内部 loopback 当成 Uya 到浏览器推流能力证明；本版本的推流证明来自 `make test-ffmpeg-chrome-call` 的 Uya direct sender 路径。

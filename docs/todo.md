@@ -535,16 +535,17 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
 - [x] 定义 VP8 bridge：YUV/VP8 frame 与 WebRTC `EncodedFrame` 的转换 API。
 - [~] 对齐 Opus RTP payload tests 与 `../opus` 的 `container/rtp_opus.uya` 计划。
   - blocked: `../opus` 的 Phase 19 RTP Opus 任务仍未实现，`../opus/src/opus/container/` 只有 `.gitkeep`，暂无 `container/rtp_opus.uya`、payload fixtures 或 sibling 测试可供本仓库真实对齐。
-- [~] 对齐 VP8 RTP payload tests 与 `../vp8` 的 RTP payload descriptor / frame reassembly 计划。
-  - blocked: `../vp8` 的 Phase 16 RTP VP8 payload descriptor parser 与 RTP packet reassembly 仍未实现，当前 sibling 仓库只有 IVF/raw container 模块，没有 RTP 模块、fixtures 或 reassembly 测试可供本仓库真实对齐。
+- [x] 对齐 VP8 RTP payload tests 与 `../vp8` 的 RTP payload descriptor / frame reassembly 计划。
+  - verified 2026-06-04: `make test-codec-bridge` legacy-staging `../vp8/src/vp8`，通过 `vp8_codec_bridge_parse_rtp_payload_descriptor` 与 `vp8_codec_bridge_rtp_reassemble_packet` 覆盖 sibling RTP VP8 语义。
 - [x] 建立跨仓库 fixture manifest，记录样本来源、hash、授权和适用阶段。
 - [x] 增加 `make test-codec-bridge`，仅在 sibling codec 可构建时运行。
+- [x] 接入纯 Uya `../vp8` sibling codec bridge：`src/webrtc/media/vp8_codec_bridge.uya` 将 sibling VP8 encoder/decoder API 适配为 WebRTC `EncodedFrame`，并由 `src/webrtc_media_vp8_codec_bridge_test_main.uya` 覆盖 I420 -> VP8 -> I420 roundtrip。
 - [x] 增加 `make test-ffmpeg-codec-flow`，用 FFmpeg `libopus` / `libvpx` 验证泛型 codec 推拉流准确性。
 - [x] 增加 `make test-ffmpeg-chrome-call`，用 FFmpeg 生成 VP8/Opus WebM，Chrome recvonly `RTCPeerConnection` + Uya direct sender 验证 audio/video 通话、SDP media line、Opus/VP8 negotiation、inbound packets 和 decoded frames。
 - [~] 增加浏览器 one-way audio 示例，可选择直接发送 encoded Opus 或通过 Opus bridge 编码。
   - blocked: 现有 Phase 17 audio interop 使用浏览器 WebAudio/内部 Opus 发送，不能作为本仓库直接发送 encoded Opus 或通过 Opus bridge 编码的示例；`../opus` encoder 与 RTP Opus bridge 仍未实现，暂无真实 bridge encode 路径可验证。
 - [~] 增加浏览器 one-way VP8 示例，可选择直接发送 encoded VP8 或通过 VP8 bridge 编码。
-  - blocked: 现有 Phase 17 video interop 使用浏览器 canvas/内部 VP8 发送，不能作为本仓库直接发送 encoded VP8 或通过 VP8 bridge 编码的示例；`../vp8` encoder、library API 与 RTP reassembly 仍未实现，暂无真实 bridge encode 路径可验证。
+  - blocked: VP8 bridge encode/decode 路径已经接入 `../vp8` sibling，但尚未把该 bridge sender 接到 Chrome recvonly 示例；当前 Chrome 直推证明仍来自显式 FFmpeg reference codec 路径。
 - [x] 打通 Uya 进程直连 Chrome 的 FFmpeg codec 音视频通话：FFmpeg raw/encoded frame -> WebRTC RTP payload packetizer -> SRTP -> UDP -> Chrome inbound RTP，且不经浏览器内部 `pc1`/`pc2` loopback。
   - [x] 建立 `test-ffmpeg-chrome-call` 的 Uya direct sender 验收壳：Chrome 只做 recvonly inbound peer，测试禁止 `captureStream`、浏览器内部 `pc1`/`pc2` loopback 和 Pion/aiortc/wrtc 等外部 WebRTC sender。
   - [x] 增加 Uya sender CLI 入口 `uya_ffmpeg_direct_sender`，dry-run 可读取 Chrome offer / media 参数并输出诊断 JSON；非 dry-run 在 DTLS-SRTP 未接通前拒绝写假 SDP answer。
@@ -588,7 +589,7 @@ FFmpeg 只作为显式 reference codec / 浏览器互通测试目标使用，不
 
 - codec bridge 不污染 WebRTC transport 核心。
 - transport 可在无 codec 编解码器时处理 encoded frames。
-- 启用 bridge 时只依赖纯 Uya sibling package，不引入 libopus、libvpx、FFmpeg runtime。
+- 启用 bridge 时只依赖纯 Uya sibling 源码/package 边界，不引入 libopus、libvpx、FFmpeg runtime。
 - FFmpeg 相关能力只通过显式测试目标启用，并输出 Chrome inbound audio/video 统计。
 - Opus / VP8 bridge 的错误边界清楚区分 payload 错误、codec bitstream 错误和 WebRTC transport 错误。
 

@@ -16,7 +16,7 @@
 - 默认运行路径不链接 `libwebrtc`、`libnice`、`BoringSSL`、`usrsctp`、`libsrtp`、`libvpx`、`libopus` 等外部协议或编解码库。
 - 允许存在极薄的 OS FFI 边界，只覆盖 socket、epoll/kqueue/IOCP、clock、线程原语、`mmap`、`sendmmsg`/`recvmmsg` 等系统能力。
 - 默认构建路径不依赖 C++ runtime，也不复用外部协议库的对象生命周期。
-- 编解码与传输边界通过 encoded-frame API 隔离；后续如启用 codec bridge，也只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
+- 编解码与传输边界通过 encoded-frame API 隔离；显式启用 codec bridge 时只能依赖纯 Uya 的兄弟仓库实现，而不是引入 `libopus`、`libvpx` 或 FFmpeg runtime。
 
 ## 构建方式
 
@@ -35,6 +35,7 @@ make bench
 - `make build`：生成里程碑 CLI wrapper `build/webrtc-uya`，当前支持 `--help`、`version` 与 `dump-stats`。
 - `make test`：运行 transport、parser、crypto、DTLS/SRTP、RTP/RTCP、SCTP、PeerConnection、统计和 benchmark 入口检查。
 - `make bench`：输出 benchmark 基线到 `build/benchmarks/baseline.jsonl`。
+- `make test-codec-bridge`：显式运行 codec bridge gate；当前会 legacy-staging `../vp8` 纯 Uya sibling，验证 I420 -> VP8 `EncodedFrame` -> I420 以及 RTP VP8 descriptor/reassembly 语义。
 - `make test-ffmpeg-chrome-call`：显式启用 FFmpeg reference codec，验证 Uya direct sender 向 Chrome recvonly peer 推送音视频。
 
 发布记录见 [CHANGELOG.md](CHANGELOG.md)。

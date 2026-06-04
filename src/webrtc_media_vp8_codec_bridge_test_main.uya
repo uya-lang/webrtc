@@ -1,0 +1,159 @@
+use libc.printf;
+
+use vp8.api;
+use vp8.container.rtp_vp8;
+
+use webrtc.media.codec;
+use webrtc.media.model;
+use webrtc.media.vp8_codec_bridge;
+
+fn fill_i420_16x16(y: &byte, u: &byte, v: &byte) void {
+    var index: usize = 0usize;
+    while index < 256usize {
+        y[index] = (32u8 + (((index * 17usize) % 160usize) as u8)) as byte;
+        index = index + 1usize;
+    }
+
+    index = 0usize;
+    while index < 64usize {
+        u[index] = (96u8 + (((index * 7usize) % 64usize) as u8)) as byte;
+        v[index] = (128u8 + (((index * 5usize) % 64usize) as u8)) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn check_vp8_bridge_encode_decode() i32 {
+    if !vp8_codec_bridge_ready() {
+        return 10i32;
+    }
+
+    var y: [byte: 256] = [];
+    var u: [byte: 64] = [];
+    var v: [byte: 64] = [];
+    fill_i420_16x16(&y[0] as &byte, &u[0] as &byte, &v[0] as &byte);
+
+    const raw_result: !RawVideoFrame = raw_video_i420_frame_make(
+        y[0:256],
+        u[0:64],
+        v[0:64],
+        16u32,
+        16u32,
+        16usize,
+        8usize,
+        8usize,
+        90000u64,
+        33333u32,
+        7u64
+    );
+    if raw_result.error_id != 0 {
+        return 11i32;
+    }
+
+    const capacity: !usize = vp8_codec_bridge_default_output_capacity(16u32, 16u32);
+    if capacity.error_id != 0 || capacity.value == 0usize || capacity.value > 12000usize {
+        return 12i32;
+    }
+
+    var encoder: Vp8Encoder = vp8_codec_bridge_encoder_init(16u32, 16u32) catch {
+        return 13i32;
+    };
+    defer vp8_codec_bridge_encoder_deinit(&encoder);
+
+    var ivf_output: [byte: 12000] = [];
+    const encoded_result: !EncodedFrame = vp8_codec_bridge_encode_i420_to_frame(&encoder, &raw_result.value, ivf_output[0:12000]);
+    if encoded_result.error_id != 0 {
+        return 14i32;
+    }
+    const encoded: EncodedFrame = encoded_result.value;
+    if encoded.codec_id != CODEC_ID_VP8 || encoded.media_kind != MEDIA_KIND_VIDEO || !encoded.is_keyframe || !encoded.marker {
+        return 15i32;
+    }
+    if encoded.timestamp != 90000u64 || encoded.duration_us != 33333u32 || encoded.sequence_id != 7u64 || encoded.payload.len == 0usize {
+        return 16i32;
+    }
+    if ((encoded.payload[0] as u8) & 0x01u8) != 0u8 {
+        return 17i32;
+    }
+
+    var decoder: Vp8Decoder = vp8_codec_bridge_decoder_init(16u32, 16u32) catch {
+        return 18i32;
+    };
+    defer vp8_codec_bridge_decoder_deinit(&decoder);
+
+    var out_y: [byte: 256] = [];
+    var out_u: [byte: 64] = [];
+    var out_v: [byte: 64] = [];
+    const decoded_result: !CodecBridgeVp8Yuv420View = vp8_codec_bridge_decode_frame_to_i420(
+        &decoder,
+        &encoded,
+        out_y[0:256],
+        out_u[0:64],
+        out_v[0:64]
+    );
+    if decoded_result.error_id != 0 {
+        return 19i32;
+    }
+    if decoded_result.value.width != 16u32 || decoded_result.value.height != 16u32 {
+        return 20i32;
+    }
+    if decoded_result.value.y_plane.len != 256usize || decoded_result.value.u_plane.len != 64usize || decoded_result.value.v_plane.len != 64usize {
+        return 21i32;
+    }
+
+    return 0i32;
+}
+
+fn check_vp8_bridge_rtp_sibling_semantics() i32 {
+    var packet: [byte: 4] = [0x90u8, 0x80u8, 0x25u8, 0x9du8];
+    const descriptor_result: !RtpVp8PayloadDescriptor = vp8_codec_bridge_parse_rtp_payload_descriptor(packet[0:4]);
+    if descriptor_result.error_id != 0 {
+        return 30i32;
+    }
+    if !descriptor_result.value.start_of_partition || !descriptor_result.value.picture_id_present {
+        return 31i32;
+    }
+    if descriptor_result.value.picture_id != 0x25u16 || descriptor_result.value.payload.len != 1usize {
+        return 32i32;
+    }
+
+    var frame_out: [byte: 8] = [];
+    var assembler: RtpVp8Reassembler = vp8_codec_bridge_rtp_reassembler_make(frame_out[0:8]) catch {
+        return 33i32;
+    };
+    const first: !RtpVp8ReassembledFrame = vp8_codec_bridge_rtp_reassemble_packet(&assembler, 10u16, false, packet[0:4]);
+    if first.error_id != 0 || first.value.complete {
+        return 34i32;
+    }
+
+    var tail: [byte: 2] = [0x00u8, 0x2au8];
+    const second: !RtpVp8ReassembledFrame = vp8_codec_bridge_rtp_reassemble_packet(&assembler, 11u16, true, tail[0:2]);
+    if second.error_id != 0 || !second.value.complete || second.value.payload.len != 2usize {
+        return 35i32;
+    }
+    if second.value.payload.data[0] != 0x9du8 || second.value.payload.data[1] != 0x2au8 {
+        return 36i32;
+    }
+
+    return 0i32;
+}
+
+export fn run_vp8_codec_bridge_tests() i32 {
+    var result: i32 = check_vp8_bridge_encode_decode();
+    if result != 0i32 {
+        printf("vp8 codec bridge encode/decode tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_vp8_bridge_rtp_sibling_semantics();
+    if result != 0i32 {
+        printf("vp8 codec bridge rtp tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("vp8 codec bridge tests passed\n");
+    return 0i32;
+}
+
+fn main() i32 {
+    return run_vp8_codec_bridge_tests();
+}
