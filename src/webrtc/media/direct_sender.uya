@@ -54,6 +54,8 @@ export struct UyaDirectSenderDiagnostics {
     video_rtp_packets: u64 = 0u64,
     audio_rtp_payload_bytes: u64 = 0u64,
     video_rtp_payload_bytes: u64 = 0u64,
+    vp8_key_frames: u64 = 0u64,
+    vp8_inter_frames: u64 = 0u64,
     srtp_packets: u64 = 0u64,
     srtcp_packets: u64 = 0u64,
     rtcp_sender_reports_sent: u64 = 0u64,
@@ -268,6 +270,17 @@ fn direct_sender_marker_for_frame(frame: &EncodedFrame) bool {
     return frame.marker;
 }
 
+fn direct_sender_record_vp8_frame_type(sender: &UyaDirectSender, frame: &EncodedFrame) void {
+    if sender == null || frame == null || frame.media_kind != MEDIA_KIND_VIDEO || frame.codec_id != CODEC_ID_VP8 {
+        return;
+    }
+    if frame.is_keyframe {
+        sender.diagnostics.vp8_key_frames = sender.diagnostics.vp8_key_frames + 1u64;
+    } else {
+        sender.diagnostics.vp8_inter_frames = sender.diagnostics.vp8_inter_frames + 1u64;
+    }
+}
+
 fn direct_sender_sequence_increment(sequence: u16) u16 {
     if sequence == 0xFFFFu16 {
         return 0u16;
@@ -434,6 +447,7 @@ export fn rtp_packetize_encoded_frame(
     if frame.media_kind == MEDIA_KIND_VIDEO {
         sender.diagnostics.video_rtp_packets = sender.diagnostics.video_rtp_packets + 1u64;
         sender.diagnostics.video_rtp_payload_bytes = sender.diagnostics.video_rtp_payload_bytes + (payload_len as u64);
+        direct_sender_record_vp8_frame_type(sender, frame);
     }
 
     return DirectSenderPacket{
@@ -514,6 +528,7 @@ export fn rtp_packetize_encoded_frame_fragment(
     const written: usize = try rtp_packet_write(&header, rtp_payload[0:payload_len], out_packet);
     if frame_payload_offset == 0usize {
         sender.diagnostics.ffmpeg_encoded_frames = sender.diagnostics.ffmpeg_encoded_frames + 1u64;
+        direct_sender_record_vp8_frame_type(sender, frame);
     }
     sender.diagnostics.rtp_packets = sender.diagnostics.rtp_packets + 1u64;
     sender.diagnostics.rtp_payload_bytes = sender.diagnostics.rtp_payload_bytes + (payload_len as u64);

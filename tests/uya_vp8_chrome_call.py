@@ -1392,6 +1392,8 @@ def validate_result(result: dict[str, Any], expected_width: int = VIDEO_WIDTH, e
     require(diagnostics.get("encodedVideoPathSeen") is False, "Uya VP8 sender should live-encode instead of reading encoded VP8")
     require(diagnostics.get("codecProviderUsesExtern") is False, "Uya VP8 provider must not report extern codec usage")
     require(diagnostics.get("codecBridgeRequired") is True, "Uya VP8 provider should report codec bridge usage")
+    require(int(diagnostics.get("vp8KeyFrames", 0)) > 0, "Uya VP8 sender reported no key frames")
+    require(int(diagnostics.get("vp8InterFrames", 0)) > 0, "Uya VP8 sender reported no inter frames")
     require(int(diagnostics.get("rtpPackets", 0)) > 0, "Uya VP8 sender reported no RTP packets")
     require(int(diagnostics.get("srtpPackets", 0)) > 0, "Uya VP8 sender reported no SRTP packets")
     require(int(diagnostics.get("rtcpSenderReports", 0)) > 0, "Uya VP8 sender reported no RTCP Sender Reports")
@@ -1509,6 +1511,8 @@ def run_flow(keep_temp: bool = False) -> str:
             f"source_video_size={VIDEO_WIDTH}x{VIDEO_HEIGHT} "
             f"chrome_video_packets={result.get('videoPacketsReceived')} "
             f"chrome_video_frames={result.get('videoFramesDecoded')} "
+            f"sender_vp8_key_frames={diagnostics.get('vp8KeyFrames')} "
+            f"sender_vp8_inter_frames={diagnostics.get('vp8InterFrames')} "
             f"sender_rtp_packets={diagnostics.get('rtpPackets')} "
             f"sender_srtp_packets={diagnostics.get('srtpPackets')} "
             f"sender_srtcp_packets={diagnostics.get('srtcpPackets')} "
@@ -1645,6 +1649,8 @@ def run_manual_preview_flow(
             f"chrome_video_size={result.get('videoFrameWidth') or result.get('remoteVideoWidth')}x{result.get('videoFrameHeight') or result.get('remoteVideoHeight')} "
             f"chrome_video_packets={result.get('videoPacketsReceived')} "
             f"chrome_video_frames={result.get('videoFramesDecoded')} "
+            f"sender_vp8_key_frames={diagnostics.get('vp8KeyFrames')} "
+            f"sender_vp8_inter_frames={diagnostics.get('vp8InterFrames')} "
             f"sender_rtp_packets={diagnostics.get('rtpPackets')} "
             f"sender_srtp_packets={diagnostics.get('srtpPackets')} "
             f"sender_srtcp_packets={diagnostics.get('srtcpPackets')} "

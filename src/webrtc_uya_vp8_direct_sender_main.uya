@@ -633,6 +633,10 @@ fn write_diagnostics_counts(
     try json_append_bool(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, answer_ready);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"ffmpegFrames\":" as &[byte]);
     try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.ffmpeg_encoded_frames);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"vp8KeyFrames\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.vp8_key_frames);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"vp8InterFrames\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.vp8_inter_frames);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpPackets\":" as &[byte]);
     try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_packets);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtpPackets\":" as &[byte]);

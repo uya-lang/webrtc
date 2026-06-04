@@ -195,6 +195,7 @@ fn check_vp8_frame_packetize() i32 {
     frame.payload = vp8_payload[0:5];
     frame.duration_us = 33333u32;
     frame.sequence_id = 0x0123u64;
+    frame.is_keyframe = true;
     frame.marker = true;
 
     var packet: [byte: 256] = [];
@@ -237,6 +238,9 @@ fn check_vp8_frame_packetize() i32 {
     }
     if sender.video_sender.next_sequence != 21u16 || sender.video_sender.next_timestamp != 3899u32 {
         return 27i32;
+    }
+    if sender.diagnostics.vp8_key_frames != 1u64 || sender.diagnostics.vp8_inter_frames != 0u64 {
+        return 29i32;
     }
     return 0i32;
 }
@@ -289,6 +293,9 @@ fn check_vp8_frame_fragment_packetize() i32 {
         || sender.diagnostics.rtp_packets != 3u64
         || sender.diagnostics.video_rtp_packets != 3u64 {
         return 66i32;
+    }
+    if sender.diagnostics.vp8_key_frames != 0u64 || sender.diagnostics.vp8_inter_frames != 1u64 {
+        return 76i32;
     }
 
     const parsed0: !RtpPacket = rtp_packet_parse(packet0[0:summary0.value.rtp_len]);
