@@ -89,7 +89,7 @@ fn test_write_handshake_record(
     const payload_len: usize = try direct_runtime_write_handshake_payload(handshake_type, message_sequence, body, payload[0:512]);
     var header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         epoch: 0u16,
         sequence_number: record_sequence,
         length: payload_len as u16,
@@ -101,7 +101,7 @@ fn test_write_ccs_record(record_sequence: u64, out: &[byte]) !usize {
     var payload: [byte: 1] = [1 as byte];
     var header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC,
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         epoch: 0u16,
         sequence_number: record_sequence,
         length: 1u16,
@@ -425,7 +425,7 @@ fn check_direct_runtime_dtls_handshake() i32 {
     var client_key_exchange_record: [byte: 192] = [];
     var cke_header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         epoch: 0u16,
         sequence_number: 2u64,
         length: client_key_exchange_payload_len.value as u16,

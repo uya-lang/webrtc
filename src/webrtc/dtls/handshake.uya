@@ -331,7 +331,7 @@ fn dtls_alert_description_supported(description: u8) bool {
 }
 
 fn dtls_client_hello_version_supported(version: u16) bool {
-    return version == DTLS_VERSION_1_2 || version == DTLS_VERSION_1_0_COMPAT;
+    return version == WEBRTC_DTLS_VERSION_1_2 || version == WEBRTC_DTLS_VERSION_1_0_COMPAT;
 }
 
 fn dtls_client_hello_validate(hello: &DtlsClientHello) !void {
@@ -369,7 +369,7 @@ fn dtls_server_hello_validate(hello: &DtlsServerHello) !void {
     if hello == null {
         return error.InvalidPacket;
     }
-    if hello.version != DTLS_VERSION_1_2 {
+    if hello.version != WEBRTC_DTLS_VERSION_1_2 {
         return error.UnsupportedCapability;
     }
     if hello.random.len != DTLS_HELLO_RANDOM_BYTES {
@@ -711,7 +711,7 @@ export fn dtls_server_hello_parse(body: &[byte]) !DtlsServerHello {
     }
 
     const version: u16 = try read_be_u16(body[0:2]);
-    if version != DTLS_VERSION_1_2 {
+    if version != WEBRTC_DTLS_VERSION_1_2 {
         return error.UnsupportedCapability;
     }
 

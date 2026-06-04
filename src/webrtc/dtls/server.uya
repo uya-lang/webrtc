@@ -363,7 +363,7 @@ fn dtls_server_write_handshake_record(
 
     const record_start: usize = *cursor;
     out[record_start] = DTLS_CONTENT_TYPE_HANDSHAKE as byte;
-    try write_be_u16(out[record_start + 1usize:2], DTLS_VERSION_1_0_COMPAT);
+    try write_be_u16(out[record_start + 1usize:2], WEBRTC_DTLS_VERSION_1_0_COMPAT);
     try write_be_u16(out[record_start + 3usize:2], 0u16);
     out[record_start + 5usize] = ((record_sequence >> 40i32) & 0xffu64) as byte;
     out[record_start + 6usize] = ((record_sequence >> 32i32) & 0xffu64) as byte;
@@ -409,7 +409,7 @@ fn dtls_server_write_aead_aad(
     }
     try dtls_server_write_epoch_sequence(epoch, sequence_number, out[0:DTLS_SERVER_AES_GCM_EXPLICIT_NONCE_BYTES]);
     out[8] = content_type as byte;
-    try write_be_u16(out[9:2], DTLS_VERSION_1_2);
+    try write_be_u16(out[9:2], WEBRTC_DTLS_VERSION_1_2);
     try write_be_u16(out[11:2], plaintext_len as u16);
 }
 
@@ -491,7 +491,7 @@ export fn dtls_server_write_first_flight(
     server_extensions_len = server_extensions_len + use_srtp_len;
 
     var server_hello: DtlsServerHello = DtlsServerHello{
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         random: config.server_random,
         session_id: hello.session_id,
         cipher_suite: DTLS_CIPHER_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -768,7 +768,7 @@ export fn dtls_server_encrypt_aes_gcm_record(
     try dtls_server_write_aead_aad(epoch, sequence_number, content_type, plaintext.len, aad[0:DTLS_SERVER_AEAD_AAD_BYTES]);
 
     out[0] = content_type as byte;
-    try write_be_u16(out[1:2], DTLS_VERSION_1_2);
+    try write_be_u16(out[1:2], WEBRTC_DTLS_VERSION_1_2);
     try write_be_u16(out[3:2], epoch);
     out[5] = ((sequence_number >> 40i32) & 0xffu64) as byte;
     out[6] = ((sequence_number >> 32i32) & 0xffu64) as byte;
@@ -806,7 +806,7 @@ export fn dtls_server_decrypt_aes_gcm_record(
     }
     const content_type: u8 = packet[0] as u8;
     const version: u16 = try read_be_u16(packet[1:2]);
-    if version != DTLS_VERSION_1_2 {
+    if version != WEBRTC_DTLS_VERSION_1_2 {
         return error.UnsupportedCapability;
     }
     const epoch: u16 = try read_be_u16(packet[3:2]);

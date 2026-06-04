@@ -13,7 +13,7 @@ fn dtls_record_content_type_supported(content_type: u8) bool {
 }
 
 fn dtls_record_version_supported(version: u16) bool {
-    return version == DTLS_VERSION_1_2 || version == DTLS_VERSION_1_0_COMPAT;
+    return version == WEBRTC_DTLS_VERSION_1_2 || version == WEBRTC_DTLS_VERSION_1_0_COMPAT;
 }
 
 fn dtls_record_parse_handshake_payload(payload: &[byte]) !void {

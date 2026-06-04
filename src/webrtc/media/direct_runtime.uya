@@ -339,7 +339,7 @@ fn direct_runtime_write_hello_verify_request(
     }
 
     var body: [byte: 3usize + DIRECT_RUNTIME_DTLS_COOKIE_BYTES] = [];
-    try write_be_u16(body[0:2], DTLS_VERSION_1_2);
+    try write_be_u16(body[0:2], WEBRTC_DTLS_VERSION_1_2);
     body[2] = DIRECT_RUNTIME_DTLS_COOKIE_BYTES as byte;
     var index: usize = 0usize;
     while index < DIRECT_RUNTIME_DTLS_COOKIE_BYTES {
@@ -356,7 +356,7 @@ fn direct_runtime_write_hello_verify_request(
     );
     var header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
-        version: DTLS_VERSION_1_0_COMPAT,
+        version: WEBRTC_DTLS_VERSION_1_0_COMPAT,
         epoch: 0u16,
         sequence_number: runtime.next_server_epoch0_record_sequence,
         length: payload_len as u16,
@@ -680,7 +680,7 @@ fn direct_runtime_write_server_finished(runtime: &DirectRuntime, out: &[byte], o
     var ccs_payload: [byte: 1] = [1 as byte];
     var ccs_header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC,
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         epoch: 0u16,
         sequence_number: runtime.next_server_epoch0_record_sequence,
         length: 1u16,

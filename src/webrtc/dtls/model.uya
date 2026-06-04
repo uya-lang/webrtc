@@ -1,8 +1,8 @@
 // webrtc.dtls.model - DTLS 1.2 record model
 // 模块路径：src/webrtc/dtls/model.uya → use webrtc.dtls.model;
 
-export const DTLS_VERSION_1_0_COMPAT: u16 = 0xfeffu16;
-export const DTLS_VERSION_1_2: u16 = 0xfefdu16;
+export const WEBRTC_DTLS_VERSION_1_0_COMPAT: u16 = 0xfeffu16;
+export const WEBRTC_DTLS_VERSION_1_2: u16 = 0xfefdu16;
 export const DTLS_RECORD_HEADER_BYTES: usize = 13usize;
 export const DTLS_RECORD_MAX_PAYLOAD_BYTES: usize = 16384usize;
 export const DTLS_HANDSHAKE_HEADER_BYTES: usize = 12usize;

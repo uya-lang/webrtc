@@ -44,7 +44,7 @@ fn dtls_test_check_record_writer_roundtrip() i32 {
     var payload: [byte: 4] = [1 as byte, 2 as byte, 3 as byte, 4 as byte];
     var header: DtlsRecordHeader = DtlsRecordHeader{
         content_type: DTLS_CONTENT_TYPE_APPLICATION_DATA,
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         epoch: 1u16,
         sequence_number: 7u64,
         length: 4u16,
@@ -219,7 +219,7 @@ fn dtls_test_check_client_hello_roundtrip() i32 {
     const cipher_suites: &[byte] = parsed.value.cipher_suites;
     const compression_methods: &[byte] = parsed.value.compression_methods;
     const extensions: &[byte] = parsed.value.extensions;
-    if parsed.value.legacy_version != DTLS_VERSION_1_2 {
+    if parsed.value.legacy_version != WEBRTC_DTLS_VERSION_1_2 {
         return 71;
     }
     if random.len != 32usize || random[31] != 0x1f as byte {
@@ -274,7 +274,7 @@ fn dtls_test_check_client_hello_invalid_cases() i32 {
 
     var out: [byte: 48] = [];
     var hello: DtlsClientHello = DtlsClientHello{
-        legacy_version: DTLS_VERSION_1_2,
+        legacy_version: WEBRTC_DTLS_VERSION_1_2,
         random: odd_cipher_suites[2:32],
         session_id: odd_cipher_suites[34:0],
         cookie: odd_cipher_suites[35:0],
@@ -307,7 +307,7 @@ fn dtls_test_check_server_hello_roundtrip() i32 {
     const random: &[byte] = parsed.value.random;
     const session_id: &[byte] = parsed.value.session_id;
     const extensions: &[byte] = parsed.value.extensions;
-    if parsed.value.version != DTLS_VERSION_1_2 {
+    if parsed.value.version != WEBRTC_DTLS_VERSION_1_2 {
         return 83;
     }
     if random.len != 32usize || random[0] != 0x20 as byte {
@@ -358,7 +358,7 @@ fn dtls_test_check_server_hello_invalid_cases() i32 {
 
     var out: [byte: 39] = [];
     var hello: DtlsServerHello = DtlsServerHello{
-        version: DTLS_VERSION_1_2,
+        version: WEBRTC_DTLS_VERSION_1_2,
         random: truncated_extensions[2:32],
         session_id: truncated_extensions[34:0],
         cipher_suite: 0xc02bu16,
