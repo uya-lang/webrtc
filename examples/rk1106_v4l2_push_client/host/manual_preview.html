@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RK1106 Uya WebRTC Preview</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101418;
+      color: #edf2f7;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+    }
+    main {
+      max-width: 1080px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #05070a;
+      border: 1px solid #2d3748;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      box-sizing: border-box;
+      resize: vertical;
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      border: 1px solid #334155;
+      background: #0b1015;
+      color: #e5e7eb;
+      padding: 10px;
+    }
+    input {
+      min-width: min(520px, 100%);
+      flex: 1;
+      box-sizing: border-box;
+      border: 1px solid #334155;
+      background: #0b1015;
+      color: #e5e7eb;
+      padding: 9px 10px;
+      font: inherit;
+    }
+    button {
+      appearance: none;
+      border: 1px solid #38bdf8;
+      background: #0284c7;
+      color: white;
+      padding: 9px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary {
+      border-color: #64748b;
+      background: #1f2937;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .panel {
+      display: grid;
+      gap: 8px;
+    }
+    .status {
+      min-height: 1.4em;
+      color: #93c5fd;
+      font-size: 14px;
+      word-break: break-word;
+    }
+    label {
+      font-size: 14px;
+      color: #cbd5e1;
+    }
+    .inline-label {
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>RK1106 Uya WebRTC Preview</h1>
+  <video id="remoteVideo" autoplay playsinline muted controls></video>
+  <div class="row">
+    <label class="inline-label" for="signalUrl">Signal URL</label>
+    <input id="signalUrl" type="url" spellcheck="false" placeholder="http://HOST:8080/api">
+  </div>
+  <div class="row">
+    <button id="autoSignal">Auto Signal</button>
+    <button id="createOffer">Create Offer</button>
+    <button id="publishOffer" class="secondary">Publish Offer</button>
+    <button id="waitAnswer" class="secondary">Wait Answer</button>
+    <button id="copyOffer" class="secondary">Copy Offer</button>
+    <button id="setAnswer">Set Answer</button>
+    <button id="closePeer" class="secondary">Close</button>
+  </div>
+  <div id="status" class="status">idle</div>
+  <section class="grid">
+    <div class="panel">
+      <label for="offerBox">offer JSON</label>
+      <textarea id="offerBox" spellcheck="false"></textarea>
+    </div>
+    <div class="panel">
+      <label for="answerBox">answer JSON</label>
+      <textarea id="answerBox" spellcheck="false"></textarea>
+    </div>
+  </section>
+</main>
+<script>
+let pc = null;
+let pollToken = 0;
+
+const statusEl = document.getElementById('status');
+const offerBox = document.getElementById('offerBox');
+const answerBox = document.getElementById('answerBox');
+const remoteVideo = document.getElementById('remoteVideo');
+const signalUrl = document.getElementById('signalUrl');
+remoteVideo.muted = true;
+
+if (location.protocol === 'http:' || location.protocol === 'https:') {
+  signalUrl.value = `${location.origin}/api`;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function signalBaseUrl() {
+  const value = signalUrl.value.trim();
+  if (!value) throw new Error('signal URL is empty');
+  return value.replace(/\/+$/, '');
+}
+
+async function postSignal(kind, jsonText) {
+  const response = await fetch(`${signalBaseUrl()}/${kind}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: jsonText,
+  });
+  if (!response.ok) throw new Error(`${kind} POST failed: ${response.status}`);
+}
+
+async function getSignal(kind) {
+  const response = await fetch(`${signalBaseUrl()}/${kind}?t=${Date.now()}`, {cache: 'no-store'});
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`${kind} GET failed: ${response.status}`);
+  return response.json();
+}
+
+function waitForIceGatheringComplete(peer) {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve) => {
+    const onState = () => {
+      if (peer.iceGatheringState === 'complete') {
+        peer.removeEventListener('icegatheringstatechange', onState);
+        resolve();
+      }
+    };
+    peer.addEventListener('icegatheringstatechange', onState);
+  });
+}
+
+function closePeer() {
+  pollToken++;
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+  remoteVideo.srcObject = null;
+  setStatus('closed');
+}
+
+async function playRemoteVideo() {
+  try {
+    await remoteVideo.play();
+  } catch (error) {
+    setStatus(`video play blocked: ${error.message}`);
+  }
+}
+
+async function createOffer() {
+  closePeer();
+  pc = new RTCPeerConnection({iceServers: []});
+  const stream = new MediaStream();
+  remoteVideo.srcObject = stream;
+  pc.addEventListener('track', (event) => {
+    stream.addTrack(event.track);
+    playRemoteVideo();
+  });
+  pc.addTransceiver('audio', {direction: 'recvonly'});
+  pc.addTransceiver('video', {direction: 'recvonly'});
+  const peer = pc;
+  peer.addEventListener('connectionstatechange', () => setStatus(`connection: ${peer.connectionState}`));
+  peer.addEventListener('iceconnectionstatechange', () => setStatus(`ice: ${peer.iceConnectionState}`));
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peer);
+  offerBox.value = JSON.stringify(peer.localDescription, null, 2);
+  setStatus('offer ready');
+}
+
+async function publishOffer() {
+  if (!offerBox.value.trim()) await createOffer();
+  await postSignal('offer', offerBox.value);
+  setStatus('offer published');
+}
+
+async function setAnswerFromBox() {
+  if (!pc) {
+    setStatus('create offer first');
+    return;
+  }
+  const answer = JSON.parse(answerBox.value);
+  await pc.setRemoteDescription(answer);
+  setStatus('answer set');
+  await playRemoteVideo();
+}
+
+async function waitForAnswer() {
+  if (!pc) {
+    setStatus('create offer first');
+    return;
+  }
+  const token = ++pollToken;
+  setStatus('waiting for answer');
+  for (let i = 0; i < 240 && token === pollToken; i++) {
+    const answer = await getSignal('answer');
+    if (answer) {
+      answerBox.value = JSON.stringify(answer, null, 2);
+      await setAnswerFromBox();
+      return;
+    }
+    await sleep(1000);
+  }
+  if (token === pollToken) setStatus('answer wait timed out');
+}
+
+document.getElementById('autoSignal').addEventListener('click', async () => {
+  try {
+    await createOffer();
+    await publishOffer();
+    await waitForAnswer();
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById('createOffer').addEventListener('click', async () => {
+  try {
+    await createOffer();
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById('publishOffer').addEventListener('click', async () => {
+  try {
+    await publishOffer();
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById('waitAnswer').addEventListener('click', async () => {
+  try {
+    await waitForAnswer();
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById('copyOffer').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(offerBox.value);
+  setStatus('offer copied');
+});
+
+document.getElementById('setAnswer').addEventListener('click', async () => {
+  try {
+    await setAnswerFromBox();
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
+document.getElementById('closePeer').addEventListener('click', closePeer);
+</script>
+</body>
+</html>

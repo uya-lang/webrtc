@@ -1,18 +1,35 @@
 use libc.CLOCKS_PER_SEC;
 use libc.O_CREAT;
 use libc.O_RDONLY;
+use libc.O_RDWR;
 use libc.O_TRUNC;
 use libc.O_WRONLY;
+use libc.MAP_SHARED;
+use libc.PROT_READ;
+use libc.PROT_WRITE;
 use libc.clock;
 use libc.free;
 use libc.malloc;
 use libc.strcmp;
 use libc.strlen;
+use libc.sys_nanosleep;
+use libc.AF_INET;
+use libc.IPPROTO_TCP;
+use libc.SOCK_STREAM;
 use libc.sys_close;
+use libc.sys_connect;
+use libc.sys_ioctl;
 use libc.sys_lseek;
+use libc.sys_mmap;
+use libc.sys_munmap;
 use libc.sys_open;
 use libc.sys_read;
+use libc.sys_recv;
+use libc.sys_send;
+use libc.sys_socket;
 use libc.sys_write;
+use libc.TimeSpec;
+use std;
 use webrtc.binary;
 use webrtc.dtls.identity;
 use webrtc.media.codec;
@@ -32,12 +49,21 @@ export error DirectSenderCliOfferInvalid;
 export error DirectSenderCliJsonInvalid;
 export error DirectSenderCliSdpTooLarge;
 export error DirectSenderCliAnswerTooLarge;
+export error DirectSenderCliHttpFailed;
+export error DirectSenderCliHttpNotReady;
+export error DirectSenderCliV4L2Failed;
 export error DirectSenderCliRuntimeFailed;
 
 const CLI_MAX_OFFER_BYTES: usize = 65536usize;
 const CLI_MAX_SDP_BYTES: usize = 65536usize;
 const CLI_MAX_ANSWER_SDP_BYTES: usize = 8192usize;
 const CLI_MAX_ANSWER_JSON_BYTES: usize = 16384usize;
+const CLI_MAX_LOCAL_HOST_BYTES: usize = 64usize;
+const CLI_HTTP_TIMEOUT_MS: u32 = 5000u32;
+const CLI_HTTP_REQUEST_BYTES: usize = 2048usize;
+const CLI_HTTP_RESPONSE_BYTES: usize = 73728usize;
+const CLI_OFFER_POLL_TRIES: u32 = 120u32;
+const CLI_OFFER_POLL_INTERVAL_MS: u32 = 1000u32;
 const CLI_LOCAL_UDP_PORT: u16 = 49999u16;
 const CLI_LIVE_TIMEOUT_US: u64 = 15_000_000u64;
 const CLI_LIVE_MEDIA_DURATION_US: u64 = 6_000_000u64;
@@ -48,6 +74,7 @@ const CLI_AUDIO_SAMPLES_PER_CHANNEL: usize = 960usize;
 const CLI_AUDIO_PCM_BYTES: usize = 1920usize;
 const CLI_DEFAULT_VIDEO_WIDTH: u32 = 32u32;
 const CLI_DEFAULT_VIDEO_HEIGHT: u32 = 18u32;
+const CLI_DEFAULT_LOCAL_HOST: &byte = "127.0.0.1\0" as &byte;
 const CLI_ENCODED_PACKET_BYTES: usize = 4_194_304usize;
 const CLI_MAX_USIZE: usize = ~(0 as usize);
 const CLI_MAX_U64: u64 = ~(0 as u64);
@@ -57,6 +84,27 @@ const CLI_RTCP_PACKET_BYTES: usize = 512usize;
 const CLI_SRTCP_PACKET_BYTES: usize = 2048usize;
 const CLI_RTCP_REPORT_INTERVAL_US: u64 = 1_000_000u64;
 const CLI_NTP_UNIX_EPOCH_SECONDS: u64 = 2_208_988_800u64;
+const CLI_V4L2_MAX_BUFFERS: u32 = 4u32;
+const CLI_V4L2_MAX_PLANES: u32 = 2u32;
+const CLI_V4L2_STRUCT_BYTES: usize = 256usize;
+const CLI_V4L2_PLANES_BYTES: usize = 160usize;
+const CLI_V4L2_CAP_DEVICE_CAPS: u32 = 0x80000000u32;
+const CLI_V4L2_CAP_VIDEO_CAPTURE: u32 = 0x00000001u32;
+const CLI_V4L2_CAP_VIDEO_CAPTURE_MPLANE: u32 = 0x00001000u32;
+const CLI_V4L2_CAP_STREAMING: u32 = 0x04000000u32;
+const CLI_V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1u32;
+const CLI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9u32;
+const CLI_V4L2_MEMORY_MMAP: u32 = 1u32;
+const CLI_V4L2_FIELD_ANY: u32 = 0u32;
+const CLI_V4L2_PIX_FMT_NV12: u32 = 842094158u32;
+const CLI_V4L2_PIX_FMT_NV12M: u32 = 842091854u32;
+const CLI_V4L2_PIX_FMT_YUYV: u32 = 1448695129u32;
+const CLI_V4L2_PIX_FMT_UYVY: u32 = 1498831189u32;
+const CLI_V4L2_PIX_FMT_YUV420: u32 = 842093913u32;
+const CLI_V4L2_PIX_FMT_YUV420M: u32 = 842091865u32;
+const CLI_V4L2_PIX_FMT_YVU420: u32 = 842094169u32;
+const CLI_V4L2_PIX_FMT_YVU420M: u32 = 825380185u32;
+const CLI_DEFAULT_V4L2_PIXFMT: u32 = CLI_V4L2_PIX_FMT_NV12;
 
 struct CliVideoSourceConfig {
     width: u32 = CLI_DEFAULT_VIDEO_WIDTH,
@@ -124,6 +172,462 @@ fn cstr_parse_u64(value: &byte) !u64 {
         return error.DirectSenderCliInvalidArgs;
     }
     return out;
+}
+
+fn cstr_parse_u32_allow_zero(value: &byte) !u32 {
+    const parsed: u64 = try cstr_parse_u64(value);
+    if parsed > 0xFFFFFFFFu32 {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    return parsed as u32;
+}
+
+fn cstr_copy_bytes(value: &byte, out: &[byte], out_len: &usize) !void {
+    if value == null || out.len == 0usize || out_len == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    var index: usize = 0usize;
+    while value[index] != 0 as byte {
+        if index >= out.len {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        out[index] = value[index];
+        index = index + 1usize;
+    }
+    if index == 0usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    *out_len = index;
+}
+
+fn cstr_slice(value: &byte) !&[byte] {
+    if value == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    const len: usize = strlen(value as *const byte);
+    if len == 0usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    return value[0:len];
+}
+
+fn cli_sleep_ms(ms: u32) void {
+    if ms == 0u32 {
+        return;
+    }
+    var req: TimeSpec = TimeSpec{
+        tv_sec: (ms / 1000u32) as i64,
+        tv_nsec: ((ms % 1000u32) as i64) * 1000000i64,
+    };
+    var rem: TimeSpec = TimeSpec{ tv_sec: 0i64, tv_nsec: 0i64 };
+    _ = sys_nanosleep(&req, &rem) catch { -1i32; };
+}
+
+struct CliHttpUrl {
+    host: &[byte],
+    port: u16 = 80u16,
+    path: &[byte],
+}
+
+struct CliIpv4 {
+    a: byte = 0 as byte,
+    b: byte = 0 as byte,
+    c: byte = 0 as byte,
+    d: byte = 0 as byte,
+}
+
+fn cli_slice_starts_with(value: &[byte], prefix: &[byte]) bool {
+    if value.len < prefix.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < prefix.len {
+        if value[index] != prefix[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn cli_slice_eq(value: &[byte], expected: &[byte]) bool {
+    if value.len != expected.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < value.len {
+        if value[index] != expected[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn cli_parse_u16_dec_bytes(value: &[byte]) !u16 {
+    if value.len == 0usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    var out: u32 = 0u32;
+    var index: usize = 0usize;
+    while index < value.len {
+        const digit: byte = value[index];
+        if digit < ('0' as byte) || digit > ('9' as byte) {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        out = (out * 10u32) + ((digit - ('0' as byte)) as u32);
+        if out > 65535u32 {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        index = index + 1usize;
+    }
+    if out == 0u32 {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    return out as u16;
+}
+
+fn cli_parse_http_url(value: &byte) !CliHttpUrl {
+    const url: &[byte] = try cstr_slice(value);
+    if !cli_slice_starts_with(url, "http://" as &[byte]) {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    const host_start: usize = 7usize;
+    var colon_index: usize = url.len;
+    var slash_index: usize = url.len;
+    var index: usize = host_start;
+    while index < url.len {
+        if url[index] == (':' as byte) {
+            colon_index = index;
+            break;
+        }
+        if url[index] == ('/' as byte) {
+            slash_index = index;
+            break;
+        }
+        index = index + 1usize;
+    }
+    const slash: &[byte] = "/" as &[byte];
+    if colon_index < url.len {
+        const host: &[byte] = url[host_start:colon_index - host_start];
+        if host.len == 0usize {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        const port_start: usize = colon_index + 1usize;
+        var port_end: usize = url.len;
+        var port_cursor: usize = port_start;
+        while port_cursor < url.len {
+            if url[port_cursor] == ('/' as byte) {
+                port_end = port_cursor;
+                break;
+            }
+            port_cursor = port_cursor + 1usize;
+        }
+        const port: u16 = try cli_parse_u16_dec_bytes(url[port_start:port_end - port_start]);
+        var path: &[byte] = slash;
+        if port_end < url.len {
+            path = url[port_end:url.len - port_end];
+        }
+        return CliHttpUrl{ host: host, port: port, path: path };
+    }
+    if slash_index < url.len {
+        const host2: &[byte] = url[host_start:slash_index - host_start];
+        if host2.len == 0usize {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        return CliHttpUrl{ host: host2, port: 80u16, path: url[slash_index:url.len - slash_index] };
+    }
+    const host3: &[byte] = url[host_start:url.len - host_start];
+    if host3.len == 0usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    return CliHttpUrl{ host: host3, port: 80u16, path: slash };
+}
+
+fn cli_parse_ipv4(host: &[byte]) !CliIpv4 {
+    if cli_slice_eq(host, "localhost" as &[byte]) {
+        return CliIpv4{ a: 127 as byte, b: 0 as byte, c: 0 as byte, d: 1 as byte };
+    }
+    var octets: [u32: 4] = [];
+    var octet_index: usize = 0usize;
+    var current: u32 = 0u32;
+    var saw_digit: bool = false;
+    var index: usize = 0usize;
+    while index < host.len {
+        const ch: byte = host[index];
+        if ch >= ('0' as byte) && ch <= ('9' as byte) {
+            saw_digit = true;
+            current = (current * 10u32) + ((ch - ('0' as byte)) as u32);
+            if current > 255u32 {
+                return error.DirectSenderCliInvalidArgs;
+            }
+        } else if ch == ('.' as byte) {
+            if !saw_digit || octet_index >= 3usize {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            octets[octet_index] = current;
+            octet_index = octet_index + 1usize;
+            current = 0u32;
+            saw_digit = false;
+        } else {
+            return error.DirectSenderCliInvalidArgs;
+        }
+        index = index + 1usize;
+    }
+    if !saw_digit || octet_index != 3usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    octets[3] = current;
+    return CliIpv4{
+        a: octets[0] as byte,
+        b: octets[1] as byte,
+        c: octets[2] as byte,
+        d: octets[3] as byte,
+    };
+}
+
+fn cli_fill_sockaddr_ipv4(ip: &CliIpv4, port: u16, out: &[byte]) !void {
+    if out.len < 16usize {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    var index: usize = 0usize;
+    while index < 16usize {
+        out[index] = 0 as byte;
+        index = index + 1usize;
+    }
+    out[0] = AF_INET as byte;
+    out[1] = 0 as byte;
+    out[2] = ((port >> 8) & 0xFFu16) as byte;
+    out[3] = (port & 0xFFu16) as byte;
+    out[4] = ip.a;
+    out[5] = ip.b;
+    out[6] = ip.c;
+    out[7] = ip.d;
+}
+
+fn cli_http_append(out: &[byte], cursor: &usize, value: &[byte]) !void {
+    if *cursor + value.len > out.len {
+        return error.DirectSenderCliHttpFailed;
+    }
+    var index: usize = 0usize;
+    while index < value.len {
+        out[*cursor + index] = value[index];
+        index = index + 1usize;
+    }
+    *cursor = *cursor + value.len;
+}
+
+fn cli_http_append_byte(out: &[byte], cursor: &usize, value: byte) !void {
+    if *cursor + 1usize > out.len {
+        return error.DirectSenderCliHttpFailed;
+    }
+    out[*cursor] = value;
+    *cursor = *cursor + 1usize;
+}
+
+fn cli_http_append_u64(out: &[byte], cursor: &usize, value: u64) !void {
+    var digits: [byte: 32] = [];
+    var count: usize = 0usize;
+    var remaining: u64 = value;
+    if remaining == 0u64 {
+        try cli_http_append_byte(out, cursor, '0' as byte);
+        return;
+    }
+    while remaining > 0u64 {
+        digits[count] = ('0' as byte) + ((remaining % 10u64) as byte);
+        count = count + 1usize;
+        remaining = remaining / 10u64;
+    }
+    while count > 0usize {
+        count = count - 1usize;
+        try cli_http_append_byte(out, cursor, digits[count]);
+    }
+}
+
+fn cli_http_build_request(req: &CliHttpUrl, post_body: &[byte], content_type: &[byte], out: &[byte], out_len: &usize) !void {
+    if out_len == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    var cursor: usize = 0usize;
+    const is_post: bool = post_body.len > 0usize;
+    if is_post {
+        try cli_http_append(out, &cursor, "POST " as &[byte]);
+    } else {
+        try cli_http_append(out, &cursor, "GET " as &[byte]);
+    }
+    try cli_http_append(out, &cursor, req.path);
+    try cli_http_append(out, &cursor, " HTTP/1.1\r\nHost: " as &[byte]);
+    try cli_http_append(out, &cursor, req.host);
+    if req.port != 80u16 {
+        try cli_http_append_byte(out, &cursor, ':' as byte);
+        try cli_http_append_u64(out, &cursor, req.port as u64);
+    }
+    try cli_http_append(out, &cursor, "\r\nConnection: close\r\n" as &[byte]);
+    if is_post {
+        try cli_http_append(out, &cursor, "Content-Type: " as &[byte]);
+        try cli_http_append(out, &cursor, content_type);
+        try cli_http_append(out, &cursor, "\r\nContent-Length: " as &[byte]);
+        try cli_http_append_u64(out, &cursor, post_body.len as u64);
+        try cli_http_append(out, &cursor, "\r\n" as &[byte]);
+    }
+    try cli_http_append(out, &cursor, "\r\n" as &[byte]);
+    *out_len = cursor;
+}
+
+fn cli_http_write_all(fd: i32, bytes: &[byte]) !void {
+    var cursor: usize = 0usize;
+    while cursor < bytes.len {
+        const written: !isize = sys_send(fd, &bytes[cursor] as *const byte, bytes.len - cursor, 0i32);
+        if written.error_id != 0 || written.value <= 0 {
+            return error.DirectSenderCliHttpFailed;
+        }
+        cursor = cursor + (written.value as usize);
+    }
+}
+
+fn cli_http_find_body_start(bytes: &[byte]) !usize {
+    var index: usize = 0usize;
+    while index + 3usize < bytes.len {
+        if bytes[index] == (13 as byte) && bytes[index + 1usize] == (10 as byte) && bytes[index + 2usize] == (13 as byte) && bytes[index + 3usize] == (10 as byte) {
+            return index + 4usize;
+        }
+        index = index + 1usize;
+    }
+    return error.DirectSenderCliHttpFailed;
+}
+
+fn cli_http_parse_status(bytes: &[byte]) !i32 {
+    if bytes.len < 12usize {
+        return error.DirectSenderCliHttpFailed;
+    }
+    var index: usize = 0usize;
+    while index < bytes.len && bytes[index] != (' ' as byte) {
+        index = index + 1usize;
+    }
+    if index >= bytes.len {
+        return error.DirectSenderCliHttpFailed;
+    }
+    index = index + 1usize;
+    var code: i32 = 0i32;
+    var digits: usize = 0usize;
+    while index < bytes.len {
+        const ch: byte = bytes[index];
+        if ch < ('0' as byte) || ch > ('9' as byte) {
+            break;
+        }
+        code = (code * 10i32) + ((ch - ('0' as byte)) as i32);
+        digits = digits + 1usize;
+        index = index + 1usize;
+    }
+    if digits == 0usize {
+        return error.DirectSenderCliHttpFailed;
+    }
+    return code;
+}
+
+fn cli_http_request(url_value: &byte, post_body: &[byte], content_type: &[byte], out: &[byte], out_len: &usize) !i32 {
+    const url: CliHttpUrl = try cli_parse_http_url(url_value);
+    const ip: CliIpv4 = try cli_parse_ipv4(url.host);
+    const fd_result: !i32 = sys_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if fd_result.error_id != 0 {
+        return error.DirectSenderCliHttpFailed;
+    }
+    const fd: i32 = fd_result.value;
+    var addr: [byte: 16] = [];
+    const addr_result: !void = cli_fill_sockaddr_ipv4(&ip, url.port, addr[0:16]);
+    if addr_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return error.DirectSenderCliHttpFailed;
+    }
+    const connect_result: !i32 = sys_connect(fd, &addr[0] as &void, 16 as u32);
+    if connect_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return error.DirectSenderCliHttpFailed;
+    }
+
+    var request: [byte: CLI_HTTP_REQUEST_BYTES] = [];
+    var request_len: usize = 0usize;
+    const build_result: !void = cli_http_build_request(&url, post_body, content_type, request[0:CLI_HTTP_REQUEST_BYTES], &request_len);
+    if build_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return error.DirectSenderCliHttpFailed;
+    }
+    const write_header_result: !void = cli_http_write_all(fd, request[0:request_len]);
+    if write_header_result.error_id != 0 {
+        _ = sys_close(fd) catch {};
+        return error.DirectSenderCliHttpFailed;
+    }
+    if post_body.len > 0usize {
+        const write_body_result: !void = cli_http_write_all(fd, post_body);
+        if write_body_result.error_id != 0 {
+            _ = sys_close(fd) catch {};
+            return error.DirectSenderCliHttpFailed;
+        }
+    }
+
+    var response: [byte: CLI_HTTP_RESPONSE_BYTES] = [];
+    var response_len: usize = 0usize;
+    while response_len < CLI_HTTP_RESPONSE_BYTES {
+        const read_count: !isize = sys_recv(fd, &response[response_len], CLI_HTTP_RESPONSE_BYTES - response_len, 0i32);
+        if read_count.error_id != 0 {
+            _ = sys_close(fd) catch {};
+            return error.DirectSenderCliHttpFailed;
+        }
+        if read_count.value <= 0 {
+            break;
+        }
+        response_len = response_len + (read_count.value as usize);
+    }
+    _ = sys_close(fd) catch {};
+    const body_start: usize = try cli_http_find_body_start(response[0:response_len]);
+    const status: i32 = try cli_http_parse_status(response[0:body_start]);
+    if out.len > 0usize && out_len != null {
+        const body_len: usize = response_len - body_start;
+        if body_len >= out.len {
+            return error.DirectSenderCliHttpFailed;
+        }
+        var index: usize = 0usize;
+        while index < body_len {
+            out[index] = response[body_start + index];
+            index = index + 1usize;
+        }
+        out[body_len] = 0 as byte;
+        *out_len = body_len;
+    }
+    return status;
+}
+
+fn cli_http_get_offer_once(url: &byte, out: &[byte], out_len: &usize) !void {
+    var empty_storage: [byte: 1] = [];
+    const empty: &[byte] = empty_storage[0:0];
+    const status_result: !i32 = cli_http_request(url, empty, empty, out, out_len);
+    const status: i32 = status_result catch {
+        return error.DirectSenderCliHttpFailed;
+    };
+    if status == 404i32 {
+        return error.DirectSenderCliHttpNotReady;
+    }
+    if status < 200i32 || status >= 300i32 {
+        return error.DirectSenderCliHttpFailed;
+    }
+}
+
+fn read_offer_json(offer_path: &byte, offer_url: &byte, out: &[byte], out_len: &usize, poll_tries: u32, poll_interval_ms: u32) !void {
+    if offer_url == null {
+        return read_file_bytes(offer_path, out, out_len);
+    }
+    var tries_done: u32 = 0u32;
+    while poll_tries == 0u32 || tries_done < poll_tries {
+        const http_result: !void = cli_http_get_offer_once(offer_url, out, out_len);
+        if http_result.error_id == 0 {
+            return;
+        }
+        tries_done = tries_done + 1u32;
+        if poll_tries == 0u32 || tries_done < poll_tries {
+            cli_sleep_ms(poll_interval_ms);
+        }
+    }
+    return error.DirectSenderCliHttpNotReady;
 }
 
 fn cli_video_source_config_make(width: u32, height: u32) !CliVideoSourceConfig {
@@ -307,30 +811,672 @@ fn read_exact_looping(fd: i32, out: &[byte]) !void {
     }
 }
 
+struct CliV4L2MappedBuffer {
+    start0: &byte = null,
+    length0: usize = 0usize,
+    start1: &byte = null,
+    length1: usize = 0usize,
+    plane_count: u32 = 0u32,
+}
+
+struct CliV4L2Capture {
+    fd: i32 = -1i32,
+    buf_type: u32 = 0u32,
+    pixfmt: u32 = 0u32,
+    y_stride: u32 = 0u32,
+    uv_stride: u32 = 0u32,
+    plane_count: u32 = 0u32,
+    buffer_count: u32 = 0u32,
+    buffer0: CliV4L2MappedBuffer = CliV4L2MappedBuffer{},
+    buffer1: CliV4L2MappedBuffer = CliV4L2MappedBuffer{},
+    buffer2: CliV4L2MappedBuffer = CliV4L2MappedBuffer{},
+    buffer3: CliV4L2MappedBuffer = CliV4L2MappedBuffer{},
+}
+
+fn cli_zero_bytes(bytes: &[byte]) void {
+    var index: usize = 0usize;
+    while index < bytes.len {
+        bytes[index] = 0 as byte;
+        index = index + 1usize;
+    }
+}
+
+fn cli_write_le_u32(bytes: &[byte], offset: usize, value: u32) !void {
+    if offset + 4usize > bytes.len {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    bytes[offset] = (value & 0xffu32) as byte;
+    bytes[offset + 1usize] = ((value >> 8) & 0xffu32) as byte;
+    bytes[offset + 2usize] = ((value >> 16) & 0xffu32) as byte;
+    bytes[offset + 3usize] = ((value >> 24) & 0xffu32) as byte;
+}
+
+fn cli_read_le_u32(bytes: &[byte], offset: usize) !u32 {
+    if offset + 4usize > bytes.len {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    return (bytes[offset] as u32)
+        | ((bytes[offset + 1usize] as u32) << 8)
+        | ((bytes[offset + 2usize] as u32) << 16)
+        | ((bytes[offset + 3usize] as u32) << 24);
+}
+
+fn cli_write_le_u64(bytes: &[byte], offset: usize, value: u64) !void {
+    if offset + 8usize > bytes.len {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    var index: usize = 0usize;
+    while index < 8usize {
+        bytes[offset + index] = ((value >> ((index as i32) * 8i32)) & 0xffu64) as byte;
+        index = index + 1usize;
+    }
+}
+
+fn cli_write_native_ptr(bytes: &[byte], offset: usize, ptr: &byte) !void {
+    const raw: u64 = (ptr as i64) as u64;
+    std.cfg(std.target_arch == .ta_arm, {
+        try cli_write_le_u32(bytes, offset, raw as u32);
+    }, {
+        try cli_write_le_u64(bytes, offset, raw);
+    })
+}
+
+fn cli_v4l2_ioctl_querycap() i64 { return 2154321408i64; }
+fn cli_v4l2_ioctl_s_parm() i64 { return 3234616854i64; }
+fn cli_v4l2_ioctl_reqbufs() i64 { return 3222558216i64; }
+fn cli_v4l2_ioctl_streamon() i64 { return 1074026002i64; }
+fn cli_v4l2_ioctl_streamoff() i64 { return 1074026003i64; }
+
+fn cli_v4l2_ioctl_s_fmt() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 3234616837i64;
+    }, {
+        return 3234878981i64;
+    })
+}
+
+fn cli_v4l2_ioctl_querybuf() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 3226490377i64;
+    }, {
+        return 3227014665i64;
+    })
+}
+
+fn cli_v4l2_ioctl_qbuf() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 3226490383i64;
+    }, {
+        return 3227014671i64;
+    })
+}
+
+fn cli_v4l2_ioctl_dqbuf() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 3226490385i64;
+    }, {
+        return 3227014673i64;
+    })
+}
+
+fn cli_v4l2_fmt_pix_width_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 4usize; }, { return 8usize; })
+}
+fn cli_v4l2_fmt_pix_height_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 8usize; }, { return 12usize; })
+}
+fn cli_v4l2_fmt_pix_pixfmt_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 12usize; }, { return 16usize; })
+}
+fn cli_v4l2_fmt_pix_field_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 16usize; }, { return 20usize; })
+}
+fn cli_v4l2_fmt_pix_bytesperline_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 20usize; }, { return 24usize; })
+}
+fn cli_v4l2_fmt_pix_mp_num_planes_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 184usize; }, { return 188usize; })
+}
+fn cli_v4l2_fmt_pix_mp_plane0_bytesperline_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 28usize; }, { return 32usize; })
+}
+fn cli_v4l2_buffer_length_offset() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 68usize; }, { return 72usize; })
+}
+
+fn cli_v4l2_plane_struct_bytes() usize {
+    std.cfg(std.target_arch == .ta_arm, { return 60usize; }, { return 64usize; })
+}
+
+fn cli_v4l2_is_mplane(buf_type: u32) bool {
+    return buf_type == CLI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+}
+
+fn cli_v4l2_ioctl_bytes(fd: i32, request: i64, bytes: &[byte]) !void {
+    if bytes.len == 0usize {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const result: !i32 = sys_ioctl(fd, request, &bytes[0] as i64);
+    if result.error_id != 0 || result.value < 0i32 {
+        return error.DirectSenderCliV4L2Failed;
+    }
+}
+
+fn cli_v4l2_default_plane_count(pixfmt: u32) u32 {
+    if pixfmt == CLI_V4L2_PIX_FMT_NV12M {
+        return 2u32;
+    }
+    if pixfmt == CLI_V4L2_PIX_FMT_YUV420M || pixfmt == CLI_V4L2_PIX_FMT_YVU420M {
+        return 3u32;
+    }
+    return 1u32;
+}
+
+fn cli_v4l2_default_uv_stride(pixfmt: u32, y_stride: u32, width: u32) u32 {
+    if pixfmt == CLI_V4L2_PIX_FMT_YUV420 || pixfmt == CLI_V4L2_PIX_FMT_YVU420 || pixfmt == CLI_V4L2_PIX_FMT_YUV420M || pixfmt == CLI_V4L2_PIX_FMT_YVU420M {
+        const half_stride: u32 = y_stride / 2u32;
+        const half_width: u32 = width / 2u32;
+        if half_stride > half_width {
+            return half_stride;
+        }
+        return half_width;
+    }
+    if y_stride > width {
+        return y_stride;
+    }
+    return width;
+}
+
+fn cli_v4l2_alternate_format_for_type(pixfmt: u32, buf_type: u32) u32 {
+    if cli_v4l2_is_mplane(buf_type) {
+        if pixfmt == CLI_V4L2_PIX_FMT_NV12 { return CLI_V4L2_PIX_FMT_NV12M; }
+        if pixfmt == CLI_V4L2_PIX_FMT_YUV420 { return CLI_V4L2_PIX_FMT_YUV420M; }
+        if pixfmt == CLI_V4L2_PIX_FMT_YVU420 { return CLI_V4L2_PIX_FMT_YVU420M; }
+    } else {
+        if pixfmt == CLI_V4L2_PIX_FMT_NV12M { return CLI_V4L2_PIX_FMT_NV12; }
+        if pixfmt == CLI_V4L2_PIX_FMT_YUV420M { return CLI_V4L2_PIX_FMT_YUV420; }
+        if pixfmt == CLI_V4L2_PIX_FMT_YVU420M { return CLI_V4L2_PIX_FMT_YVU420; }
+    }
+    return pixfmt;
+}
+
+fn cli_v4l2_format_compatible(requested: u32, actual: u32) bool {
+    if requested == actual {
+        return true;
+    }
+    if (requested == CLI_V4L2_PIX_FMT_NV12 && actual == CLI_V4L2_PIX_FMT_NV12M) || (requested == CLI_V4L2_PIX_FMT_NV12M && actual == CLI_V4L2_PIX_FMT_NV12) {
+        return true;
+    }
+    if (requested == CLI_V4L2_PIX_FMT_YUV420 && actual == CLI_V4L2_PIX_FMT_YUV420M) || (requested == CLI_V4L2_PIX_FMT_YUV420M && actual == CLI_V4L2_PIX_FMT_YUV420) {
+        return true;
+    }
+    if (requested == CLI_V4L2_PIX_FMT_YVU420 && actual == CLI_V4L2_PIX_FMT_YVU420M) || (requested == CLI_V4L2_PIX_FMT_YVU420M && actual == CLI_V4L2_PIX_FMT_YVU420) {
+        return true;
+    }
+    return false;
+}
+
+fn cli_v4l2_parse_format(value: &byte) !u32 {
+    if value == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    if cstr_eq(value, "nv12\0" as &byte) { return CLI_V4L2_PIX_FMT_NV12; }
+    if cstr_eq(value, "nv12m\0" as &byte) { return CLI_V4L2_PIX_FMT_NV12M; }
+    if cstr_eq(value, "yuyv\0" as &byte) { return CLI_V4L2_PIX_FMT_YUYV; }
+    if cstr_eq(value, "uyvy\0" as &byte) { return CLI_V4L2_PIX_FMT_UYVY; }
+    if cstr_eq(value, "i420\0" as &byte) || cstr_eq(value, "yu12\0" as &byte) { return CLI_V4L2_PIX_FMT_YUV420; }
+    if cstr_eq(value, "i420m\0" as &byte) || cstr_eq(value, "yu12m\0" as &byte) { return CLI_V4L2_PIX_FMT_YUV420M; }
+    if cstr_eq(value, "yv12\0" as &byte) { return CLI_V4L2_PIX_FMT_YVU420; }
+    if cstr_eq(value, "yv12m\0" as &byte) { return CLI_V4L2_PIX_FMT_YVU420M; }
+    return error.DirectSenderCliInvalidArgs;
+}
+
+fn cli_v4l2_buffer_ref(capture: &CliV4L2Capture, index: u32) &CliV4L2MappedBuffer {
+    if index == 0u32 { return &capture.buffer0; }
+    if index == 1u32 { return &capture.buffer1; }
+    if index == 2u32 { return &capture.buffer2; }
+    return &capture.buffer3;
+}
+
+fn cli_v4l2_prepare_buffer_struct(bytes: &[byte], planes: &[byte], buf_type: u32, plane_count: u32, index: u32) !void {
+    cli_zero_bytes(bytes);
+    try cli_write_le_u32(bytes, 0usize, index);
+    try cli_write_le_u32(bytes, 4usize, buf_type);
+    try cli_write_le_u32(bytes, 60usize, CLI_V4L2_MEMORY_MMAP);
+    if cli_v4l2_is_mplane(buf_type) {
+        try cli_write_le_u32(bytes, cli_v4l2_buffer_length_offset(), plane_count);
+        try cli_write_native_ptr(bytes, 64usize, &planes[0]);
+        cli_zero_bytes(planes);
+    }
+}
+
+fn cli_v4l2_map_buffer(fd: i32, length: usize, offset: u32) !&byte {
+    if length == 0usize {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const map_result: !*void = sys_mmap(null as *void, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset as i64);
+    const ptr: *void = map_result catch {
+        return error.DirectSenderCliV4L2Failed;
+    };
+    if ptr == null {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    if (ptr as i64) == -1i64 {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    return ptr as &byte;
+}
+
+fn cli_v4l2_capture_close(capture: &CliV4L2Capture) void {
+    if capture == null {
+        return;
+    }
+    if capture.fd >= 0i32 {
+        var type_bytes: [byte: 4] = [];
+        _ = cli_write_le_u32(type_bytes[0:4], 0usize, capture.buf_type) catch {};
+        _ = sys_ioctl(capture.fd, cli_v4l2_ioctl_streamoff(), &type_bytes[0] as i64) catch { -1i32; };
+    }
+    var index: u32 = 0u32;
+    while index < capture.buffer_count {
+        const buffer: &CliV4L2MappedBuffer = cli_v4l2_buffer_ref(capture, index);
+        if buffer.start0 != null && buffer.length0 > 0usize {
+            _ = sys_munmap(buffer.start0 as *void, buffer.length0) catch { -1i32; };
+        }
+        if buffer.start1 != null && buffer.length1 > 0usize {
+            _ = sys_munmap(buffer.start1 as *void, buffer.length1) catch { -1i32; };
+        }
+        index = index + 1u32;
+    }
+    if capture.fd >= 0i32 {
+        _ = sys_close(capture.fd) catch {};
+    }
+    capture.fd = -1i32;
+    capture.buffer_count = 0u32;
+}
+
+fn cli_v4l2_capture_open(device: &byte, width: u32, height: u32, fps: u32, requested_pixfmt: u32, capture: &CliV4L2Capture) !void {
+    if device == null || capture == null || width == 0u32 || height == 0u32 || fps == 0u32 {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    const fd_result: !i32 = sys_open(device as *const byte, O_RDWR as i32, 0i32);
+    const fd: i32 = fd_result catch {
+        return error.DirectSenderCliV4L2Failed;
+    };
+    capture.fd = fd;
+
+    var cap_bytes: [byte: 104] = [];
+    const query_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_querycap(), cap_bytes[0:104]);
+    if query_result.error_id != 0 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    var caps: u32 = try cli_read_le_u32(cap_bytes[0:104], 84usize);
+    const device_caps: u32 = try cli_read_le_u32(cap_bytes[0:104], 88usize);
+    if (caps & CLI_V4L2_CAP_DEVICE_CAPS) != 0u32 {
+        caps = device_caps;
+    }
+    if (caps & CLI_V4L2_CAP_VIDEO_CAPTURE_MPLANE) != 0u32 {
+        capture.buf_type = CLI_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    } else if (caps & CLI_V4L2_CAP_VIDEO_CAPTURE) != 0u32 {
+        capture.buf_type = CLI_V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    } else {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    if (caps & CLI_V4L2_CAP_STREAMING) == 0u32 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+
+    var parm: [byte: CLI_V4L2_STRUCT_BYTES] = [];
+    cli_zero_bytes(parm[0:CLI_V4L2_STRUCT_BYTES]);
+    try cli_write_le_u32(parm[0:CLI_V4L2_STRUCT_BYTES], 0usize, capture.buf_type);
+    try cli_write_le_u32(parm[0:CLI_V4L2_STRUCT_BYTES], 12usize, 1u32);
+    try cli_write_le_u32(parm[0:CLI_V4L2_STRUCT_BYTES], 16usize, fps);
+    _ = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_s_parm(), parm[0:CLI_V4L2_STRUCT_BYTES]) catch {};
+
+    const attempt0: u32 = requested_pixfmt;
+    const attempt1: u32 = cli_v4l2_alternate_format_for_type(requested_pixfmt, capture.buf_type);
+    var fmt: [byte: CLI_V4L2_STRUCT_BYTES] = [];
+    var selected_pixfmt: u32 = 0u32;
+    var attempt: u32 = 0u32;
+    while attempt < 2u32 {
+        var try_pixfmt: u32 = attempt0;
+        if attempt != 0u32 {
+            try_pixfmt = attempt1;
+        }
+        if attempt == 1u32 && attempt1 == attempt0 {
+            attempt = attempt + 1u32;
+            continue;
+        }
+        cli_zero_bytes(fmt[0:CLI_V4L2_STRUCT_BYTES]);
+        try cli_write_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], 0usize, capture.buf_type);
+        try cli_write_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_width_offset(), width);
+        try cli_write_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_height_offset(), height);
+        try cli_write_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_pixfmt_offset(), try_pixfmt);
+        try cli_write_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_field_offset(), CLI_V4L2_FIELD_ANY);
+        const fmt_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_s_fmt(), fmt[0:CLI_V4L2_STRUCT_BYTES]);
+        if fmt_result.error_id == 0 {
+            selected_pixfmt = try_pixfmt;
+            break;
+        }
+        attempt = attempt + 1u32;
+    }
+    if selected_pixfmt == 0u32 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+
+    const actual_width: u32 = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_width_offset());
+    const actual_height: u32 = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_height_offset());
+    const actual_pixfmt: u32 = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_pixfmt_offset());
+    if actual_width != width || actual_height != height || !cli_v4l2_format_compatible(requested_pixfmt, actual_pixfmt) {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    capture.pixfmt = actual_pixfmt;
+    capture.y_stride = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_bytesperline_offset());
+    if capture.y_stride == 0u32 {
+        capture.y_stride = width;
+    }
+    if cli_v4l2_is_mplane(capture.buf_type) {
+        capture.plane_count = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_mp_num_planes_offset());
+        if capture.plane_count == 0u32 {
+            capture.plane_count = cli_v4l2_default_plane_count(actual_pixfmt);
+        }
+        if capture.plane_count > CLI_V4L2_MAX_PLANES {
+            capture.plane_count = CLI_V4L2_MAX_PLANES;
+        }
+        capture.y_stride = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_mp_plane0_bytesperline_offset());
+        if capture.y_stride == 0u32 {
+            capture.y_stride = width;
+        }
+        capture.uv_stride = try cli_read_le_u32(fmt[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_fmt_pix_mp_plane0_bytesperline_offset() + 20usize);
+        if capture.uv_stride == 0u32 {
+            capture.uv_stride = cli_v4l2_default_uv_stride(actual_pixfmt, capture.y_stride, width);
+        }
+    } else {
+        capture.plane_count = 1u32;
+        capture.uv_stride = cli_v4l2_default_uv_stride(actual_pixfmt, capture.y_stride, width);
+    }
+
+    var req: [byte: 20] = [];
+    cli_zero_bytes(req[0:20]);
+    try cli_write_le_u32(req[0:20], 0usize, CLI_V4L2_MAX_BUFFERS);
+    try cli_write_le_u32(req[0:20], 4usize, capture.buf_type);
+    try cli_write_le_u32(req[0:20], 8usize, CLI_V4L2_MEMORY_MMAP);
+    const req_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_reqbufs(), req[0:20]);
+    if req_result.error_id != 0 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    var buffer_count: u32 = try cli_read_le_u32(req[0:20], 0usize);
+    if buffer_count > CLI_V4L2_MAX_BUFFERS {
+        buffer_count = CLI_V4L2_MAX_BUFFERS;
+    }
+    if buffer_count < 2u32 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    capture.buffer_count = buffer_count;
+
+    var index: u32 = 0u32;
+    while index < buffer_count {
+        var buf: [byte: CLI_V4L2_STRUCT_BYTES] = [];
+        var planes: [byte: CLI_V4L2_PLANES_BYTES] = [];
+        try cli_v4l2_prepare_buffer_struct(buf[0:CLI_V4L2_STRUCT_BYTES], planes[0:CLI_V4L2_PLANES_BYTES], capture.buf_type, capture.plane_count, index);
+        const querybuf_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_querybuf(), buf[0:CLI_V4L2_STRUCT_BYTES]);
+        if querybuf_result.error_id != 0 {
+            cli_v4l2_capture_close(capture);
+            return error.DirectSenderCliV4L2Failed;
+        }
+        const mapped: &CliV4L2MappedBuffer = cli_v4l2_buffer_ref(capture, index);
+        mapped.plane_count = capture.plane_count;
+        if cli_v4l2_is_mplane(capture.buf_type) {
+            const len0: u32 = try cli_read_le_u32(planes[0:CLI_V4L2_PLANES_BYTES], 4usize);
+            const off0: u32 = try cli_read_le_u32(planes[0:CLI_V4L2_PLANES_BYTES], 8usize);
+            mapped.length0 = len0 as usize;
+            mapped.start0 = try cli_v4l2_map_buffer(fd, mapped.length0, off0);
+            if capture.plane_count > 1u32 {
+                const plane1_offset: usize = cli_v4l2_plane_struct_bytes();
+                const len1: u32 = try cli_read_le_u32(planes[0:CLI_V4L2_PLANES_BYTES], plane1_offset + 4usize);
+                const off1: u32 = try cli_read_le_u32(planes[0:CLI_V4L2_PLANES_BYTES], plane1_offset + 8usize);
+                mapped.length1 = len1 as usize;
+                mapped.start1 = try cli_v4l2_map_buffer(fd, mapped.length1, off1);
+            }
+        } else {
+            const len: u32 = try cli_read_le_u32(buf[0:CLI_V4L2_STRUCT_BYTES], cli_v4l2_buffer_length_offset());
+            const off: u32 = try cli_read_le_u32(buf[0:CLI_V4L2_STRUCT_BYTES], 64usize);
+            mapped.length0 = len as usize;
+            mapped.start0 = try cli_v4l2_map_buffer(fd, mapped.length0, off);
+        }
+        const qbuf_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_qbuf(), buf[0:CLI_V4L2_STRUCT_BYTES]);
+        if qbuf_result.error_id != 0 {
+            cli_v4l2_capture_close(capture);
+            return error.DirectSenderCliV4L2Failed;
+        }
+        index = index + 1u32;
+    }
+
+    var type_bytes: [byte: 4] = [];
+    try cli_write_le_u32(type_bytes[0:4], 0usize, capture.buf_type);
+    const stream_result: !void = cli_v4l2_ioctl_bytes(fd, cli_v4l2_ioctl_streamon(), type_bytes[0:4]);
+    if stream_result.error_id != 0 {
+        cli_v4l2_capture_close(capture);
+        return error.DirectSenderCliV4L2Failed;
+    }
+    cli_write_stderr("uya_ffmpeg_direct_sender: V4L2 capture started\n" as &[byte]);
+}
+
+fn cli_v4l2_convert_nv12(capture: &CliV4L2Capture, buffer: &CliV4L2MappedBuffer, y_plane: &[byte], u_plane: &[byte], v_plane: &[byte], width: u32, height: u32) !void {
+    if buffer.start0 == null || y_plane.len == 0usize || u_plane.len == 0usize || v_plane.len == 0usize {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const width_usize: usize = width as usize;
+    const height_usize: usize = height as usize;
+    const y_stride: usize = capture.y_stride as usize;
+    const uv_stride: usize = capture.uv_stride as usize;
+    var row: usize = 0usize;
+    while row < height_usize {
+        var col: usize = 0usize;
+        while col < width_usize {
+            y_plane[row * width_usize + col] = buffer.start0[row * y_stride + col];
+            col = col + 1usize;
+        }
+        row = row + 1usize;
+    }
+    var uv_base: &byte = buffer.start1;
+    if uv_base == null {
+        uv_base = &buffer.start0[y_stride * height_usize];
+    }
+    row = 0usize;
+    while row < height_usize / 2usize {
+        var col2: usize = 0usize;
+        while col2 < width_usize / 2usize {
+            const src_index: usize = row * uv_stride + col2 * 2usize;
+            const dst_index: usize = row * (width_usize / 2usize) + col2;
+            u_plane[dst_index] = uv_base[src_index];
+            v_plane[dst_index] = uv_base[src_index + 1usize];
+            col2 = col2 + 1usize;
+        }
+        row = row + 1usize;
+    }
+}
+
+fn cli_v4l2_convert_yuyv_like(capture: &CliV4L2Capture, buffer: &CliV4L2MappedBuffer, y_plane: &[byte], u_plane: &[byte], v_plane: &[byte], width: u32, height: u32, uyvy: bool) !void {
+    if buffer.start0 == null || y_plane.len == 0usize || u_plane.len == 0usize || v_plane.len == 0usize {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const width_usize: usize = width as usize;
+    const height_usize: usize = height as usize;
+    var stride: usize = capture.y_stride as usize;
+    if stride < width_usize * 2usize {
+        stride = width_usize * 2usize;
+    }
+    var row: usize = 0usize;
+    while row < height_usize {
+        var col: usize = 0usize;
+        while col < width_usize {
+            const row0: usize = row * stride;
+            const row1: usize = (row + 1usize) * stride;
+            const src0: usize = row0 + col * 2usize;
+            const src1: usize = row1 + col * 2usize;
+            var y00: byte = buffer.start0[src0];
+            var y01: byte = buffer.start0[src0 + 2usize];
+            var y10: byte = buffer.start0[src1];
+            var y11: byte = buffer.start0[src1 + 2usize];
+            var u0: byte = buffer.start0[src0 + 1usize];
+            var v0: byte = buffer.start0[src0 + 3usize];
+            var u1: byte = buffer.start0[src1 + 1usize];
+            var v1: byte = buffer.start0[src1 + 3usize];
+            if uyvy {
+                y00 = buffer.start0[src0 + 1usize];
+                y01 = buffer.start0[src0 + 3usize];
+                y10 = buffer.start0[src1 + 1usize];
+                y11 = buffer.start0[src1 + 3usize];
+                u0 = buffer.start0[src0];
+                v0 = buffer.start0[src0 + 2usize];
+                u1 = buffer.start0[src1];
+                v1 = buffer.start0[src1 + 2usize];
+            }
+            y_plane[row * width_usize + col] = y00;
+            y_plane[row * width_usize + col + 1usize] = y01;
+            y_plane[(row + 1usize) * width_usize + col] = y10;
+            y_plane[(row + 1usize) * width_usize + col + 1usize] = y11;
+            const uv_index: usize = (row / 2usize) * (width_usize / 2usize) + (col / 2usize);
+            u_plane[uv_index] = (((u0 as u32) + (u1 as u32) + 1u32) / 2u32) as byte;
+            v_plane[uv_index] = (((v0 as u32) + (v1 as u32) + 1u32) / 2u32) as byte;
+            col = col + 2usize;
+        }
+        row = row + 2usize;
+    }
+}
+
+fn cli_v4l2_convert_i420_like(capture: &CliV4L2Capture, buffer: &CliV4L2MappedBuffer, y_plane: &[byte], u_plane: &[byte], v_plane: &[byte], width: u32, height: u32, yv12: bool) !void {
+    if buffer.start0 == null || y_plane.len == 0usize || u_plane.len == 0usize || v_plane.len == 0usize {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const width_usize: usize = width as usize;
+    const height_usize: usize = height as usize;
+    var y_stride: usize = capture.y_stride as usize;
+    if y_stride < width_usize { y_stride = width_usize; }
+    var uv_stride: usize = capture.uv_stride as usize;
+    if uv_stride < width_usize / 2usize { uv_stride = width_usize / 2usize; }
+    var src_u: &byte = null;
+    var src_v: &byte = null;
+    if capture.plane_count >= 2u32 && buffer.start1 != null {
+        src_u = buffer.start1;
+        src_v = null;
+    } else {
+        const y_plane_bytes: usize = y_stride * height_usize;
+        const uv_plane_bytes: usize = uv_stride * (height_usize / 2usize);
+        if yv12 {
+            src_v = &buffer.start0[y_plane_bytes];
+            src_u = &buffer.start0[y_plane_bytes + uv_plane_bytes];
+        } else {
+            src_u = &buffer.start0[y_plane_bytes];
+            src_v = &buffer.start0[y_plane_bytes + uv_plane_bytes];
+        }
+    }
+    if src_u == null {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    if src_v == null {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    var row: usize = 0usize;
+    while row < height_usize {
+        var col: usize = 0usize;
+        while col < width_usize {
+            y_plane[row * width_usize + col] = buffer.start0[row * y_stride + col];
+            col = col + 1usize;
+        }
+        row = row + 1usize;
+    }
+    row = 0usize;
+    while row < height_usize / 2usize {
+        var col2: usize = 0usize;
+        while col2 < width_usize / 2usize {
+            const src_index: usize = row * uv_stride + col2;
+            const dst_index: usize = row * (width_usize / 2usize) + col2;
+            u_plane[dst_index] = src_u[src_index];
+            v_plane[dst_index] = src_v[src_index];
+            col2 = col2 + 1usize;
+        }
+        row = row + 1usize;
+    }
+}
+
+fn cli_v4l2_capture_read_i420(capture: &CliV4L2Capture, y_plane: &[byte], u_plane: &[byte], v_plane: &[byte], width: u32, height: u32) !void {
+    if capture == null || capture.fd < 0i32 {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    var buf: [byte: CLI_V4L2_STRUCT_BYTES] = [];
+    var planes: [byte: CLI_V4L2_PLANES_BYTES] = [];
+    try cli_v4l2_prepare_buffer_struct(buf[0:CLI_V4L2_STRUCT_BYTES], planes[0:CLI_V4L2_PLANES_BYTES], capture.buf_type, capture.plane_count, 0u32);
+    const dq_result: !void = cli_v4l2_ioctl_bytes(capture.fd, cli_v4l2_ioctl_dqbuf(), buf[0:CLI_V4L2_STRUCT_BYTES]);
+    if dq_result.error_id != 0 {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const index: u32 = try cli_read_le_u32(buf[0:CLI_V4L2_STRUCT_BYTES], 0usize);
+    if index >= capture.buffer_count {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const mapped: &CliV4L2MappedBuffer = cli_v4l2_buffer_ref(capture, index);
+    if capture.pixfmt == CLI_V4L2_PIX_FMT_NV12 || capture.pixfmt == CLI_V4L2_PIX_FMT_NV12M {
+        try cli_v4l2_convert_nv12(capture, mapped, y_plane, u_plane, v_plane, width, height);
+    } else if capture.pixfmt == CLI_V4L2_PIX_FMT_YUYV {
+        try cli_v4l2_convert_yuyv_like(capture, mapped, y_plane, u_plane, v_plane, width, height, false);
+    } else if capture.pixfmt == CLI_V4L2_PIX_FMT_UYVY {
+        try cli_v4l2_convert_yuyv_like(capture, mapped, y_plane, u_plane, v_plane, width, height, true);
+    } else if capture.pixfmt == CLI_V4L2_PIX_FMT_YUV420 || capture.pixfmt == CLI_V4L2_PIX_FMT_YUV420M {
+        try cli_v4l2_convert_i420_like(capture, mapped, y_plane, u_plane, v_plane, width, height, false);
+    } else if capture.pixfmt == CLI_V4L2_PIX_FMT_YVU420 || capture.pixfmt == CLI_V4L2_PIX_FMT_YVU420M {
+        try cli_v4l2_convert_i420_like(capture, mapped, y_plane, u_plane, v_plane, width, height, true);
+    } else {
+        return error.DirectSenderCliV4L2Failed;
+    }
+    const q_result: !void = cli_v4l2_ioctl_bytes(capture.fd, cli_v4l2_ioctl_qbuf(), buf[0:CLI_V4L2_STRUCT_BYTES]);
+    if q_result.error_id != 0 {
+        return error.DirectSenderCliV4L2Failed;
+    }
+}
+
 fn print_usage() void {
-    cli_write_stderr("uya_ffmpeg_direct_sender --offer-json <path> --media <path> --answer-json <path> --diagnostics-json <path> [--raw-video-i420 <path>] [--raw-audio-s16le <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--codec ffmpeg|uya] [--dry-run]\n" as &[byte]);
+    cli_write_stderr("uya_ffmpeg_direct_sender [--offer-json <path>|--offer-url <url>] [--answer-json <path>] [--answer-url <url>] [--diagnostics-json <path>] [--media <path>] [--raw-video-i420 <path>|--v4l2-device <path>] [--v4l2-format nv12|nv12m|yuyv|uyvy|i420|yv12] [--v4l2-test-frames <n>] [--raw-audio-s16le <path>] [--video-width <px>] [--video-height <px>] [--media-duration-us <us>] [--video-frame-duration-us <us>] [--local-host <ip>] [--offer-poll-tries <n>] [--offer-poll-interval-ms <ms>] [--codec ffmpeg|uya] [--dry-run]\n" as &[byte]);
 }
 
 fn parse_args(
     argc: i32,
     argv: & &byte,
     offer_path: &&byte,
+    offer_url: &&byte,
     media_path: &&byte,
     answer_path: &&byte,
+    answer_url: &&byte,
     diagnostics_path: &&byte,
     raw_video_path: &&byte,
     raw_audio_path: &&byte,
+    v4l2_device: &&byte,
+    v4l2_pixfmt: &u32,
+    v4l2_test_frames: &u32,
     video_width: &u32,
     video_height: &u32,
     media_duration_us: &u64,
+    video_frame_duration_us: &u32,
+    local_host: &&byte,
+    offer_poll_tries: &u32,
+    offer_poll_interval_ms: &u32,
     dry_run: &bool,
     codec_provider_id: &u8,
 ) !void {
-    if argv == null || offer_path == null || media_path == null || answer_path == null || diagnostics_path == null || raw_video_path == null || raw_audio_path == null || video_width == null || video_height == null || media_duration_us == null || dry_run == null || codec_provider_id == null {
+    if argv == null || offer_path == null || offer_url == null || media_path == null || answer_path == null || answer_url == null || diagnostics_path == null || raw_video_path == null || raw_audio_path == null || v4l2_device == null || v4l2_pixfmt == null || v4l2_test_frames == null || video_width == null || video_height == null || media_duration_us == null || video_frame_duration_us == null || local_host == null || offer_poll_tries == null || offer_poll_interval_ms == null || dry_run == null || codec_provider_id == null {
         return error.DirectSenderCliInvalidArgs;
     }
 
     var index: i32 = 1;
+    var offer_url_was_set: bool = false;
+    var answer_url_was_set: bool = false;
     while index < argc {
         const arg: &byte = argv[index];
         if cstr_eq(arg, "--\0" as &byte) {
@@ -357,6 +1503,13 @@ fn parse_args(
             }
             *offer_path = argv[index + 1];
             index = index + 2;
+        } else if cstr_eq(arg, "--offer-url\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *offer_url = argv[index + 1];
+            offer_url_was_set = true;
+            index = index + 2;
         } else if cstr_eq(arg, "--media\0" as &byte) {
             if index + 1 >= argc {
                 return error.DirectSenderCliInvalidArgs;
@@ -368,6 +1521,13 @@ fn parse_args(
                 return error.DirectSenderCliInvalidArgs;
             }
             *answer_path = argv[index + 1];
+            index = index + 2;
+        } else if cstr_eq(arg, "--answer-url\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *answer_url = argv[index + 1];
+            answer_url_was_set = true;
             index = index + 2;
         } else if cstr_eq(arg, "--diagnostics-json\0" as &byte) {
             if index + 1 >= argc {
@@ -386,6 +1546,24 @@ fn parse_args(
                 return error.DirectSenderCliInvalidArgs;
             }
             *raw_audio_path = argv[index + 1];
+            index = index + 2;
+        } else if cstr_eq(arg, "--v4l2-device\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *v4l2_device = argv[index + 1];
+            index = index + 2;
+        } else if cstr_eq(arg, "--v4l2-format\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *v4l2_pixfmt = try cli_v4l2_parse_format(argv[index + 1]);
+            index = index + 2;
+        } else if cstr_eq(arg, "--v4l2-test-frames\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *v4l2_test_frames = try cstr_parse_u32(argv[index + 1]);
             index = index + 2;
         } else if cstr_eq(arg, "--video-width\0" as &byte) {
             if index + 1 >= argc {
@@ -408,12 +1586,46 @@ fn parse_args(
                 return error.DirectSenderCliInvalidArgs;
             }
             index = index + 2;
+        } else if cstr_eq(arg, "--video-frame-duration-us\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *video_frame_duration_us = try cstr_parse_u32(argv[index + 1]);
+            if *video_frame_duration_us == 0u32 {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            index = index + 2;
+        } else if cstr_eq(arg, "--offer-poll-tries\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *offer_poll_tries = try cstr_parse_u32_allow_zero(argv[index + 1]);
+            index = index + 2;
+        } else if cstr_eq(arg, "--offer-poll-interval-ms\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *offer_poll_interval_ms = try cstr_parse_u32(argv[index + 1]);
+            index = index + 2;
+        } else if cstr_eq(arg, "--local-host\0" as &byte) {
+            if index + 1 >= argc {
+                return error.DirectSenderCliInvalidArgs;
+            }
+            *local_host = argv[index + 1];
+            index = index + 2;
         } else {
             return error.DirectSenderCliInvalidArgs;
         }
     }
 
-    if *offer_path == null || *media_path == null || *answer_path == null || *diagnostics_path == null {
+    if *offer_path != null && !offer_url_was_set {
+        *offer_url = null;
+    }
+    if *answer_path != null && !answer_url_was_set {
+        *answer_url = null;
+    }
+
+    if *v4l2_test_frames == 0u32 && ((*offer_path == null && *offer_url == null) || (*answer_path == null && *answer_url == null) || *diagnostics_path == null) {
         return error.DirectSenderCliInvalidArgs;
     }
 }
@@ -555,13 +1767,38 @@ fn answer_json_append_escaped_sdp(out: &[byte], cursor: &usize, sdp: &[byte]) !v
     }
 }
 
-fn write_answer_json(path: &byte, sdp: &[byte]) !void {
-    var json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
+fn build_answer_json(out: &[byte], out_len: &usize, sdp: &[byte]) !void {
+    if out_len == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
     var cursor: usize = 0usize;
-    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "{\"type\":\"answer\",\"sdp\":\"" as &[byte]);
-    try answer_json_append_escaped_sdp(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, sdp);
-    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, "\"}\n" as &[byte]);
-    try write_bytes_file(path, json[0:cursor]);
+    try answer_json_append(out, &cursor, "{\"type\":\"answer\",\"sdp\":\"" as &[byte]);
+    try answer_json_append_escaped_sdp(out, &cursor, sdp);
+    try answer_json_append(out, &cursor, "\"}\n" as &[byte]);
+    *out_len = cursor;
+}
+
+fn write_answer_json(path: &byte, json: &[byte]) !void {
+    if path == null {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    try write_bytes_file(path, json);
+}
+
+fn post_answer_json(url: &byte, json: &[byte]) !void {
+    if url == null {
+        return;
+    }
+    const content_type: &[byte] = "application/json" as &[byte];
+    var response_body: [byte: 1024] = [];
+    var response_len: usize = 0usize;
+    const status_result: !i32 = cli_http_request(url, json, content_type, response_body[0:1024], &response_len);
+    const status: i32 = status_result catch {
+        return error.DirectSenderCliHttpFailed;
+    };
+    if status < 200i32 || status >= 300i32 {
+        return error.DirectSenderCliHttpFailed;
+    }
 }
 
 fn json_append_u64(out: &[byte], cursor: &usize, value: u64) !void {
@@ -817,6 +2054,17 @@ fn cli_send_udp_payload(socket: &UdpSocket, addr: &[byte], addr_len: u32, payloa
     }
 }
 
+fn cli_v4l2_fps_from_frame_duration(video_frame_duration_us: u32) u32 {
+    if video_frame_duration_us == 0u32 {
+        return 30u32;
+    }
+    var fps: u32 = 1000000u32 / video_frame_duration_us;
+    if fps == 0u32 {
+        fps = 1u32;
+    }
+    return fps;
+}
+
 fn cli_audio_config_make() FfmpegCodecEncoderConfig {
     var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
     config.media_kind = MEDIA_KIND_AUDIO;
@@ -827,14 +2075,14 @@ fn cli_audio_config_make() FfmpegCodecEncoderConfig {
     return config;
 }
 
-fn cli_video_config_make(video_config: &CliVideoSourceConfig) FfmpegCodecEncoderConfig {
+fn cli_video_config_make(video_config: &CliVideoSourceConfig, video_frame_duration_us: u32) FfmpegCodecEncoderConfig {
     var config: FfmpegCodecEncoderConfig = ffmpeg_codec_encoder_config_make();
     config.media_kind = MEDIA_KIND_VIDEO;
     config.codec_id = CODEC_ID_VP8;
     config.width = video_config.width;
     config.height = video_config.height;
     config.bitrate_bps = cli_video_bitrate_bps(video_config.width, video_config.height);
-    config.fps_num = 30u32;
+    config.fps_num = cli_v4l2_fps_from_frame_duration(video_frame_duration_us);
     config.fps_den = 1u32;
     return config;
 }
@@ -922,24 +2170,37 @@ fn cli_send_video_frame(
     runtime: &DirectRuntime,
     encoder: &FfmpegCodecEncoder,
     raw_video_fd: i32,
+    v4l2_capture: &CliV4L2Capture,
     video_config: &CliVideoSourceConfig,
     raw_i420: &[byte],
     encoded_packet: &[byte],
     frame_index: u64,
+    video_frame_duration_us: u32,
 ) !void {
     if video_config == null || raw_i420.len < video_config.i420_bytes || encoded_packet.len == 0usize {
         return error.DirectSenderCliRuntimeFailed;
     }
     if raw_video_fd >= 0i32 {
         try read_exact_looping(raw_video_fd, raw_i420[0:video_config.i420_bytes]);
+    } else if v4l2_capture != null && v4l2_capture.fd >= 0i32 {
+        const y_len: usize = (video_config.width as usize) * (video_config.height as usize);
+        const uv_len: usize = y_len / 4usize;
+        try cli_v4l2_capture_read_i420(
+            v4l2_capture,
+            raw_i420[0:y_len],
+            raw_i420[y_len:uv_len],
+            raw_i420[y_len + uv_len:uv_len],
+            video_config.width,
+            video_config.height,
+        );
     } else {
         cli_fill_i420(raw_i420[0:video_config.i420_bytes], video_config.width, video_config.height, frame_index);
     }
-    const timestamp_us: u64 = frame_index * (CLI_VIDEO_FRAME_DURATION_US as u64);
+    const timestamp_us: u64 = frame_index * (video_frame_duration_us as u64);
     const raw: FfmpegCodecRawVideoI420View = try ffmpeg_codec_raw_video_i420_view_make(
         raw_i420[0:video_config.i420_bytes],
         timestamp_us,
-        CLI_VIDEO_FRAME_DURATION_US,
+        video_frame_duration_us,
         video_config.width,
         video_config.height,
     );
@@ -1025,6 +2286,71 @@ fn cli_send_sender_report(
     sender.diagnostics.udp_packets = sender.diagnostics.udp_packets + 1u64;
 }
 
+fn cli_run_v4l2_capture_test(
+    v4l2_device: &byte,
+    v4l2_pixfmt: u32,
+    video_source: &CliVideoSourceConfig,
+    video_frame_duration_us: u32,
+    frame_count: u32,
+) !void {
+    if v4l2_device == null || video_source == null || frame_count == 0u32 {
+        return error.DirectSenderCliInvalidArgs;
+    }
+    const y_bytes: usize = (video_source.width as usize) * (video_source.height as usize);
+    const uv_bytes: usize = y_bytes / 4usize;
+    const y_storage: &byte = malloc(y_bytes) as &byte;
+    if y_storage == null {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    const u_storage: &byte = malloc(uv_bytes) as &byte;
+    if u_storage == null {
+        free(y_storage as &void);
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    const v_storage: &byte = malloc(uv_bytes) as &byte;
+    if v_storage == null {
+        free(u_storage as &void);
+        free(y_storage as &void);
+        return error.DirectSenderCliRuntimeFailed;
+    }
+
+    var capture: CliV4L2Capture = CliV4L2Capture{};
+    const fps: u32 = cli_v4l2_fps_from_frame_duration(video_frame_duration_us);
+    const open_result: !void = cli_v4l2_capture_open(v4l2_device, video_source.width, video_source.height, fps, v4l2_pixfmt, &capture);
+    if open_result.error_id != 0 {
+        free(v_storage as &void);
+        free(u_storage as &void);
+        free(y_storage as &void);
+        return error.DirectSenderCliV4L2Failed;
+    }
+
+    var index: u32 = 0u32;
+    while index < frame_count {
+        const read_result: !void = cli_v4l2_capture_read_i420(
+            &capture,
+            y_storage[0:y_bytes],
+            u_storage[0:uv_bytes],
+            v_storage[0:uv_bytes],
+            video_source.width,
+            video_source.height,
+        );
+        if read_result.error_id != 0 {
+            cli_v4l2_capture_close(&capture);
+            free(v_storage as &void);
+            free(u_storage as &void);
+            free(y_storage as &void);
+            return error.DirectSenderCliV4L2Failed;
+        }
+        index = index + 1u32;
+    }
+
+    cli_v4l2_capture_close(&capture);
+    free(v_storage as &void);
+    free(u_storage as &void);
+    free(y_storage as &void);
+    cli_write_stderr("uya_ffmpeg_direct_sender: V4L2 test frames captured\n" as &[byte]);
+}
+
 fn cli_process_control_datagram(
     socket: &UdpSocket,
     sender: &UyaDirectSender,
@@ -1108,8 +2434,11 @@ fn run_live_sender(
     diagnostics_path: &byte,
     raw_video_path: &byte,
     raw_audio_path: &byte,
+    v4l2_device: &byte,
+    v4l2_pixfmt: u32,
     video_source: &CliVideoSourceConfig,
     media_duration_us: u64,
+    video_frame_duration_us: u32,
     codec_provider_id: u8,
 ) !UyaDirectSenderDiagnostics {
     var sender: UyaDirectSender = uya_direct_sender_make();
@@ -1140,7 +2469,7 @@ fn run_live_sender(
     }
     var audio_encoder: FfmpegCodecEncoder = audio_encoder_result.value;
 
-    var video_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_video_config_make(video_source));
+    var video_encoder_result: !FfmpegCodecEncoder = ffmpeg_codec_encoder_open(cli_video_config_make(video_source, video_frame_duration_us));
     if video_encoder_result.error_id != 0 {
         ffmpeg_codec_encoder_close(&audio_encoder);
         return error.DirectSenderCliRuntimeFailed;
@@ -1164,8 +2493,23 @@ fn run_live_sender(
     }
     const raw_audio_fd: i32 = raw_audio_fd_result.value;
 
+    var v4l2_capture: CliV4L2Capture = CliV4L2Capture{};
+    if raw_video_fd < 0i32 && v4l2_device != null {
+        const fps: u32 = cli_v4l2_fps_from_frame_duration(video_frame_duration_us);
+        const v4l2_result: !void = cli_v4l2_capture_open(v4l2_device, video_source.width, video_source.height, fps, v4l2_pixfmt, &v4l2_capture);
+        if v4l2_result.error_id != 0 {
+            cli_write_stderr("uya_ffmpeg_direct_sender: failed to start V4L2 capture\n" as &[byte]);
+            close_optional_fd(raw_audio_fd);
+            close_optional_fd(raw_video_fd);
+            ffmpeg_codec_encoder_close(&video_encoder);
+            ffmpeg_codec_encoder_close(&audio_encoder);
+            return error.DirectSenderCliV4L2Failed;
+        }
+    }
+
     const raw_video_storage: &byte = malloc(video_source.i420_bytes) as &byte;
     if raw_video_storage == null {
+        cli_v4l2_capture_close(&v4l2_capture);
         close_optional_fd(raw_audio_fd);
         close_optional_fd(raw_video_fd);
         ffmpeg_codec_encoder_close(&video_encoder);
@@ -1175,6 +2519,7 @@ fn run_live_sender(
     const encoded_video_storage: &byte = malloc(video_source.encoded_bytes) as &byte;
     if encoded_video_storage == null {
         free(raw_video_storage as &void);
+        cli_v4l2_capture_close(&v4l2_capture);
         close_optional_fd(raw_audio_fd);
         close_optional_fd(raw_video_fd);
         ffmpeg_codec_encoder_close(&video_encoder);
@@ -1201,6 +2546,7 @@ fn run_live_sender(
             _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, dtls_ready, true, codec_provider_id, false, false) catch {};
             free(encoded_video_storage as &void);
             free(raw_video_storage as &void);
+            cli_v4l2_capture_close(&v4l2_capture);
             close_optional_fd(raw_audio_fd);
             close_optional_fd(raw_video_fd);
             ffmpeg_codec_encoder_close(&video_encoder);
@@ -1269,13 +2615,15 @@ fn run_live_sender(
                         &runtime,
                         &video_encoder,
                         raw_video_fd,
+                        &v4l2_capture,
                         video_source,
                         raw_video_storage[0:video_source.i420_bytes],
                         encoded_video_storage[0:video_source.encoded_bytes],
                         video_frames_sent,
+                        video_frame_duration_us,
                     );
                     video_frames_sent = video_frames_sent + 1u64;
-                    next_video_us = next_video_us + (CLI_VIDEO_FRAME_DURATION_US as u64);
+                    next_video_us = next_video_us + (video_frame_duration_us as u64);
                 }
                 if now_us >= next_rtcp_us {
                     try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_AUDIO, now_us);
@@ -1290,6 +2638,7 @@ fn run_live_sender(
 
     free(encoded_video_storage as &void);
     free(raw_video_storage as &void);
+    cli_v4l2_capture_close(&v4l2_capture);
     close_optional_fd(raw_audio_fd);
     close_optional_fd(raw_video_fd);
     ffmpeg_codec_encoder_close(&video_encoder);
@@ -1300,14 +2649,23 @@ fn run_live_sender(
 
 export extern fn main(argc: i32, argv: & &byte) i32 {
     var offer_path: &byte = null;
+    var offer_url: &byte = null;
     var media_path: &byte = null;
     var answer_path: &byte = null;
+    var answer_url: &byte = null;
     var diagnostics_path: &byte = null;
     var raw_video_path: &byte = null;
     var raw_audio_path: &byte = null;
+    var v4l2_device: &byte = null;
+    var v4l2_pixfmt: u32 = CLI_DEFAULT_V4L2_PIXFMT;
+    var v4l2_test_frames: u32 = 0u32;
     var video_width: u32 = CLI_DEFAULT_VIDEO_WIDTH;
     var video_height: u32 = CLI_DEFAULT_VIDEO_HEIGHT;
     var media_duration_us: u64 = CLI_LIVE_MEDIA_DURATION_US;
+    var video_frame_duration_us: u32 = CLI_VIDEO_FRAME_DURATION_US;
+    var local_host: &byte = CLI_DEFAULT_LOCAL_HOST;
+    var offer_poll_tries: u32 = CLI_OFFER_POLL_TRIES;
+    var offer_poll_interval_ms: u32 = CLI_OFFER_POLL_INTERVAL_MS;
     var dry_run: bool = false;
     var codec_provider_id: u8 = CODEC_PROVIDER_FFMPEG;
 
@@ -1315,14 +2673,23 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         argc,
         argv,
         &offer_path,
+        &offer_url,
         &media_path,
         &answer_path,
+        &answer_url,
         &diagnostics_path,
         &raw_video_path,
         &raw_audio_path,
+        &v4l2_device,
+        &v4l2_pixfmt,
+        &v4l2_test_frames,
         &video_width,
         &video_height,
         &media_duration_us,
+        &video_frame_duration_us,
+        &local_host,
+        &offer_poll_tries,
+        &offer_poll_interval_ms,
         &dry_run,
         &codec_provider_id,
     );
@@ -1338,11 +2705,28 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
     const video_source: CliVideoSourceConfig = video_source_result.value;
 
+    if v4l2_test_frames > 0u32 {
+        const test_result: !void = cli_run_v4l2_capture_test(v4l2_device, v4l2_pixfmt, &video_source, video_frame_duration_us, v4l2_test_frames);
+        if test_result.error_id != 0 {
+            cli_write_stderr("uya_ffmpeg_direct_sender: V4L2 test capture failed\n" as &[byte]);
+            return 6;
+        }
+        return 0;
+    }
+
+    var local_host_buf: [byte: CLI_MAX_LOCAL_HOST_BYTES] = [];
+    var local_host_len: usize = 0usize;
+    const local_host_result: !void = cstr_copy_bytes(local_host, local_host_buf[0:CLI_MAX_LOCAL_HOST_BYTES], &local_host_len);
+    if local_host_result.error_id != 0 {
+        print_usage();
+        return 2;
+    }
+
     var offer_buf: [byte: CLI_MAX_OFFER_BYTES] = [];
     var offer_len: usize = 0usize;
-    const read_result: !void = read_file_bytes(offer_path, offer_buf[0:CLI_MAX_OFFER_BYTES], &offer_len);
+    const read_result: !void = read_offer_json(offer_path, offer_url, offer_buf[0:CLI_MAX_OFFER_BYTES], &offer_len, offer_poll_tries, offer_poll_interval_ms);
     if read_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to read offer JSON\n" as &[byte]);
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to read HTTP/file offer JSON\n" as &[byte]);
         return 3;
     }
     const offer_result: !void = validate_offer(offer_buf[0:offer_len]);
@@ -1384,7 +2768,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     var answer_sdp: [byte: CLI_MAX_ANSWER_SDP_BYTES] = [];
     const answer_len: !usize = direct_session_write_passive_answer(
         &session_result.value,
-        "127.0.0.1" as &[byte],
+        local_host_buf[0:local_host_len],
         local_udp_port,
         "uyaDirect" as &[byte],
         "uyaDirectPwd012345678901234" as &[byte],
@@ -1398,13 +2782,37 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         }
         return 5;
     }
-    const answer_result: !void = write_answer_json(answer_path, answer_sdp[0:answer_len.value]);
-    if answer_result.error_id != 0 {
-        cli_write_stderr("uya_ffmpeg_direct_sender: failed to write answer JSON\n" as &[byte]);
+    var answer_json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
+    var answer_json_len: usize = 0usize;
+    const build_answer_result: !void = build_answer_json(answer_json[0:CLI_MAX_ANSWER_JSON_BYTES], &answer_json_len, answer_sdp[0:answer_len.value]);
+    if build_answer_result.error_id != 0 {
+        cli_write_stderr("uya_ffmpeg_direct_sender: failed to build answer JSON\n" as &[byte]);
         if !dry_run {
             udp_socket_close(&live_socket);
         }
         return 5;
+    }
+    if answer_path != null {
+        const answer_result: !void = write_answer_json(answer_path, answer_json[0:answer_json_len]);
+        if answer_result.error_id != 0 {
+            cli_write_stderr("uya_ffmpeg_direct_sender: failed to write answer JSON\n" as &[byte]);
+            if !dry_run {
+                udp_socket_close(&live_socket);
+            }
+            return 5;
+        }
+        cli_write_stderr("uya_ffmpeg_direct_sender: answer JSON written\n" as &[byte]);
+    }
+    if answer_url != null {
+        const post_answer_result: !void = post_answer_json(answer_url, answer_json[0:answer_json_len]);
+        if post_answer_result.error_id != 0 {
+            cli_write_stderr("uya_ffmpeg_direct_sender: failed to post answer JSON\n" as &[byte]);
+            if !dry_run {
+                udp_socket_close(&live_socket);
+            }
+            return 5;
+        }
+        cli_write_stderr("uya_ffmpeg_direct_sender: answer JSON posted\n" as &[byte]);
     }
 
     var empty_diagnostics: UyaDirectSenderDiagnostics = uya_direct_sender_diagnostics_make();
@@ -1424,7 +2832,19 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         return 0;
     }
 
-    const live_result: !UyaDirectSenderDiagnostics = run_live_sender(&live_socket, &session_result.value, diagnostics_path, raw_video_path, raw_audio_path, &video_source, media_duration_us, codec_provider_id);
+    const live_result: !UyaDirectSenderDiagnostics = run_live_sender(
+        &live_socket,
+        &session_result.value,
+        diagnostics_path,
+        raw_video_path,
+        raw_audio_path,
+        v4l2_device,
+        v4l2_pixfmt,
+        &video_source,
+        media_duration_us,
+        video_frame_duration_us,
+        codec_provider_id,
+    );
     udp_socket_close(&live_socket);
     if live_result.error_id != 0 {
         cli_write_stderr("uya_ffmpeg_direct_sender: live Chrome send failed before media completed\n" as &[byte]);

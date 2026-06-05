@@ -1,0 +1,6 @@
+/build/
+/answer.json
+/diagnostics.json
+/offer.json
+__pycache__/
+*/__pycache__/

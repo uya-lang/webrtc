@@ -29,11 +29,22 @@ rg -Fq "direct_sender_protect_srtcp_packet" src/webrtc_ffmpeg_direct_sender_main
 rg -Fq "direct_sender_record_rtcp_feedback" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_direct_sender_encode_opus_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_codec_encode_video_i420_to_frame" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "cli_http_request" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "read_offer_json" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "post_answer_json" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "cli_v4l2_capture_read_i420" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--raw-video-i420" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--raw-audio-s16le" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--offer-url" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--answer-url" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--local-host" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--v4l2-device" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--v4l2-format" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--v4l2-test-frames" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--video-width" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--video-height" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq -- "--media-duration-us" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq -- "--video-frame-duration-us" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "read_exact_looping" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "open_optional_read_fd" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "rtp_packetize_encoded_frame_fragment" src/webrtc_ffmpeg_direct_sender_main.uya
@@ -92,6 +103,10 @@ printf '%s\n' 'ffmpeg encoded media placeholder' >"$tmpdir/media.webm"
 	--answer-json "$tmpdir/answer.json" \
 	--diagnostics-json "$tmpdir/diagnostics.json" \
 	--media-duration-us 1000000 \
+	--video-frame-duration-us 66666 \
+	--local-host 127.0.0.1 \
+	--v4l2-device /dev/video0 \
+	--v4l2-format yuyv \
 	--codec ffmpeg \
 	--dry-run
 

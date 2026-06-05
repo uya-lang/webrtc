@@ -1053,6 +1053,8 @@ def start_uya_sender(
             str(media_duration_us),
             "--video-frame-duration-us",
             str(video_frame_duration_us),
+            "--local-host",
+            "127.0.0.1",
         ]
         if sender_executable is None:
             assert stage_src is not None
