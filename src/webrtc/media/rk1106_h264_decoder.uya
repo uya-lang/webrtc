@@ -1,0 +1,115 @@
+// webrtc.media.rk1106_h264_decoder - RK1106/RV1103B H264 hardware decoder boundary
+//
+// The Uya side owns the stable API and status mapping. The board-specific
+// Rockchip MPP calls live behind the C shim used by the RK1106 example build.
+
+export error Rk1106H264DecoderUnavailable;
+export error Rk1106H264DecoderInvalidArgument;
+export error Rk1106H264DecoderInputOpenFailed;
+export error Rk1106H264DecoderOutputOpenFailed;
+export error Rk1106H264DecoderMppOpenFailed;
+export error Rk1106H264DecoderDecodeFailed;
+export error Rk1106H264DecoderUnsupportedFormat;
+export error Rk1106H264DecoderReadFailed;
+export error Rk1106H264DecoderWriteFailed;
+
+export const RK1106_H264_DECODER_STATUS_OK: i32 = 0i32;
+export const RK1106_H264_DECODER_STATUS_UNAVAILABLE: i32 = -1i32;
+export const RK1106_H264_DECODER_STATUS_INVALID_ARGUMENT: i32 = -2i32;
+export const RK1106_H264_DECODER_STATUS_INPUT_OPEN_FAILED: i32 = -3i32;
+export const RK1106_H264_DECODER_STATUS_OUTPUT_OPEN_FAILED: i32 = -4i32;
+export const RK1106_H264_DECODER_STATUS_MPP_OPEN_FAILED: i32 = -5i32;
+export const RK1106_H264_DECODER_STATUS_DECODE_FAILED: i32 = -6i32;
+export const RK1106_H264_DECODER_STATUS_UNSUPPORTED_FORMAT: i32 = -7i32;
+export const RK1106_H264_DECODER_STATUS_READ_FAILED: i32 = -8i32;
+export const RK1106_H264_DECODER_STATUS_WRITE_FAILED: i32 = -9i32;
+
+export const RK1106_H264_DECODER_DEFAULT_CHUNK_BYTES: usize = 65536usize;
+
+export struct Rk1106H264DecoderStats {
+    frames: u32 = 0u32,
+    bytes_read: u64 = 0u64,
+    bytes_written: u64 = 0u64,
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+}
+
+extern fn uya_rk1106_h264_decode_file(
+    input_path: &byte,
+    output_path: &byte,
+    chunk_bytes: usize,
+    max_frames: u32,
+    split_parse: u32,
+    out_frames: &u32,
+    out_bytes_read: &u64,
+    out_bytes_written: &u64,
+    out_width: &u32,
+    out_height: &u32,
+) i32;
+
+fn rk1106_h264_decoder_status_to_error(status: i32) !void {
+    if status == RK1106_H264_DECODER_STATUS_OK {
+        return;
+    }
+    if status == RK1106_H264_DECODER_STATUS_INVALID_ARGUMENT {
+        return error.Rk1106H264DecoderInvalidArgument;
+    }
+    if status == RK1106_H264_DECODER_STATUS_INPUT_OPEN_FAILED {
+        return error.Rk1106H264DecoderInputOpenFailed;
+    }
+    if status == RK1106_H264_DECODER_STATUS_OUTPUT_OPEN_FAILED {
+        return error.Rk1106H264DecoderOutputOpenFailed;
+    }
+    if status == RK1106_H264_DECODER_STATUS_MPP_OPEN_FAILED {
+        return error.Rk1106H264DecoderMppOpenFailed;
+    }
+    if status == RK1106_H264_DECODER_STATUS_DECODE_FAILED {
+        return error.Rk1106H264DecoderDecodeFailed;
+    }
+    if status == RK1106_H264_DECODER_STATUS_UNSUPPORTED_FORMAT {
+        return error.Rk1106H264DecoderUnsupportedFormat;
+    }
+    if status == RK1106_H264_DECODER_STATUS_READ_FAILED {
+        return error.Rk1106H264DecoderReadFailed;
+    }
+    if status == RK1106_H264_DECODER_STATUS_WRITE_FAILED {
+        return error.Rk1106H264DecoderWriteFailed;
+    }
+    return error.Rk1106H264DecoderUnavailable;
+}
+
+export fn rk1106_h264_decode_file(
+    input_path: &byte,
+    output_path: &byte,
+    chunk_bytes: usize,
+    max_frames: u32,
+    split_parse: bool,
+) !Rk1106H264DecoderStats {
+    if input_path == null || output_path == null {
+        return error.Rk1106H264DecoderInvalidArgument;
+    }
+    if chunk_bytes == 0usize {
+        return error.Rk1106H264DecoderInvalidArgument;
+    }
+
+    var stats: Rk1106H264DecoderStats = Rk1106H264DecoderStats{};
+    var split_value: u32 = 0u32;
+    if split_parse {
+        split_value = 1u32;
+    }
+
+    const status: i32 = uya_rk1106_h264_decode_file(
+        input_path,
+        output_path,
+        chunk_bytes,
+        max_frames,
+        split_value,
+        &stats.frames,
+        &stats.bytes_read,
+        &stats.bytes_written,
+        &stats.width,
+        &stats.height,
+    );
+    try rk1106_h264_decoder_status_to_error(status);
+    return stats;
+}

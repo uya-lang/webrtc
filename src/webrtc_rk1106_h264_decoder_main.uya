@@ -1,0 +1,226 @@
+use webrtc.media.rk1106_h264_decoder;
+
+export error Rk1106H264DecoderCliInvalidArgs;
+
+const CLI_MAX_U32: u64 = 0xFFFFFFFFu64;
+const CLI_MAX_USIZE: usize = ~(0 as usize);
+
+extern fn uya_rk1106_h264_write_stderr(message: &byte, len: usize) i32;
+
+fn cli_write_stderr(message: &[byte]) void {
+    if message.len == 0usize {
+        return;
+    }
+    _ = uya_rk1106_h264_write_stderr(&message[0], message.len);
+}
+
+fn cstr_eq(lhs: &byte, rhs: &byte) bool {
+    if lhs == null || rhs == null {
+        return false;
+    }
+    var index: usize = 0usize;
+    while lhs[index] != 0 as byte || rhs[index] != 0 as byte {
+        if lhs[index] != rhs[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn cstr_parse_u64(value: &byte) !u64 {
+    if value == null {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+    var out: u64 = 0u64;
+    var index: usize = 0usize;
+    while value[index] != 0 as byte {
+        const digit: byte = value[index];
+        if digit < ('0' as byte) || digit > ('9' as byte) {
+            return error.Rk1106H264DecoderCliInvalidArgs;
+        }
+        const digit_value: u64 = (digit - ('0' as byte)) as u64;
+        if out > ((~(0 as u64)) - digit_value) / 10u64 {
+            return error.Rk1106H264DecoderCliInvalidArgs;
+        }
+        out = (out * 10u64) + digit_value;
+        index = index + 1usize;
+    }
+    if index == 0usize {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+    return out;
+}
+
+fn cstr_parse_u32_allow_zero(value: &byte) !u32 {
+    const parsed: u64 = try cstr_parse_u64(value);
+    if parsed > CLI_MAX_U32 {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+    return parsed as u32;
+}
+
+fn cstr_parse_usize(value: &byte) !usize {
+    const parsed: u64 = try cstr_parse_u64(value);
+    if parsed == 0u64 {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+    if parsed > CLI_MAX_USIZE as u64 {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+    return parsed as usize;
+}
+
+fn cli_write_u64(value: u64) void {
+    var digits: [byte: 32] = [];
+    var count: usize = 0usize;
+    var remaining: u64 = value;
+    if remaining == 0u64 {
+        cli_write_stderr("0" as &[byte]);
+        return;
+    }
+    while remaining > 0u64 {
+        digits[count] = ('0' as byte) + ((remaining % 10u64) as byte);
+        count = count + 1usize;
+        remaining = remaining / 10u64;
+    }
+    while count > 0usize {
+        count = count - 1usize;
+        _ = uya_rk1106_h264_write_stderr(&digits[count], 1usize);
+    }
+}
+
+fn print_usage() void {
+    cli_write_stderr(
+        "webrtc_rk1106_h264_decoder --input <in.h264> --output <out.nv12> [--chunk-bytes <n>] [--max-frames <n>] [--no-split-parse]\n" as &[byte]
+    );
+}
+
+fn print_decode_error(error_id: i32) void {
+    cli_write_stderr("rk1106_h264_decoder: decode failed: " as &[byte]);
+    if error_id == @error_id(error.Rk1106H264DecoderUnavailable) {
+        cli_write_stderr("decoder unavailable in this build\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderInvalidArgument) {
+        cli_write_stderr("invalid argument\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderInputOpenFailed) {
+        cli_write_stderr("input open failed\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderOutputOpenFailed) {
+        cli_write_stderr("output open failed\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderMppOpenFailed) {
+        cli_write_stderr("mpp open failed\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderDecodeFailed) {
+        cli_write_stderr("decode failed\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderUnsupportedFormat) {
+        cli_write_stderr("unsupported output format\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderReadFailed) {
+        cli_write_stderr("input read failed\n" as &[byte]);
+    } else if error_id == @error_id(error.Rk1106H264DecoderWriteFailed) {
+        cli_write_stderr("output write failed\n" as &[byte]);
+    } else {
+        cli_write_stderr("unknown error\n" as &[byte]);
+    }
+}
+
+fn parse_args(
+    argc: i32,
+    argv: & &byte,
+    input_path: &&byte,
+    output_path: &&byte,
+    chunk_bytes: &usize,
+    max_frames: &u32,
+    split_parse: &bool,
+) !void {
+    if argv == null || input_path == null || output_path == null || chunk_bytes == null || max_frames == null || split_parse == null {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+
+    var index: i32 = 1;
+    while index < argc {
+        const arg: &byte = argv[index];
+        if cstr_eq(arg, "--help\0" as &byte) || cstr_eq(arg, "-h\0" as &byte) {
+            return error.Rk1106H264DecoderCliInvalidArgs;
+        } else if cstr_eq(arg, "--input\0" as &byte) {
+            if index + 1 >= argc {
+                return error.Rk1106H264DecoderCliInvalidArgs;
+            }
+            *input_path = argv[index + 1];
+            index = index + 2;
+        } else if cstr_eq(arg, "--output\0" as &byte) {
+            if index + 1 >= argc {
+                return error.Rk1106H264DecoderCliInvalidArgs;
+            }
+            *output_path = argv[index + 1];
+            index = index + 2;
+        } else if cstr_eq(arg, "--chunk-bytes\0" as &byte) {
+            if index + 1 >= argc {
+                return error.Rk1106H264DecoderCliInvalidArgs;
+            }
+            *chunk_bytes = try cstr_parse_usize(argv[index + 1]);
+            index = index + 2;
+        } else if cstr_eq(arg, "--max-frames\0" as &byte) {
+            if index + 1 >= argc {
+                return error.Rk1106H264DecoderCliInvalidArgs;
+            }
+            *max_frames = try cstr_parse_u32_allow_zero(argv[index + 1]);
+            index = index + 2;
+        } else if cstr_eq(arg, "--no-split-parse\0" as &byte) {
+            *split_parse = false;
+            index = index + 1;
+        } else {
+            return error.Rk1106H264DecoderCliInvalidArgs;
+        }
+    }
+
+    if *input_path == null || *output_path == null {
+        return error.Rk1106H264DecoderCliInvalidArgs;
+    }
+}
+
+export extern fn main(argc: i32, argv: & &byte) i32 {
+    var input_path: &byte = null;
+    var output_path: &byte = null;
+    var chunk_bytes: usize = RK1106_H264_DECODER_DEFAULT_CHUNK_BYTES;
+    var max_frames: u32 = 0u32;
+    var split_parse: bool = true;
+
+    const args_result: !void = parse_args(
+        argc,
+        argv,
+        &input_path,
+        &output_path,
+        &chunk_bytes,
+        &max_frames,
+        &split_parse,
+    );
+    if args_result.error_id != 0 {
+        print_usage();
+        return 2;
+    }
+
+    cli_write_stderr("rk1106_h264_decoder: starting hardware decode\n" as &[byte]);
+    const decode_result: !Rk1106H264DecoderStats = rk1106_h264_decode_file(
+        input_path,
+        output_path,
+        chunk_bytes,
+        max_frames,
+        split_parse,
+    );
+    if decode_result.error_id != 0 {
+        print_decode_error(decode_result.error_id);
+        return 1;
+    }
+
+    const stats: Rk1106H264DecoderStats = decode_result.value;
+    cli_write_stderr("rk1106_h264_decoder: frames=" as &[byte]);
+    cli_write_u64(stats.frames as u64);
+    cli_write_stderr(" bytesRead=" as &[byte]);
+    cli_write_u64(stats.bytes_read);
+    cli_write_stderr(" bytesWritten=" as &[byte]);
+    cli_write_u64(stats.bytes_written);
+    cli_write_stderr(" size=" as &[byte]);
+    cli_write_u64(stats.width as u64);
+    cli_write_stderr("x" as &[byte]);
+    cli_write_u64(stats.height as u64);
+    cli_write_stderr("\n" as &[byte]);
+    return 0;
+}
