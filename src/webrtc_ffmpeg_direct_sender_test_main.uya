@@ -1,5 +1,6 @@
 use libc.printf;
 use webrtc.media.direct_sender;
+use webrtc.media.h264_rtp;
 use webrtc.media.model;
 use webrtc.media.vp8_rtp;
 use webrtc.rtcp.rtcp_packet;
@@ -333,6 +334,105 @@ fn check_vp8_frame_fragment_packetize() i32 {
     return 0i32;
 }
 
+fn check_h264_fu_a_packetize() i32 {
+    var sender_result: !UyaDirectSender = sender_make_with_mtu(28usize);
+    if sender_result.error_id != 0 {
+        return 80i32;
+    }
+    var sender: UyaDirectSender = sender_result.value;
+    sender.config.video_payload_type = CODEC_DEFAULT_PT_H264;
+
+    var h264_nal: [byte: 13] = [
+        0x65 as byte,
+        0x88 as byte, 0x84 as byte, 0x21 as byte, 0xA0 as byte, 0x11 as byte, 0x22 as byte,
+        0x33 as byte, 0x44 as byte, 0x55 as byte, 0x66 as byte, 0x77 as byte, 0x88 as byte,
+    ];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.codec_id = CODEC_ID_H264;
+    frame.payload = h264_nal[0:13];
+    frame.duration_us = 33333u32;
+    frame.sequence_id = 0x01u64;
+    frame.is_keyframe = true;
+    frame.marker = true;
+
+    const max_single: !usize = direct_sender_h264_max_single_nal_payload_bytes(&sender, &frame);
+    const max_fu: !usize = direct_sender_h264_max_fu_a_fragment_payload_bytes(&sender, &frame);
+    if max_single.error_id != 0 || max_single.value != 8usize || max_fu.error_id != 0 || max_fu.value != 6usize {
+        return 81i32;
+    }
+
+    var packet0: [byte: 64] = [];
+    const summary0: !DirectSenderPacket = rtp_packetize_h264_fu_a_fragment(
+        &sender,
+        &frame,
+        h264_nal[0:13],
+        1usize,
+        6usize,
+        true,
+        false,
+        false,
+        true,
+        packet0[0:64],
+    );
+    if summary0.error_id != 0 || summary0.value.marker || summary0.value.sequence_number != 20u16 || summary0.value.timestamp != 900u32 {
+        return 82i32;
+    }
+
+    var packet1: [byte: 64] = [];
+    const summary1: !DirectSenderPacket = rtp_packetize_h264_fu_a_fragment(
+        &sender,
+        &frame,
+        h264_nal[0:13],
+        7usize,
+        6usize,
+        false,
+        true,
+        true,
+        false,
+        packet1[0:64],
+    );
+    if summary1.error_id != 0 || !summary1.value.marker || summary1.value.sequence_number != 21u16 || summary1.value.timestamp != 900u32 {
+        return 83i32;
+    }
+    if sender.video_sender.next_sequence != 22u16 || sender.video_sender.next_timestamp != 3899u32 {
+        return 84i32;
+    }
+    if sender.diagnostics.ffmpeg_encoded_frames != 1u64
+        || sender.diagnostics.rtp_packets != 2u64
+        || sender.diagnostics.video_rtp_packets != 2u64 {
+        return 85i32;
+    }
+
+    const parsed0: !RtpPacket = rtp_packet_parse(packet0[0:summary0.value.rtp_len]);
+    const parsed1: !RtpPacket = rtp_packet_parse(packet1[0:summary1.value.rtp_len]);
+    if parsed0.error_id != 0 || parsed1.error_id != 0 {
+        return 86i32;
+    }
+    const fu0: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(parsed0.value.header.payload);
+    const fu1: !H264RtpFuADescriptor = h264_rtp_fu_a_parse(parsed1.value.header.payload);
+    if fu0.error_id != 0 || fu1.error_id != 0 {
+        return 87i32;
+    }
+    if !fu0.value.start || fu0.value.end || fu0.value.nal_type != 5u8
+        || fu1.value.start || !fu1.value.end || fu1.value.nal_type != 5u8 {
+        return 88i32;
+    }
+
+    var reassembly: H264RtpFuAReassemblyState = h264_rtp_fu_a_reassembly_state_make();
+    var reassembled: [byte: 16] = [];
+    const absorb0: !usize = h264_rtp_fu_a_reassembly_absorb(&reassembly, parsed0.value.header.payload, reassembled[0:16]);
+    const absorb1: !usize = h264_rtp_fu_a_reassembly_absorb(&reassembly, parsed1.value.header.payload, reassembled[0:16]);
+    if absorb0.error_id != 0 || absorb0.value != 0usize || absorb1.error_id != 0 || absorb1.value != 13usize {
+        return 89i32;
+    }
+    if !bytes_equal(reassembled[0:13], h264_nal[0:13]) {
+        return 90i32;
+    }
+
+    return 0i32;
+}
+
 fn check_sender_limits_and_errors() i32 {
     var sender_result: !UyaDirectSender = sender_make();
     if sender_result.error_id != 0 {
@@ -468,6 +568,12 @@ fn main() i32 {
     result = check_vp8_frame_fragment_packetize();
     if result != 0i32 {
         printf("Uya FFmpeg direct sender VP8 fragment tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_h264_fu_a_packetize();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender H264 FU-A tests failed: %d\n", result);
         return 1i32;
     }
 

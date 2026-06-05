@@ -1,4 +1,5 @@
 use libc.printf;
+use webrtc.media.model;
 use webrtc.media.direct_session;
 
 fn bytes_contains_at(haystack: &[byte], offset: usize, needle: &[byte]) bool {
@@ -90,10 +91,52 @@ fn check_chrome_offer_parse_and_passive_answer() i32 {
     return 0i32;
 }
 
+fn check_chrome_h264_offer_parse_and_passive_answer() i32 {
+    const offer_sdp: &[byte] = "v=0\r\no=- 548392 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+
+    const parsed: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_video_codec(offer_sdp, CODEC_ID_H264);
+    if parsed.error_id != 0 {
+        return 30i32;
+    }
+    if parsed.value.audio.payload_type != 111u8 || parsed.value.video.payload_type != 102u8 || parsed.value.video.codec_id != CODEC_ID_H264 {
+        return 31i32;
+    }
+
+    var answer: [byte: 4096] = [];
+    const written: !usize = direct_session_write_passive_answer(
+        &parsed.value,
+        "127.0.0.1" as &[byte],
+        50556u16,
+        "uyaDirIce" as &[byte],
+        "uyaDirIcePwd012345678901234" as &[byte],
+        "AA:BB:CC:DD" as &[byte],
+        answer[0:4096],
+    );
+    if written.error_id != 0 {
+        return 32i32;
+    }
+    const answer_sdp: &[byte] = answer[0:written.value];
+    if !bytes_contains(answer_sdp, "m=video 9 UDP/TLS/RTP/SAVPF 102" as &[byte]) {
+        return 33i32;
+    }
+    if !bytes_contains(answer_sdp, "a=rtpmap:102 H264/90000" as &[byte]) {
+        return 34i32;
+    }
+    if !bytes_contains(answer_sdp, "a=fmtp:102 packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1" as &[byte]) {
+        return 35i32;
+    }
+    return 0i32;
+}
+
 fn main() i32 {
     const result: i32 = check_chrome_offer_parse_and_passive_answer();
     if result != 0i32 {
         printf("Uya FFmpeg direct sender pure session tests failed: %d\n", result);
+        return 1i32;
+    }
+    const h264_result: i32 = check_chrome_h264_offer_parse_and_passive_answer();
+    if h264_result != 0i32 {
+        printf("Uya FFmpeg direct sender H264 session tests failed: %d\n", h264_result);
         return 1i32;
     }
     printf("Uya FFmpeg direct sender pure session tests passed\n");
