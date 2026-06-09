@@ -65,7 +65,7 @@
 #define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-20260609m"
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-fpslog-aiqfps-20260609o"
 
 #define ENABLE_SMART_IR
 
@@ -387,6 +387,7 @@ static int g_fastboot_logged_open_error = 0;
 static int g_fastboot_logged_short_write = 0;
 static int g_fastboot_bitrate_ramp_done = 0;
 static unsigned int g_fastboot_output_write_count = 0;
+static unsigned int g_fastboot_last_output_heartbeat_count = 0;
 static RK_U64 g_fastboot_last_output_heartbeat_us = 0;
 
 static bool fastboot_sub_channel_enabled(void) {
@@ -547,13 +548,21 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 			}
 			if (g_fastboot_last_output_heartbeat_us == 0) {
 				g_fastboot_last_output_heartbeat_us = now_us;
+				g_fastboot_last_output_heartbeat_count = g_fastboot_output_write_count;
 			} else if (now_us > g_fastboot_last_output_heartbeat_us &&
 			           now_us - g_fastboot_last_output_heartbeat_us >= FASTBOOT_FIFO_HEARTBEAT_US) {
+				RK_U64 elapsed_us = now_us - g_fastboot_last_output_heartbeat_us;
+				unsigned int delta_count =
+				    g_fastboot_output_write_count - g_fastboot_last_output_heartbeat_count;
+				unsigned long long fps_x100 =
+				    ((unsigned long long)delta_count * 100000000ULL) / (unsigned long long)elapsed_us;
 				fprintf(stderr,
-				        "fastboot_h264_fifo: heartbeat channel=%d count=%u last_bytes=%zu pts=%llu\n",
-				        chn, g_fastboot_output_write_count, wrote, stFrame.pstPack->u64PTS);
+				        "fastboot_h264_fifo: heartbeat channel=%d count=%u fps=%llu.%02llu last_bytes=%zu pts=%llu\n",
+				        chn, g_fastboot_output_write_count, fps_x100 / 100ULL,
+				        fps_x100 % 100ULL, wrote, stFrame.pstPack->u64PTS);
 				fflush(stderr);
 				g_fastboot_last_output_heartbeat_us = now_us;
+				g_fastboot_last_output_heartbeat_count = g_fastboot_output_write_count;
 			}
 			if (wrote != stFrame.pstPack->u32Len && !g_fastboot_logged_short_write) {
 				fprintf(stderr,
@@ -1526,6 +1535,18 @@ static int aiq_run(struct meta_info *handle) {
 	if (ret < 0)
 		fastboot_demo_err("rk_aiq_uapi2_sysctl_start failed\n");
 	klog("aiq start\n");
+
+	if (g_fastboot_out_path && g_fastboot_output_fps > 0) {
+		int fps_ret;
+		frameRateInfo_t frame_rate_info;
+		memset(&frame_rate_info, 0, sizeof(frame_rate_info));
+		frame_rate_info.mode = OP_MANUAL;
+		frame_rate_info.fps = g_fastboot_output_fps;
+		fps_ret = dlsym_rk_aiq_uapi2_setFrameRate(g_aiq_ctx, frame_rate_info);
+		fprintf(stderr, "fastboot_h264_fifo: aiq set frame rate fps=%d ret=%d\n",
+		        g_fastboot_output_fps, fps_ret);
+		fflush(stderr);
+	}
 
 	return ret;
 }
