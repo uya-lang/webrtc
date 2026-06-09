@@ -2,6 +2,7 @@
 // 模块路径：src/webrtc/net/udp.uya → use webrtc.net.udp;
 
 use libc.syscall;
+use std;
 use std.http.server.fill_sockaddr_loopback_16;
 use std.http.server.read_port_from_sockaddr_16;
 use webrtc.net.backend;
@@ -16,6 +17,22 @@ export const UDP_SOCKET_FLAG_NONBLOCKING: u32 = 2u32;
 // Linux x86_64: recvmmsg(2) / sendmmsg(2) syscall numbers.
 export const SYS_recvmmsg: i64 = 299;
 export const SYS_sendmmsg: i64 = 307;
+
+fn udp_sys_sendto_number() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 290i64;
+    }, {
+        return SYS_sendto;
+    })
+}
+
+fn udp_sys_recvfrom_number() i64 {
+    std.cfg(std.target_arch == .ta_arm, {
+        return 292i64;
+    }, {
+        return SYS_recvfrom;
+    })
+}
 
 export error UdpSocketConfigInvalid;
 export error UdpSocketClosed;
@@ -81,7 +98,7 @@ export extern "libc" fn sys_udp_recvfrom(
     addr: &byte,
     addrlen: &u32,
 ) !isize {
-    return @syscall(SYS_recvfrom, sockfd as i64, buf as i64, len as i64, flags as i64, addr as i64, addrlen as i64) as! isize;
+    return @syscall(udp_sys_recvfrom_number(), sockfd as i64, buf as i64, len as i64, flags as i64, addr as i64, addrlen as i64) as! isize;
 }
 
 export extern "libc" fn sys_udp_sendto(
@@ -91,7 +108,7 @@ export extern "libc" fn sys_udp_sendto(
     addr: &[byte],
     addrlen: u32,
 ) !isize {
-    return @syscall(SYS_sendto, sockfd as i64, &buf[0] as i64, buf.len as i64, flags as i64, &addr[0] as i64, addrlen as i64) as! isize;
+    return @syscall(udp_sys_sendto_number(), sockfd as i64, &buf[0] as i64, buf.len as i64, flags as i64, &addr[0] as i64, addrlen as i64) as! isize;
 }
 
 export fn sys_udp_recvmmsg(sockfd: i32, msgs: &UdpMMsgHdr, vlen: u32, flags: u32) !i32 {
@@ -135,6 +152,23 @@ fn udp_socket_apply_reuse(socket_fd: i32, reuse_port: bool) void {
     }
 }
 
+fn udp_htons_host_to_be(port: u16) u16 {
+    return ((port & (0xFF as u16)) << 8) | ((port >> 8) & (0xFF as u16));
+}
+
+fn udp_fill_sockaddr_any_16(port: u16, out: &byte) void {
+    var index: usize = 0usize;
+    while index < UDP_SOCKADDR_BYTES {
+        out[index] = 0 as byte;
+        index = index + 1usize;
+    }
+    out[0] = 2 as byte;
+    out[1] = 0 as byte;
+    const network_port: u16 = udp_htons_host_to_be(port);
+    out[2] = (network_port & (0xFF as u16)) as byte;
+    out[3] = ((network_port >> 8) & (0xFF as u16)) as byte;
+}
+
 fn udp_socket_refresh_local_port(socket: &UdpSocket, requested_port: u16) void {
     if requested_port != 0u16 {
         socket.local_port = requested_port;
@@ -160,6 +194,14 @@ export fn udp_socket_bind_loopback(socket: &UdpSocket, port: u16) !void {
     try udp_socket_validate(socket);
     var addr: [byte: UDP_SOCKADDR_BYTES] = [];
     fill_sockaddr_loopback_16(port, &addr[0] as &byte);
+    _ = try sys_bind(socket.fd, &addr[0] as &void, UDP_SOCKADDR_BYTES as u32);
+    udp_socket_refresh_local_port(socket, port);
+}
+
+export fn udp_socket_bind_any(socket: &UdpSocket, port: u16) !void {
+    try udp_socket_validate(socket);
+    var addr: [byte: UDP_SOCKADDR_BYTES] = [];
+    udp_fill_sockaddr_any_16(port, &addr[0] as &byte);
     _ = try sys_bind(socket.fd, &addr[0] as &void, UDP_SOCKADDR_BYTES as u32);
     udp_socket_refresh_local_port(socket, port);
 }
@@ -191,7 +233,7 @@ export fn udp_socket_open(config: UdpSocketConfig) !UdpSocket {
         backend_kind: backend_desc.kind,
     };
 
-    try udp_socket_bind_loopback(&socket_local, config.bind_port);
+    try udp_socket_bind_any(&socket_local, config.bind_port);
     _ = try udp_socket_connect_optional(&socket_local, config.connect_port);
     if config.nonblocking {
         try udp_socket_set_nonblocking(&socket_local);

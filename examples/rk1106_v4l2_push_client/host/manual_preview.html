@@ -109,6 +109,8 @@
     <button id="closePeer" class="secondary">Close</button>
   </div>
   <div id="status" class="status">idle</div>
+  <label for="logBox">debug log</label>
+  <textarea id="logBox" spellcheck="false" readonly></textarea>
   <section class="grid">
     <div class="panel">
       <label for="offerBox">offer JSON</label>
@@ -129,6 +131,7 @@ const offerBox = document.getElementById('offerBox');
 const answerBox = document.getElementById('answerBox');
 const remoteVideo = document.getElementById('remoteVideo');
 const signalUrl = document.getElementById('signalUrl');
+const logBox = document.getElementById('logBox');
 remoteVideo.muted = true;
 
 if (location.protocol === 'http:' || location.protocol === 'https:') {
@@ -137,6 +140,18 @@ if (location.protocol === 'http:' || location.protocol === 'https:') {
 
 function setStatus(text) {
   statusEl.textContent = text;
+  appendLog(`status: ${text}`);
+}
+
+function appendLog(text) {
+  const line = `[${new Date().toISOString()}] ${text}`;
+  if (logBox.value) {
+    logBox.value += `\n${line}`;
+  } else {
+    logBox.value = line;
+  }
+  logBox.scrollTop = logBox.scrollHeight;
+  console.log(line);
 }
 
 function sleep(ms) {
@@ -210,6 +225,10 @@ async function createOffer() {
   const peer = pc;
   peer.addEventListener('connectionstatechange', () => setStatus(`connection: ${peer.connectionState}`));
   peer.addEventListener('iceconnectionstatechange', () => setStatus(`ice: ${peer.iceConnectionState}`));
+  peer.addEventListener('icegatheringstatechange', () => appendLog(`iceGatheringState=${peer.iceGatheringState}`));
+  peer.addEventListener('signalingstatechange', () => appendLog(`signalingState=${peer.signalingState}`));
+  peer.addEventListener('icecandidate', (event) => appendLog(`icecandidate=${event.candidate ? event.candidate.candidate : "<null>"}`));
+  peer.addEventListener('track', (event) => appendLog(`track kind=${event.track ? event.track.kind : "unknown"}`));
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
   await waitForIceGatheringComplete(peer);
@@ -219,6 +238,7 @@ async function createOffer() {
 
 async function publishOffer() {
   if (!offerBox.value.trim()) await createOffer();
+  appendLog(`publishing offer bytes=${offerBox.value.length}`);
   await postSignal('offer', offerBox.value);
   setStatus('offer published');
 }
@@ -229,7 +249,9 @@ async function setAnswerFromBox() {
     return;
   }
   const answer = JSON.parse(answerBox.value);
+  appendLog(`answer fetched type=${answer.type} sdpLen=${answer.sdp ? answer.sdp.length : 0}`);
   await pc.setRemoteDescription(answer);
+  appendLog(`setRemoteDescription ok currentRemoteDescription=${pc.currentRemoteDescription ? pc.currentRemoteDescription.type : "null"}`);
   setStatus('answer set');
   await playRemoteVideo();
 }
@@ -244,6 +266,7 @@ async function waitForAnswer() {
   for (let i = 0; i < 240 && token === pollToken; i++) {
     const answer = await getSignal('answer');
     if (answer) {
+      appendLog(`answer poll hit keys=${Object.keys(answer).join(",")}`);
       answerBox.value = JSON.stringify(answer, null, 2);
       await setAnswerFromBox();
       return;

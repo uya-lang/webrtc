@@ -27,6 +27,7 @@ rg -q "export const UDP_IO_BATCH_MAX" src/webrtc/net/udp.uya
 rg -q "SYS_recvmmsg" src/webrtc/net/udp.uya
 rg -q "SYS_sendmmsg" src/webrtc/net/udp.uya
 rg -q "export fn udp_socket_open" src/webrtc/net/udp.uya
+rg -q "export fn udp_socket_bind_any" src/webrtc/net/udp.uya
 rg -q "export fn udp_socket_bind_loopback" src/webrtc/net/udp.uya
 rg -q "export fn udp_socket_connect_optional" src/webrtc/net/udp.uya
 rg -q "export fn udp_socket_set_nonblocking" src/webrtc/net/udp.uya

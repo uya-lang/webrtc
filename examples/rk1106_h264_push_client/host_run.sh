@@ -12,6 +12,7 @@ PIXEL_FORMAT=${PIXEL_FORMAT:-yuyv}
 DURATION_US=${DURATION_US:-60000000}
 FRAME_DURATION_US=${FRAME_DURATION_US:-}
 WORKDIR=${WORKDIR:-/tmp/rk1106-webrtc-host-push}
+MEDIA_PATH=${MEDIA_PATH:-"$WORKDIR/host_testsrc.h264"}
 LOCAL_HOST=${LOCAL_HOST:-127.0.0.1}
 SIGNAL_BASE_URL=${SIGNAL_BASE_URL:-http://127.0.0.1:8080/api}
 OFFER_URL_WAS_SET=${OFFER_URL+x}
@@ -69,12 +70,32 @@ print_runtime_logs() {
 mkdir -p "$WORKDIR"
 rm -f "$ANSWER_JSON" "$DIAGNOSTICS_JSON" "$SENDER_LOG"
 
-echo "starting host RK1106 V4L2 H264 WebRTC sender: $VIDEO_DEV ${WIDTH}x${HEIGHT} $PIXEL_FORMAT ${FPS}fps, local candidate $LOCAL_HOST" >&2
+if [ ! -s "$MEDIA_PATH" ]; then
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        echo "missing host H264 media: $MEDIA_PATH" >&2
+        echo "Set MEDIA_PATH to an Annex-B H264 file, or install ffmpeg for generated test media." >&2
+        exit 2
+    fi
+    duration_seconds=$(((DURATION_US + 999999) / 1000000))
+    if [ "$duration_seconds" -lt 1 ]; then
+        duration_seconds=1
+    fi
+    ffmpeg -hide_banner -loglevel error -y \
+        -f lavfi -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
+        -t "$duration_seconds" \
+        -c:v libx264 -preset ultrafast -tune zerolatency \
+        -pix_fmt yuv420p -profile:v baseline \
+        -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
+        -f h264 "$MEDIA_PATH"
+fi
+
+echo "starting host RK1106 Annex-B H264 WebRTC sender: $MEDIA_PATH ${WIDTH}x${HEIGHT} ${FPS}fps, local candidate $LOCAL_HOST" >&2
 set -- \
     --offer-json "$OFFER_JSON" \
     --answer-json "$ANSWER_JSON" \
     --diagnostics-json "$DIAGNOSTICS_JSON" \
     --codec uya \
+    --media "$MEDIA_PATH" \
     --v4l2-device "$VIDEO_DEV" \
     --v4l2-format "$PIXEL_FORMAT" \
     --video-width "$WIDTH" \

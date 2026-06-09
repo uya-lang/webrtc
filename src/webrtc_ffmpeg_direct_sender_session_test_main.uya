@@ -92,7 +92,7 @@ fn check_chrome_offer_parse_and_passive_answer() i32 {
 }
 
 fn check_chrome_h264_offer_parse_and_passive_answer() i32 {
-    const offer_sdp: &[byte] = "v=0\r\no=- 548392 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+    const offer_sdp: &[byte] = "v=0\r\no=- 548392 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
 
     const parsed: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_video_codec(offer_sdp, CODEC_ID_H264);
     if parsed.error_id != 0 {
@@ -122,7 +122,7 @@ fn check_chrome_h264_offer_parse_and_passive_answer() i32 {
     if !bytes_contains(answer_sdp, "a=rtpmap:102 H264/90000" as &[byte]) {
         return 34i32;
     }
-    if !bytes_contains(answer_sdp, "a=fmtp:102 packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1" as &[byte]) {
+    if !bytes_contains(answer_sdp, "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f" as &[byte]) {
         return 35i32;
     }
     return 0i32;

@@ -25,6 +25,7 @@ export struct DirectSessionMedia {
     ice_pwd: &[byte] = [],
     codec_id: u16 = CODEC_ID_UNKNOWN,
     payload_type: u8 = 0u8,
+    fmtp: &[byte] = [],
     remote_candidate: DirectSessionCandidate = DirectSessionCandidate{},
 }
 
@@ -269,6 +270,24 @@ fn direct_session_parse_rtpmap(media: &DirectSessionMedia, value: &[byte], prefe
     }
 }
 
+fn direct_session_parse_fmtp(media: &DirectSessionMedia, value: &[byte]) !void {
+    if media == null || media.payload_type == 0u8 {
+        return;
+    }
+    var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
+    const payload_token: &[byte] = try direct_session_token_cursor_next(&cursor);
+    const payload_type: u8 = try direct_session_parse_decimal_u8(payload_token);
+    if payload_type != media.payload_type {
+        return;
+    }
+    while cursor.cursor < value.len && value[cursor.cursor] == (' ' as byte) {
+        cursor.cursor = cursor.cursor + 1usize;
+    }
+    if cursor.cursor < value.len {
+        media.fmtp = value[cursor.cursor:value.len - cursor.cursor];
+    }
+}
+
 fn direct_session_parse_extmap(media: &DirectSessionMedia, value: &[byte]) !void {
     if media == null {
         return;
@@ -303,6 +322,10 @@ fn direct_session_parse_attribute(media: &DirectSessionMedia, value: &[byte], pr
     }
     if direct_session_starts_with(value, "rtpmap:" as &[byte]) {
         try direct_session_parse_rtpmap(media, value[7:value.len - 7], preferred_video_codec_id);
+        return;
+    }
+    if direct_session_starts_with(value, "fmtp:" as &[byte]) {
+        try direct_session_parse_fmtp(media, value[5:value.len - 5]);
         return;
     }
     if direct_session_starts_with(value, "extmap:" as &[byte]) {
@@ -468,8 +491,9 @@ export fn direct_session_write_passive_answer(
 
     var cursor: usize = 0usize;
     try direct_session_answer_append_line(out, &cursor, "v=0" as &[byte]);
-    try direct_session_answer_append_line(out, &cursor, "o=- 721633 2 IN IP4 127.0.0.1" as &[byte]);
-    try direct_session_answer_append_line(out, &cursor, "s=Uya FFmpeg Direct Sender" as &[byte]);
+    try direct_session_answer_append(out, &cursor, "o=- 721633 2 IN IP4 " as &[byte]);
+    try direct_session_answer_append_line(out, &cursor, local_host);
+    try direct_session_answer_append_line(out, &cursor, "s=Uya Direct Sender" as &[byte]);
     try direct_session_answer_append_line(out, &cursor, "t=0 0" as &[byte]);
     try direct_session_answer_append(out, &cursor, "a=group:BUNDLE " as &[byte]);
     try direct_session_answer_append(out, &cursor, offer.audio.mid);
@@ -502,7 +526,12 @@ export fn direct_session_write_passive_answer(
         try direct_session_answer_append_line(out, &cursor, " H264/90000" as &[byte]);
         try direct_session_answer_append(out, &cursor, "a=fmtp:" as &[byte]);
         try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
-        try direct_session_answer_append_line(out, &cursor, " packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1" as &[byte]);
+        try direct_session_answer_append_byte(out, &cursor, ' ' as byte);
+        if offer.video.fmtp.len > 0usize {
+            try direct_session_answer_append_line(out, &cursor, offer.video.fmtp);
+        } else {
+            try direct_session_answer_append_line(out, &cursor, "packetization-mode=1;profile-level-id=42e01f;level-asymmetry-allowed=1" as &[byte]);
+        }
     } else {
         try direct_session_answer_append_line(out, &cursor, " VP8/90000" as &[byte]);
     }

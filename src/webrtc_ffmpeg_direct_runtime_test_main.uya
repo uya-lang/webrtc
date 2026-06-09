@@ -97,6 +97,50 @@ fn test_write_handshake_record(
     return dtls_record_write(&header, payload[0:payload_len], out);
 }
 
+fn test_write_handshake_fragment_record(
+    handshake_type: u8,
+    message_sequence: u16,
+    body: &[byte],
+    fragment_offset: usize,
+    fragment_length: usize,
+    record_sequence: u64,
+    out: &[byte],
+) !usize {
+    const body_len: usize = body.len;
+    if fragment_offset + fragment_length > body_len || fragment_length > 512usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    var payload: [byte: 640] = [];
+    if DTLS_HANDSHAKE_HEADER_BYTES + fragment_length > 640usize {
+        return error.DirectRuntimeOutputTooSmall;
+    }
+    payload[0] = handshake_type as byte;
+    payload[1] = ((body_len >> 16i32) & 0xffusize) as byte;
+    payload[2] = ((body_len >> 8i32) & 0xffusize) as byte;
+    payload[3] = (body_len & 0xffusize) as byte;
+    try write_be_u16(payload[4:2], message_sequence);
+    payload[6] = ((fragment_offset >> 16i32) & 0xffusize) as byte;
+    payload[7] = ((fragment_offset >> 8i32) & 0xffusize) as byte;
+    payload[8] = (fragment_offset & 0xffusize) as byte;
+    payload[9] = ((fragment_length >> 16i32) & 0xffusize) as byte;
+    payload[10] = ((fragment_length >> 8i32) & 0xffusize) as byte;
+    payload[11] = (fragment_length & 0xffusize) as byte;
+    var index: usize = 0usize;
+    while index < fragment_length {
+        payload[DTLS_HANDSHAKE_HEADER_BYTES + index] = body[fragment_offset + index];
+        index = index + 1usize;
+    }
+    const payload_len: usize = DTLS_HANDSHAKE_HEADER_BYTES + fragment_length;
+    var header: DtlsRecordHeader = DtlsRecordHeader{
+        content_type: DTLS_CONTENT_TYPE_HANDSHAKE,
+        version: WEBRTC_DTLS_VERSION_1_2,
+        epoch: 0u16,
+        sequence_number: record_sequence,
+        length: payload_len as u16,
+    };
+    return dtls_record_write(&header, payload[0:payload_len], out);
+}
+
 fn test_write_ccs_record(record_sequence: u64, out: &[byte]) !usize {
     var payload: [byte: 1] = [1 as byte];
     var header: DtlsRecordHeader = DtlsRecordHeader{
@@ -583,6 +627,158 @@ fn check_direct_runtime_dtls_handshake() i32 {
     return 0i32;
 }
 
+fn check_direct_runtime_fragmented_client_hello() i32 {
+    var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [
+        0x20 as byte, 0x21 as byte, 0x22 as byte, 0x23 as byte, 0x24 as byte, 0x25 as byte, 0x26 as byte, 0x27 as byte,
+        0x28 as byte, 0x29 as byte, 0x2a as byte, 0x2b as byte, 0x2c as byte, 0x2d as byte, 0x2e as byte, 0x2f as byte,
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte, 0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte, 0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var server_private: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x02 as byte, 0x03 as byte, 0x04 as byte, 0x05 as byte,
+        0x06 as byte, 0x07 as byte, 0x08 as byte, 0x09 as byte,
+        0x0a as byte, 0x0b as byte, 0x0c as byte, 0x0d as byte,
+        0x0e as byte, 0x0f as byte, 0x10 as byte, 0x11 as byte,
+        0x12 as byte, 0x13 as byte, 0x14 as byte, 0x15 as byte,
+        0x16 as byte, 0x17 as byte, 0x18 as byte, 0x19 as byte,
+        0x1a as byte, 0x1b as byte, 0x1c as byte, 0x1d as byte,
+        0x1e as byte, 0x1f as byte, 0x20 as byte, 0x21 as byte,
+    ];
+    var signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [
+        0x03 as byte, 0x04 as byte, 0x05 as byte, 0x06 as byte,
+        0x07 as byte, 0x08 as byte, 0x09 as byte, 0x0a as byte,
+        0x0b as byte, 0x0c as byte, 0x0d as byte, 0x0e as byte,
+        0x0f as byte, 0x10 as byte, 0x11 as byte, 0x12 as byte,
+        0x13 as byte, 0x14 as byte, 0x15 as byte, 0x16 as byte,
+        0x17 as byte, 0x18 as byte, 0x19 as byte, 0x1a as byte,
+        0x1b as byte, 0x1c as byte, 0x1d as byte, 0x1e as byte,
+        0x1f as byte, 0x20 as byte, 0x21 as byte, 0x22 as byte,
+    ];
+    var runtime: DirectRuntime = direct_runtime_make();
+    if direct_runtime_init_with_entropy(
+        &runtime,
+        server_random[0:DTLS_HELLO_RANDOM_BYTES],
+        server_private[0:CRYPTO_P256_FIELD_BYTES],
+        signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        0x41554431u32,
+        0x56494431u32,
+    ).error_id != 0 {
+        return 89i32;
+    }
+
+    var client_hello_body: [byte: 64] = [];
+    const client_hello_len: !usize = test_copy_client_hello_body(client_hello_body[0:64]);
+    if client_hello_len.error_id != 0 {
+        return 90i32;
+    }
+    var first_fragment: [byte: 128] = [];
+    const first_fragment_len: !usize = test_write_handshake_fragment_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        0u16,
+        client_hello_body[0:client_hello_len.value],
+        0usize,
+        20usize,
+        0u64,
+        first_fragment[0:128],
+    );
+    if first_fragment_len.error_id != 0 {
+        return 91i32;
+    }
+    var second_fragment: [byte: 128] = [];
+    const second_fragment_len: !usize = test_write_handshake_fragment_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        0u16,
+        client_hello_body[0:client_hello_len.value],
+        20usize,
+        client_hello_len.value - 20usize,
+        1u64,
+        second_fragment[0:128],
+    );
+    if second_fragment_len.error_id != 0 {
+        return 92i32;
+    }
+
+    var out: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
+    const first_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        first_fragment[0:first_fragment_len.value],
+        out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if first_out.error_id != 0
+        || first_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_NONE
+        || first_out.value.bytes_written != 0usize
+        || runtime.hello_verify_sent {
+        return 93i32;
+    }
+    const second_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        second_fragment[0:second_fragment_len.value],
+        out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if second_out.error_id != 0
+        || second_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || second_out.value.bytes_written == 0usize
+        || !runtime.hello_verify_sent
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_NEW {
+        return 94i32;
+    }
+
+    var cookie_body: [byte: 80] = [];
+    const cookie_len: !usize = test_copy_client_hello_body_with_cookie(cookie_body[0:80]);
+    if cookie_len.error_id != 0 {
+        return 95i32;
+    }
+    const cookie_split: usize = 25usize;
+    const cookie_first_len: !usize = test_write_handshake_fragment_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        1u16,
+        cookie_body[0:cookie_len.value],
+        0usize,
+        cookie_split,
+        2u64,
+        first_fragment[0:128],
+    );
+    if cookie_first_len.error_id != 0 {
+        return 96i32;
+    }
+    const cookie_second_len: !usize = test_write_handshake_fragment_record(
+        DTLS_HANDSHAKE_TYPE_CLIENT_HELLO,
+        1u16,
+        cookie_body[0:cookie_len.value],
+        cookie_split,
+        cookie_len.value - cookie_split,
+        3u64,
+        second_fragment[0:128],
+    );
+    if cookie_second_len.error_id != 0 {
+        return 97i32;
+    }
+
+    const cookie_first_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        first_fragment[0:cookie_first_len.value],
+        out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if cookie_first_out.error_id != 0
+        || cookie_first_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_NONE
+        || cookie_first_out.value.bytes_written != 0usize {
+        return 98i32;
+    }
+    const cookie_second_out: !DirectRuntimeOutput = direct_runtime_process_dtls_datagram(
+        &runtime,
+        second_fragment[0:cookie_second_len.value],
+        out[0:DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES],
+    );
+    if cookie_second_out.error_id != 0
+        || cookie_second_out.value.kind != DIRECT_RUNTIME_OUTPUT_KIND_DTLS
+        || cookie_second_out.value.bytes_written == 0usize
+        || runtime.dtls_state != DIRECT_RUNTIME_DTLS_STATE_WAIT_CLIENT_FLIGHT
+        || runtime.selected_srtp_profile != DTLS_SRTP_PROFILE_AES128_CM_HMAC_SHA1_80 {
+        return 99i32;
+    }
+    return 0i32;
+}
+
 fn check_direct_runtime_srtcp_feedback() i32 {
     var runtime: DirectRuntime = direct_runtime_make();
     runtime.audio_ssrc = 0x41554431u32;
@@ -680,6 +876,12 @@ fn main() i32 {
     result = check_direct_runtime_dtls_handshake();
     if result != 0i32 {
         printf("Uya FFmpeg direct runtime DTLS handshake tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_direct_runtime_fragmented_client_hello();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct runtime fragmented ClientHello tests failed: %d\n", result);
         return 1i32;
     }
 

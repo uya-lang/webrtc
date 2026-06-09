@@ -1,0 +1,20 @@
+/*
+ * The Uya single-file C99 runtime bundles its own implementations of a large
+ * part of libc (malloc/free, stdio, string, math, pthread_create, ...) and the
+ * linker would otherwise export all of them into the executable's dynamic
+ * symbol table. Those exports then interpose the board's uClibc for every
+ * dlopened shared library too — notably librockchip_mpp. libmpp ends up calling
+ * the Uya versions, some of which are incomplete or deliberately stubbed (e.g.
+ * pthread_create is patched to fail, malloc/free use a private mmap heap). That
+ * breaks libmpp's worker threads and heap, so VCODEC_CHAN_CREATE receives
+ * garbage and the encoder channel fails with EFAULT / kernel attr mismatches.
+ *
+ * This executable only dlopens libmpp; it never needs to provide symbols to it.
+ * Make every symbol local so nothing is exported: the Uya program keeps using
+ * its own libc (its internal calls bind to the local definitions), while libmpp
+ * resolves malloc, pthread_create, etc. from the system uClibc as intended.
+ */
+{
+  local:
+    *;
+};

@@ -12,10 +12,7 @@ The WebRTC signaling, ICE-lite/STUN, DTLS/SRTP, RTCP sender report, V4L2 mmap
 capture, and H264 RTP packetization live in Uya. The Rockchip-specific H264
 encoder is isolated in `src/rk1106_h264_encoder_shim.c`.
 
-The board build links the shim against RK MPP. The `host` build uses the same
-Uya WebRTC sender and V4L2 path, but starts the local `ffmpeg` CLI as a fallback
-H264 encoder so the browser pipeline can be validated before copying to the
-board.
+The board build now uses a Rockchip MPI/rockit-backed VI + VENC path closer to `fastboot_demo`, while keeping the existing Uya WebRTC sender above it. The `host` build still uses the same Uya WebRTC sender and starts the local `ffmpeg` CLI as a fallback H264 encoder so the browser pipeline can be validated before copying to the board.
 
 ## Build
 
@@ -44,6 +41,8 @@ Copy it to the board:
 ```sh
 scp -r examples/rk1106_h264_push_client/build/rk1106-h264-push-client root@BOARD_IP:/userdata/
 ```
+
+Copy the whole directory, not only `rk1106_h264_sender`; `board_run.sh` and the host helper files are part of the packaged workflow. The sender now follows the SDK-style direct MPP link path instead of runtime `dlopen` fallback logic.
 
 ## Run
 
@@ -87,8 +86,8 @@ You can also run the binary directly:
 ./rk1106_h264_sender \
     --offer-url http://192.168.3.8:8080/offer \
     --answer-url http://192.168.3.8:8080/answer \
-    --answer-json /tmp/answer.json \
-    --diagnostics-json /tmp/diagnostics.json \
+    --answer-json /userdata/webrtc/answer.json \
+    --diagnostics-json /userdata/webrtc/diagnostics.json \
     --v4l2-device /dev/video7 \
     --v4l2-format nv12 \
     --video-width 320 \
@@ -121,3 +120,70 @@ rk1106_h264_sender: first H264 frame sent
 
 If the sender exits early, `board_run.sh` prints the tail of `sender.log` and
 `diagnostics.json`.
+
+
+## FIFO 方式
+
+推荐使用 FIFO/文件输出，避免日志污染 H264 码流。
+
+板端示例：
+
+```sh
+mkfifo /tmp/fastboot.h264
+FASTBOOT_H264_OUT=/tmp/fastboot.h264 ./fastboot_h264_fifo &
+./rk1106_h264_sender --media /tmp/fastboot.h264
+```
+
+如果只想验证 WebRTC/H264 协议链路，可以先复制一个 Annex-B `.h264`
+文件到板子，跳过 fastboot/VI/VENC：
+
+```sh
+cd /userdata/rk1106-h264-push-client
+MEDIA_PATH=/userdata/sample.h264 MEDIA_DURATION_US=6000000 ./board_run.sh
+```
+
+这个模式不会启动 `fastboot_h264_fifo`，只验证：
+
+```text
+H264 file -> H264 RTP/SRTP -> Chrome
+```
+
+
+## 一键板端运行
+
+打包目录里可直接执行：
+
+```sh
+./board_run.sh
+```
+
+可选环境变量：
+
+- `FIFO_PATH`
+- `MEDIA_PATH`
+- `OFFER_URL`
+- `ANSWER_URL`
+- `LOCAL_HOST`
+- `MEDIA_DURATION_US`
+- `VIDEO_FRAME_DURATION_US`
+- `H264_BITRATE`
+- `H264_GOP`
+
+
+## 失败诊断
+
+`board_run.sh` 失败时会自动打印：
+
+- sender stderr/stdout
+- helper stderr/stdout
+- diagnostics 文件
+- FIFO 路径状态
+
+可选环境变量：
+
+- `DIAG_PATH`
+- `SENDER_STDOUT_LOG`
+- `SENDER_STDERR_LOG`
+- `HELPER_STDOUT_LOG`
+- `HELPER_STDERR_LOG`
+- `PRINT_LOGS_ON_SUCCESS=1`

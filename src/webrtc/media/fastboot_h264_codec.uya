@@ -1,0 +1,110 @@
+@c_import(
+    "../../../examples/rk1106_h264_push_client/src/fastboot_demo_mirror/fastboot_h264_shim.c",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rockchip",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/output/out/media_out/include",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/project/make_meta/include",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/libdrm",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/uAPI",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/uAPI2",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/algos",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/common",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/xcore",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/iq_parser",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/iq_parser_v2",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rkaiq/smartIr",
+    "-L/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/lib -Wl,-rpath-link,/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/lib -Wl,-Bstatic -pthread -lrockit -lrtsp -lrockchip_mpp -lrksysutils -lsmartIr -lrkaudio_detect -lrkaudio_vqe -lrga -Wl,-Bdynamic -lrkaiq -lstdc++ -lm"
+);
+
+use webrtc.media.model;
+
+export error FastbootH264InvalidArgument;
+export error FastbootH264Unavailable;
+export error FastbootH264OpenFailed;
+export error FastbootH264ReadFailed;
+export error FastbootH264BufferTooSmall;
+
+export const FASTBOOT_H264_STATUS_OK: i32 = 0i32;
+export const FASTBOOT_H264_STATUS_INVALID_ARGUMENT: i32 = -1i32;
+export const FASTBOOT_H264_STATUS_OPEN_FAILED: i32 = -2i32;
+export const FASTBOOT_H264_STATUS_READ_FAILED: i32 = -3i32;
+export const FASTBOOT_H264_STATUS_BUFFER_TOO_SMALL: i32 = -4i32;
+export const FASTBOOT_H264_DEFAULT_BITRATE: u32 = 1_000_000u32;
+export const FASTBOOT_H264_DEFAULT_GOP: u32 = 30u32;
+export const FASTBOOT_H264_DEFAULT_FPS: u32 = 30u32;
+
+export struct FastbootH264Config {
+    width: u32 = 0u32,
+    height: u32 = 0u32,
+    fps: u32 = FASTBOOT_H264_DEFAULT_FPS,
+    bitrate: u32 = FASTBOOT_H264_DEFAULT_BITRATE,
+    gop: u32 = FASTBOOT_H264_DEFAULT_GOP,
+}
+
+export struct FastbootH264Reader {
+    handle: usize = 0usize,
+    config: FastbootH264Config = FastbootH264Config{},
+    sequence_id: u64 = 0u64,
+}
+
+extern fn uya_fastboot_h264_open(width: u32, height: u32, fps: u32, bitrate: u32, gop: u32, out_handle: &usize) i32;
+extern fn uya_fastboot_h264_read_packet(handle: usize, out_payload: &byte, out_capacity: usize, out_len: &usize, out_pts_us: &u64, out_keyframe: &u32) i32;
+extern fn uya_fastboot_h264_close(handle: usize) i32;
+
+fn fastboot_h264_status_to_error(status: i32) !void {
+    if status == FASTBOOT_H264_STATUS_OK { return; }
+    if status == FASTBOOT_H264_STATUS_INVALID_ARGUMENT { return error.FastbootH264InvalidArgument; }
+    if status == FASTBOOT_H264_STATUS_OPEN_FAILED { return error.FastbootH264OpenFailed; }
+    if status == FASTBOOT_H264_STATUS_READ_FAILED { return error.FastbootH264ReadFailed; }
+    if status == FASTBOOT_H264_STATUS_BUFFER_TOO_SMALL { return error.FastbootH264BufferTooSmall; }
+    return error.FastbootH264Unavailable;
+}
+
+export fn fastboot_h264_config_make(width: u32, height: u32, fps: u32, bitrate: u32, gop: u32) !FastbootH264Config {
+    if width == 0u32 || height == 0u32 || fps == 0u32 || bitrate == 0u32 || gop == 0u32 {
+        return error.FastbootH264InvalidArgument;
+    }
+    return FastbootH264Config{ width: width, height: height, fps: fps, bitrate: bitrate, gop: gop };
+}
+
+export fn fastboot_h264_open(config: FastbootH264Config) !FastbootH264Reader {
+    var handle: usize = 0usize;
+    const status: i32 = uya_fastboot_h264_open(config.width, config.height, config.fps, config.bitrate, config.gop, &handle);
+    try fastboot_h264_status_to_error(status);
+    if handle == 0usize { return error.FastbootH264Unavailable; }
+    return FastbootH264Reader{ handle: handle, config: config, sequence_id: 0u64 };
+}
+
+export fn fastboot_h264_close(reader: &FastbootH264Reader) !void {
+    if reader == null || reader.handle == 0usize { return; }
+    const status: i32 = uya_fastboot_h264_close(reader.handle);
+    reader.handle = 0usize;
+    try fastboot_h264_status_to_error(status);
+}
+
+export fn fastboot_h264_read_frame(reader: &FastbootH264Reader, duration_us: u32, out_payload: &[byte]) !EncodedFrame {
+    if reader == null || reader.handle == 0usize || out_payload.len == 0usize || duration_us == 0u32 {
+        return error.FastbootH264InvalidArgument;
+    }
+    var out_len: usize = 0usize;
+    var out_pts_us: u64 = 0u64;
+    var out_keyframe: u32 = 0u32;
+    const status: i32 = uya_fastboot_h264_read_packet(reader.handle, &out_payload[0], out_payload.len, &out_len, &out_pts_us, &out_keyframe);
+    try fastboot_h264_status_to_error(status);
+    if out_len == 0usize || out_len > out_payload.len { return error.FastbootH264ReadFailed; }
+    const frame: EncodedFrame = EncodedFrame{
+        codec_id: CODEC_ID_H264,
+        media_kind: MEDIA_KIND_VIDEO,
+        timestamp: out_pts_us,
+        duration_us: duration_us,
+        payload: out_payload[0:out_len],
+        is_keyframe: out_keyframe != 0u32,
+        sequence_id: reader.sequence_id,
+        spatial_id: ENCODED_FRAME_NO_SPATIAL_ID,
+        temporal_id: ENCODED_FRAME_NO_TEMPORAL_ID,
+        marker: true,
+    };
+    reader.sequence_id = reader.sequence_id + 1u64;
+    return frame;
+}
