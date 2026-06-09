@@ -51,6 +51,7 @@ export struct DirectRuntimeOutput {
 
 export struct DirectRuntimeRtcpFeedback {
     rtcp_len: usize = 0usize,
+    compound_len: usize = 0usize,
     media_kind: u8 = MEDIA_KIND_UNKNOWN,
     media_ssrc: u32 = 0u32,
     packet_type: u8 = 0u8,
@@ -934,14 +935,16 @@ export fn direct_runtime_process_srtcp_feedback(
     var audio_candidate: SrtcpContext = runtime.audio_srtcp_recv;
     const audio_unprotect: !usize = srtcp_unprotect(&audio_candidate, srtcp_packet, rtcp_packet);
     if audio_unprotect.error_id == 0 {
-        const feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
+        var feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
             runtime,
             rtcp_packet[0:audio_unprotect.value],
         );
+        feedback.compound_len = audio_unprotect.value;
         if feedback.media_kind == MEDIA_KIND_VIDEO {
             var video_candidate_after_audio: SrtcpContext = runtime.video_srtcp_recv;
             const video_unprotect_after_audio: !usize = srtcp_unprotect(&video_candidate_after_audio, srtcp_packet, rtcp_packet);
             if video_unprotect_after_audio.error_id == 0 {
+                feedback.compound_len = video_unprotect_after_audio.value;
                 runtime.video_srtcp_recv = video_candidate_after_audio;
                 return feedback;
             }
@@ -954,10 +957,11 @@ export fn direct_runtime_process_srtcp_feedback(
     var video_candidate: SrtcpContext = runtime.video_srtcp_recv;
     const video_unprotect: !usize = srtcp_unprotect(&video_candidate, srtcp_packet, rtcp_packet);
     if video_unprotect.error_id == 0 {
-        const feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
+        var feedback: DirectRuntimeRtcpFeedback = try direct_runtime_feedback_from_rtcp_compound(
             runtime,
             rtcp_packet[0:video_unprotect.value],
         );
+        feedback.compound_len = video_unprotect.value;
         runtime.video_srtcp_recv = video_candidate;
         return feedback;
     }

@@ -10,10 +10,17 @@ ANSWER_URL_WAS_SET=${ANSWER_URL+x}
 OFFER_URL=${OFFER_URL:-}
 ANSWER_URL=${ANSWER_URL:-}
 LOCAL_HOST=${LOCAL_HOST:-192.168.3.166}
-MEDIA_DURATION_US=${MEDIA_DURATION_US:-6000000}
+MEDIA_DURATION_US=${MEDIA_DURATION_US:-600000000}
 VIDEO_FRAME_DURATION_US=${VIDEO_FRAME_DURATION_US:-33333}
-H264_BITRATE=${H264_BITRATE:-1000000}
-H264_GOP=${H264_GOP:-30}
+H264_BITRATE=${H264_BITRATE:-600000}
+H264_GOP=${H264_GOP:-60}
+FASTBOOT_VENC_CHANNEL=${FASTBOOT_VENC_CHANNEL:-0}
+FASTBOOT_VIDEO_WIDTH=${FASTBOOT_VIDEO_WIDTH:-1280}
+FASTBOOT_VIDEO_HEIGHT=${FASTBOOT_VIDEO_HEIGHT:-720}
+FASTBOOT_VIDEO_FPS=${FASTBOOT_VIDEO_FPS:-30}
+FASTBOOT_H264_BITRATE=${FASTBOOT_H264_BITRATE:-$H264_BITRATE}
+FASTBOOT_H264_START_BITRATE=${FASTBOOT_H264_START_BITRATE:-300000}
+FASTBOOT_H264_RAMP_FRAMES=${FASTBOOT_H264_RAMP_FRAMES:-60}
 DIAG_PATH=${DIAG_PATH:-/tmp/rk1106_h264_sender_diagnostics.json}
 BOOT_TRACE_LOG=${BOOT_TRACE_LOG:-/tmp/rk1106_h264_sender_boot.log}
 SENDER_STDOUT_LOG=${SENDER_STDOUT_LOG:-/tmp/rk1106_h264_sender.stdout.log}
@@ -24,6 +31,8 @@ HELPER_STDOUT_LOG=${HELPER_STDOUT_LOG:-/tmp/fastboot_h264_fifo.stdout.log}
 HELPER_STDERR_LOG=${HELPER_STDERR_LOG:-/tmp/fastboot_h264_fifo.stderr.log}
 PRINT_LOGS_ON_SUCCESS=${PRINT_LOGS_ON_SUCCESS:-1}
 LIVE_LOGS=${LIVE_LOGS:-1}
+SUPPRESS_KERNEL_LOGS=${SUPPRESS_KERNEL_LOGS:-1}
+KERNEL_PRINTK_PREV=
 
 if [ -n "$SIGNAL_BASE_URL" ]; then
     SIGNAL_BASE_URL=${SIGNAL_BASE_URL%/}
@@ -123,6 +132,31 @@ stop_live_logs() {
     fi
 }
 
+suppress_kernel_console_logs() {
+    if [ "$SUPPRESS_KERNEL_LOGS" != "1" ]; then
+        return
+    fi
+    if [ ! -r /proc/sys/kernel/printk ] || [ ! -w /proc/sys/kernel/printk ]; then
+        return
+    fi
+    KERNEL_PRINTK_PREV=$(cat /proc/sys/kernel/printk 2>/dev/null || true)
+    if [ -z "$KERNEL_PRINTK_PREV" ]; then
+        return
+    fi
+    if printf '1 4 1 7\n' >/proc/sys/kernel/printk 2>/dev/null; then
+        echo "board_run: kernel console logs suppressed (SUPPRESS_KERNEL_LOGS=0 to disable)" >&2
+    else
+        KERNEL_PRINTK_PREV=
+    fi
+}
+
+restore_kernel_console_logs() {
+    if [ -n "${KERNEL_PRINTK_PREV:-}" ] && [ -w /proc/sys/kernel/printk ]; then
+        printf '%s\n' "$KERNEL_PRINTK_PREV" >/proc/sys/kernel/printk 2>/dev/null || true
+        KERNEL_PRINTK_PREV=
+    fi
+}
+
 cleanup() {
     status=$?
     stop_live_logs
@@ -157,6 +191,7 @@ cleanup() {
     if [ -z "$MEDIA_PATH" ]; then
         rm -f "$FIFO_PATH"
     fi
+    restore_kernel_console_logs
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -168,6 +203,7 @@ rm -f "$FIFO_PATH" "$DIAG_PATH" \
     "$HELPER_STDOUT_LOG" "$HELPER_STDERR_LOG"
 : >"$SENDER_STDERR_LOG"
 : >"$HELPER_STDERR_LOG"
+suppress_kernel_console_logs
 start_live_logs
 if [ -n "$MEDIA_PATH" ]; then
     if [ ! -r "$MEDIA_PATH" ]; then
@@ -209,20 +245,40 @@ fi
 echo "board_run: sender_bin=$DIR/rk1106_h264_sender" >&2
 if [ -z "$MEDIA_PATH" ]; then
     echo "board_run: helper_bin=$DIR/fastboot_h264_fifo" >&2
+    echo "board_run: fastboot_venc_channel=$FASTBOOT_VENC_CHANNEL" >&2
+    echo "board_run: fastboot_video=${FASTBOOT_VIDEO_WIDTH}x${FASTBOOT_VIDEO_HEIGHT}" >&2
+    echo "board_run: fastboot_video_fps=$FASTBOOT_VIDEO_FPS" >&2
+    echo "board_run: fastboot_h264_bitrate=$FASTBOOT_H264_BITRATE" >&2
+    echo "board_run: fastboot_h264_start_bitrate=$FASTBOOT_H264_START_BITRATE" >&2
+    echo "board_run: fastboot_h264_ramp_frames=$FASTBOOT_H264_RAMP_FRAMES" >&2
 fi
 ls -l "$DIR/rk1106_h264_sender" "$DIR/fastboot_h264_fifo" >&2 || true
 
+if [ ! -x "$DIR/rk1106_h264_sender" ]; then
+    echo "board_run: sender binary is missing or not executable: $DIR/rk1106_h264_sender" >&2
+    echo "board_run: run this script from the package directory containing rk1106_h264_sender" >&2
+    exit 11
+fi
+if [ -z "$MEDIA_PATH" ] && [ ! -x "$DIR/fastboot_h264_fifo" ]; then
+    echo "board_run: helper binary is missing or not executable: $DIR/fastboot_h264_fifo" >&2
+    echo "board_run: run this script from the package directory containing fastboot_h264_fifo" >&2
+    exit 10
+fi
+
 echo "board_run: preflight sender --help" >&2
-"$DIR/rk1106_h264_sender" --help >"$SENDER_HELP_STDOUT_LOG" 2>"$SENDER_HELP_STDERR_LOG" || true
-if grep -q "rk1106_h264_sender" "$SENDER_HELP_STDERR_LOG" "$SENDER_HELP_STDOUT_LOG" 2>/dev/null; then
-    echo "board_run: sender --help usable" >&2
+set +e
+"$DIR/rk1106_h264_sender" --help >"$SENDER_HELP_STDOUT_LOG" 2>"$SENDER_HELP_STDERR_LOG"
+SENDER_HELP_STATUS=$?
+set -e
+if grep -q "^rk1106_h264_sender" "$SENDER_HELP_STDERR_LOG" "$SENDER_HELP_STDOUT_LOG" 2>/dev/null; then
+    echo "board_run: sender --help usable status=$SENDER_HELP_STATUS" >&2
 else
     echo "board_run: sender --help unusable" >&2
     exit 11
 fi
 
 if [ -z "$MEDIA_PATH" ]; then
-    FASTBOOT_H264_OUT="$FIFO_PATH" FASTBOOT_VENC0_PATH="$FIFO_PATH" "$DIR/fastboot_h264_fifo" >"$HELPER_STDOUT_LOG" 2>"$HELPER_STDERR_LOG" &
+    FASTBOOT_H264_OUT="$FIFO_PATH" FASTBOOT_VENC_CHANNEL="$FASTBOOT_VENC_CHANNEL" FASTBOOT_VIDEO_WIDTH="$FASTBOOT_VIDEO_WIDTH" FASTBOOT_VIDEO_HEIGHT="$FASTBOOT_VIDEO_HEIGHT" FASTBOOT_VIDEO_FPS="$FASTBOOT_VIDEO_FPS" FASTBOOT_H264_BITRATE="$FASTBOOT_H264_BITRATE" FASTBOOT_H264_START_BITRATE="$FASTBOOT_H264_START_BITRATE" FASTBOOT_H264_RAMP_FRAMES="$FASTBOOT_H264_RAMP_FRAMES" "$DIR/fastboot_h264_fifo" >"$HELPER_STDOUT_LOG" 2>"$HELPER_STDERR_LOG" &
     FASTBOOT_PID=$!
     echo "board_run: helper_pid=$FASTBOOT_PID" >&2
     sleep 1

@@ -70,14 +70,21 @@ VIDEO_DEV=/dev/video7
 PIXEL_FORMAT=nv12
 WIDTH=320
 HEIGHT=180
-FPS=10
+FPS=30
 BITRATE=1000000
-GOP=30
+GOP=60
 DURATION_US=60000000
 LOCAL_HOST=192.168.3.165
 SIGNAL_BASE_URL=http://192.168.3.8:8080/api
 OFFER_POLL_TRIES=120
 OFFER_POLL_INTERVAL_MS=1000
+FASTBOOT_VENC_CHANNEL=0
+FASTBOOT_VIDEO_WIDTH=1280
+FASTBOOT_VIDEO_HEIGHT=720
+FASTBOOT_VIDEO_FPS=30
+FASTBOOT_H264_BITRATE=600000
+FASTBOOT_H264_START_BITRATE=300000
+FASTBOOT_H264_RAMP_FRAMES=60
 ```
 
 You can also run the binary directly:
@@ -92,9 +99,9 @@ You can also run the binary directly:
     --v4l2-format nv12 \
     --video-width 320 \
     --video-height 180 \
-    --video-frame-duration-us 100000 \
+    --video-frame-duration-us 33333 \
     --h264-bitrate 1000000 \
-    --h264-gop 30 \
+    --h264-gop 60 \
     --media-duration-us 60000000 \
     --local-host 192.168.3.165 \
     --codec uya
@@ -105,7 +112,7 @@ To test only V4L2 capture without browser signaling:
 ```sh
 ./rk1106_h264_sender --v4l2-test-frames 10 \
     --v4l2-device /dev/video7 --v4l2-format nv12 \
-    --video-width 320 --video-height 180 --video-frame-duration-us 100000
+    --video-width 320 --video-height 180 --video-frame-duration-us 33333
 ```
 
 Expected sender milestones:
@@ -168,6 +175,35 @@ H264 file -> H264 RTP/SRTP -> Chrome
 - `VIDEO_FRAME_DURATION_US`
 - `H264_BITRATE`
 - `H264_GOP`
+- `FASTBOOT_VENC_CHANNEL`
+- `FASTBOOT_VIDEO_WIDTH`
+- `FASTBOOT_VIDEO_HEIGHT`
+- `FASTBOOT_VIDEO_FPS`
+- `FASTBOOT_H264_BITRATE`
+- `FASTBOOT_H264_START_BITRATE`
+- `FASTBOOT_H264_RAMP_FRAMES`
+- `SUPPRESS_KERNEL_LOGS`
+
+默认 fastboot helper 使用 720p 主码流，`FASTBOOT_VIDEO_FPS=30`，
+`FASTBOOT_H264_BITRATE=600000`。启动阶段默认先用
+`FASTBOOT_H264_START_BITRATE=300000`，写出 `FASTBOOT_H264_RAMP_FRAMES=60`
+帧后恢复到目标码率，减轻首帧/启动缓存冲击。码率参数使用 bps；
+helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。设置
+`FASTBOOT_H264_RAMP_FRAMES=0` 可以关闭启动码率爬升。
+`SUPPRESS_KERNEL_LOGS=1` 默认临时压低内核串口日志，避免 WiFi flow-control
+日志刷屏；调试内核/驱动时可用 `SUPPRESS_KERNEL_LOGS=0 ./board_run.sh`。
+如果 Chrome 统计里 `framesDropped`、`freezeCount`、`pliCount` 或 `nackCount`
+持续增长，可以先试更低码率：
+
+```sh
+FASTBOOT_H264_BITRATE=400000 ./board_run.sh
+```
+
+如果要切回 1080p：
+
+```sh
+FASTBOOT_VIDEO_WIDTH=1920 FASTBOOT_VIDEO_HEIGHT=1080 FASTBOOT_VIDEO_FPS=10 FASTBOOT_H264_BITRATE=1000000 ./board_run.sh
+```
 
 
 ## 失败诊断

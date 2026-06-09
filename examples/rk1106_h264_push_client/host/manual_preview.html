@@ -178,6 +178,16 @@ function waitForIceGatheringComplete(peer) {
   });
 }
 
+function applyLowLatencyReceiverHint(receiver) {
+  if (!receiver) return;
+  if (!('playoutDelayHint' in receiver)) return;
+  try {
+    receiver.playoutDelayHint = 0;
+  } catch (error) {
+    console.debug('playoutDelayHint unavailable:', error);
+  }
+}
+
 function closePeer() {
   pollToken++;
   if (pc) {
@@ -202,11 +212,14 @@ async function createOffer() {
   const stream = new MediaStream();
   remoteVideo.srcObject = stream;
   pc.addEventListener('track', (event) => {
+    applyLowLatencyReceiverHint(event.receiver);
     stream.addTrack(event.track);
     playRemoteVideo();
   });
-  pc.addTransceiver('audio', {direction: 'recvonly'});
-  pc.addTransceiver('video', {direction: 'recvonly'});
+  const audioTransceiver = pc.addTransceiver('audio', {direction: 'recvonly'});
+  const videoTransceiver = pc.addTransceiver('video', {direction: 'recvonly'});
+  applyLowLatencyReceiverHint(audioTransceiver.receiver);
+  applyLowLatencyReceiverHint(videoTransceiver.receiver);
   const peer = pc;
   peer.addEventListener('connectionstatechange', () => setStatus(`connection: ${peer.connectionState}`));
   peer.addEventListener('iceconnectionstatechange', () => setStatus(`ice: ${peer.iceConnectionState}`));

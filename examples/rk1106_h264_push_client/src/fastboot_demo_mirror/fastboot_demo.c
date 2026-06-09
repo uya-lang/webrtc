@@ -7,6 +7,8 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -55,11 +57,20 @@
 #define IVA_CHANNEL_WIDTH 704
 #define IVA_CHANNEL_HEIGHT 576
 #define FASTBOOT_RESERVED_FRAME_NUM 3
+#define FASTBOOT_FIFO_DEFAULT_WIDTH 1280
+#define FASTBOOT_FIFO_DEFAULT_HEIGHT 720
+#define FASTBOOT_FIFO_DEFAULT_FPS 30
+#define FASTBOOT_FIFO_DEFAULT_BITRATE 600000
+#define FASTBOOT_FIFO_DEFAULT_START_BITRATE 300000
+#define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
+#define FASTBOOT_WRAP_MIN_LINE 64
+#define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-20260609m"
 
 #define ENABLE_SMART_IR
 
-#define fastboot_demo_info(fmt, ...) printf("fastboot_demo " fmt "", ##__VA_ARGS__)
-#define fastboot_demo_err(fmt, ...) printf("fastboot_demo error " fmt "", ##__VA_ARGS__)
+#define fastboot_demo_info(fmt, ...) fprintf(stderr, "fastboot_demo " fmt "", ##__VA_ARGS__)
+#define fastboot_demo_err(fmt, ...) fprintf(stderr, "fastboot_demo error " fmt "", ##__VA_ARGS__)
 #if FASTBOOT_DEMO_DEBUG_PRINT
 #include <stdio.h>
 #define fastboot_demo_dbg(fmt, ...) printf("fastboot_demo " fmt "", ##__VA_ARGS__)
@@ -233,7 +244,10 @@ static int dlsym_rkaiq(void) {
 #endif
 
 static void sigterm_handler(int sig) { quit = true; }
-void handle_pipe(int sig) { printf("%s sig = %d\n", __func__, sig); }
+void handle_pipe(int sig) {
+	fprintf(stderr, "%s sig = %d\n", __func__, sig);
+	fflush(stderr);
+}
 
 /*
  *  * get cmdline from /proc/cmdline
@@ -360,39 +374,278 @@ void klog(const char *log) { return; }
 #endif
 
 static const char *g_fastboot_out_path = NULL;
-static int g_fastboot_logged_first_main_write = 0;
+static int g_fastboot_output_channel = VENC_MAIN_CHANNEL;
+static int g_fastboot_output_width = FASTBOOT_FIFO_DEFAULT_WIDTH;
+static int g_fastboot_output_height = FASTBOOT_FIFO_DEFAULT_HEIGHT;
+static int g_fastboot_output_fps = FASTBOOT_FIFO_DEFAULT_FPS;
+static int g_fastboot_output_bitrate = FASTBOOT_FIFO_DEFAULT_BITRATE;
+static int g_fastboot_output_start_bitrate = FASTBOOT_FIFO_DEFAULT_START_BITRATE;
+static int g_fastboot_output_ramp_frames = FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES;
+static FILE *g_fastboot_output_file = NULL;
+static int g_fastboot_logged_first_output_write = 0;
 static int g_fastboot_logged_open_error = 0;
+static int g_fastboot_logged_short_write = 0;
+static int g_fastboot_bitrate_ramp_done = 0;
+static unsigned int g_fastboot_output_write_count = 0;
+static RK_U64 g_fastboot_last_output_heartbeat_us = 0;
+
+static bool fastboot_sub_channel_enabled(void) {
+	return !g_fastboot_out_path || g_fastboot_output_channel == VENC_SUB_CHANNEL;
+}
+
+static bool fastboot_bitrate_ramp_enabled(void) {
+	return g_fastboot_out_path && g_fastboot_output_ramp_frames > 0 &&
+	       g_fastboot_output_start_bitrate > 0 &&
+	       g_fastboot_output_start_bitrate < g_fastboot_output_bitrate;
+}
+
+static int fastboot_initial_bitrate_bps(void) {
+	if (fastboot_bitrate_ramp_enabled())
+		return g_fastboot_output_start_bitrate;
+	return g_fastboot_output_bitrate;
+}
+
+static uint32_t fastboot_bitrate_kbps(int bitrate_bps) {
+	uint32_t bitrate = (uint32_t)bitrate_bps;
+	uint32_t kbps = (bitrate + 999u) / 1000u;
+
+	if (kbps < 2u)
+		kbps = 2u;
+	if (kbps > 200000u)
+		kbps = 200000u;
+	return kbps;
+}
+
+static int fastboot_set_venc_bitrate_kbps(int chn, uint32_t bitrate_kbps) {
+	int ret;
+	VENC_CHN_ATTR_S attr;
+
+	memset(&attr, 0, sizeof(attr));
+	ret = RK_MPI_VENC_GetChnAttr(chn, &attr);
+	if (ret != RK_SUCCESS) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: bitrate ramp get attr failed channel=%d ret=0x%08x\n",
+		        chn, ret);
+		fflush(stderr);
+		return ret;
+	}
+
+	if (attr.stVencAttr.enType == RK_VIDEO_ID_AVC) {
+		if (attr.stRcAttr.enRcMode == VENC_RC_MODE_H264CBR) {
+			attr.stRcAttr.stH264Cbr.u32BitRate = bitrate_kbps;
+		} else if (attr.stRcAttr.enRcMode == VENC_RC_MODE_H264VBR) {
+			attr.stRcAttr.stH264Vbr.u32MinBitRate = bitrate_kbps / 3;
+			attr.stRcAttr.stH264Vbr.u32BitRate = (bitrate_kbps / 3) * 2;
+			attr.stRcAttr.stH264Vbr.u32MaxBitRate = bitrate_kbps;
+		} else {
+			fprintf(stderr,
+			        "fastboot_h264_fifo: bitrate ramp unsupported H264 rc_mode=%d channel=%d\n",
+			        attr.stRcAttr.enRcMode, chn);
+			fflush(stderr);
+			return RK_FAILURE;
+		}
+	} else if (attr.stVencAttr.enType == RK_VIDEO_ID_HEVC) {
+		if (attr.stRcAttr.enRcMode == VENC_RC_MODE_H265CBR) {
+			attr.stRcAttr.stH265Cbr.u32BitRate = bitrate_kbps;
+		} else if (attr.stRcAttr.enRcMode == VENC_RC_MODE_H265VBR) {
+			attr.stRcAttr.stH265Vbr.u32MinBitRate = bitrate_kbps / 3;
+			attr.stRcAttr.stH265Vbr.u32BitRate = (bitrate_kbps / 3) * 2;
+			attr.stRcAttr.stH265Vbr.u32MaxBitRate = bitrate_kbps;
+		} else {
+			fprintf(stderr,
+			        "fastboot_h264_fifo: bitrate ramp unsupported H265 rc_mode=%d channel=%d\n",
+			        attr.stRcAttr.enRcMode, chn);
+			fflush(stderr);
+			return RK_FAILURE;
+		}
+	} else {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: bitrate ramp unsupported codec=%d channel=%d\n",
+		        attr.stVencAttr.enType, chn);
+		fflush(stderr);
+		return RK_FAILURE;
+	}
+
+	ret = RK_MPI_VENC_SetChnAttr(chn, &attr);
+	if (ret != RK_SUCCESS) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: bitrate ramp set attr failed channel=%d ret=0x%08x\n",
+		        chn, ret);
+		fflush(stderr);
+	}
+	return ret;
+}
+
+static void fastboot_maybe_ramp_output_bitrate(int chn) {
+	int ret;
+	uint32_t target_kbps;
+
+	if (chn != g_fastboot_output_channel || g_fastboot_bitrate_ramp_done ||
+	    !fastboot_bitrate_ramp_enabled())
+		return;
+	if (g_fastboot_output_write_count < (unsigned int)g_fastboot_output_ramp_frames)
+		return;
+
+	target_kbps = fastboot_bitrate_kbps(g_fastboot_output_bitrate);
+	ret = fastboot_set_venc_bitrate_kbps(chn, target_kbps);
+	if (ret == RK_SUCCESS) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: bitrate ramp applied channel=%d frame=%u target_kbps=%u\n",
+		        chn, g_fastboot_output_write_count, target_kbps);
+	} else {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: bitrate ramp failed channel=%d frame=%u target_kbps=%u ret=0x%08x\n",
+		        chn, g_fastboot_output_write_count, target_kbps, ret);
+	}
+	fflush(stderr);
+	g_fastboot_bitrate_ramp_done = 1;
+}
 
 static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	char OutPath[256];
 	void *pData = RK_NULL;
 	FILE *file = NULL;
 	size_t wrote = 0;
+	bool keep_open = false;
 
-	if (g_fastboot_out_path && chn == VENC_MAIN_CHANNEL)
+	if (g_fastboot_out_path && chn == g_fastboot_output_channel) {
 		snprintf(OutPath, sizeof(OutPath), "%s", g_fastboot_out_path);
-	else
+		keep_open = true;
+	} else {
 		snprintf(OutPath, sizeof(OutPath), "/tmp/venc%d.bin", chn);
-	file = fopen(OutPath, "a+");
+	}
+
+	if (keep_open) {
+		if (!g_fastboot_output_file)
+			g_fastboot_output_file = fopen(OutPath, "ab");
+		file = g_fastboot_output_file;
+	} else {
+		file = fopen(OutPath, "ab");
+	}
 
 	if (file) {
 		pData = (void *)RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
 		wrote = fwrite(pData, 1, stFrame.pstPack->u32Len, file);
 		fflush(file);
-		if (chn == VENC_MAIN_CHANNEL && !g_fastboot_logged_first_main_write) {
-			fprintf(stderr, "fastboot_h264_fifo: first main-channel write bytes=%zu requested=%u\n",
-				wrote, stFrame.pstPack->u32Len);
+		if (chn == g_fastboot_output_channel && !g_fastboot_logged_first_output_write) {
+			fprintf(stderr,
+			        "fastboot_h264_fifo: first output-channel write channel=%d bytes=%zu requested=%u\n",
+			        chn, wrote, stFrame.pstPack->u32Len);
 			fflush(stderr);
-			g_fastboot_logged_first_main_write = 1;
+			g_fastboot_logged_first_output_write = 1;
 		}
-	} else if (chn == VENC_MAIN_CHANNEL && !g_fastboot_logged_open_error) {
+		if (chn == g_fastboot_output_channel) {
+			RK_U64 now_us = TEST_COMM_GetNowUs();
+			g_fastboot_output_write_count++;
+			if (g_fastboot_output_write_count == 30 || g_fastboot_output_write_count == 31 ||
+			    g_fastboot_output_write_count == 60 ||
+			    (g_fastboot_output_write_count % 150) == 0) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: output-channel write channel=%d count=%u bytes=%zu\n",
+				        chn, g_fastboot_output_write_count, wrote);
+				fflush(stderr);
+			}
+			if (g_fastboot_last_output_heartbeat_us == 0) {
+				g_fastboot_last_output_heartbeat_us = now_us;
+			} else if (now_us > g_fastboot_last_output_heartbeat_us &&
+			           now_us - g_fastboot_last_output_heartbeat_us >= FASTBOOT_FIFO_HEARTBEAT_US) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: heartbeat channel=%d count=%u last_bytes=%zu pts=%llu\n",
+				        chn, g_fastboot_output_write_count, wrote, stFrame.pstPack->u64PTS);
+				fflush(stderr);
+				g_fastboot_last_output_heartbeat_us = now_us;
+			}
+			if (wrote != stFrame.pstPack->u32Len && !g_fastboot_logged_short_write) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: short output-channel write channel=%d bytes=%zu requested=%u errno=%d\n",
+				        chn, wrote, stFrame.pstPack->u32Len, errno);
+				fflush(stderr);
+				g_fastboot_logged_short_write = 1;
+			}
+		}
+	} else if (chn == g_fastboot_output_channel && !g_fastboot_logged_open_error) {
 		fprintf(stderr, "fastboot_h264_fifo: fopen output failed errno=%d path=%s\n", errno, OutPath);
 		fflush(stderr);
 		g_fastboot_logged_open_error = 1;
 	}
 
-	if (file)
+	if (file && !keep_open)
 		fclose(file);
+}
+
+static int fastboot_parse_positive_env(const char *name, int fallback) {
+	const char *value = getenv(name);
+	char *end = NULL;
+	long parsed;
+
+	if (!value || !value[0])
+		return fallback;
+	parsed = strtol(value, &end, 10);
+	if (end == value || *end != '\0' || parsed <= 0 || parsed > 8192)
+		return fallback;
+	return (int)parsed;
+}
+
+static int fastboot_parse_nonnegative_env(const char *name, int fallback, int max_value) {
+	const char *value = getenv(name);
+	char *end = NULL;
+	long parsed;
+
+	if (!value || !value[0])
+		return fallback;
+	parsed = strtol(value, &end, 10);
+	if (end == value || *end != '\0' || parsed < 0 || parsed > max_value)
+		return fallback;
+	return (int)parsed;
+}
+
+static int fastboot_parse_bitrate_env(const char *name, int fallback) {
+	const char *value = getenv(name);
+	char *end = NULL;
+	long parsed;
+
+	if (!value || !value[0])
+		return fallback;
+	parsed = strtol(value, &end, 10);
+	if (end == value || *end != '\0' || parsed < 64000 || parsed > 50000000)
+		return fallback;
+	return (int)parsed;
+}
+
+static int fastboot_parse_fps_env(const char *name, int fallback) {
+	const char *value = getenv(name);
+	char *end = NULL;
+	long parsed;
+
+	if (!value || !value[0])
+		return fallback;
+	parsed = strtol(value, &end, 10);
+	if (end == value || *end != '\0' || parsed < 1 || parsed > 60)
+		return fallback;
+	return (int)parsed;
+}
+
+static void fastboot_apply_fifo_video_config(struct meta_info *handle) {
+	if (!g_fastboot_out_path || !handle)
+		return;
+	handle->app_params.venc_bitrate = g_fastboot_output_bitrate;
+	if (g_fastboot_output_channel == VENC_MAIN_CHANNEL) {
+		handle->app_params.venc_w = g_fastboot_output_width;
+		handle->app_params.venc_h = g_fastboot_output_height;
+		fprintf(stderr, "fastboot_h264_fifo: main output override resolution=%dx%d\n",
+		        handle->app_params.venc_w, handle->app_params.venc_h);
+	}
+	fprintf(stderr, "fastboot_h264_fifo: output target_bitrate_bps=%d\n",
+	        g_fastboot_output_bitrate);
+	if (fastboot_bitrate_ramp_enabled()) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: output startup_bitrate_bps=%d ramp_frames=%d\n",
+		        g_fastboot_output_start_bitrate, g_fastboot_output_ramp_frames);
+	} else {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: output bitrate ramp disabled startup_bitrate_bps=%d ramp_frames=%d\n",
+		        g_fastboot_output_start_bitrate, g_fastboot_output_ramp_frames);
+	}
 }
 
 static void *GetVencStream(void *arg) {
@@ -411,14 +664,18 @@ static void *GetVencStream(void *arg) {
 	while (!quit) {
 		s32Ret = RK_MPI_VENC_GetStream(chn, &stFrame, 1000);
 		if (s32Ret == RK_SUCCESS) {
+			bool write_output_stream = g_fastboot_out_path && chn == g_fastboot_output_channel;
 			if (loopCount == (FASTBOOT_RESERVED_FRAME_NUM - 1) && chn == VENC_MAIN_CHANNEL)
 				klog("[thunderboot_time] get venc all reserved frames");
+			if (write_output_stream)
+				save_video_stream_to_file(chn, stFrame);
 			if (loopCount <= SAVE_ENC_FRM_CNT_MAX) {
 				fastboot_demo_info(
 				    "[%s()] chn:%d, loopCount:%d enc->seq:%d, pkt_size=%lu, pts=%llu\n", __func__,
 				    chn, loopCount, stFrame.u32Seq, stFrame.pstPack->u32Len,
 				    stFrame.pstPack->u64PTS);
-				save_video_stream_to_file(chn, stFrame);
+				if (!write_output_stream)
+					save_video_stream_to_file(chn, stFrame);
 				RK_U64 nowUs = TEST_COMM_GetNowUs();
 				if (fp) {
 					char str[128];
@@ -432,7 +689,7 @@ static void *GetVencStream(void *arg) {
 
 #if (ENABLE_RTSP)
 			// tx video to rtspls
-			if (loopCount > SAVE_ENC_FRM_CNT_MAX) {
+			if (!write_output_stream && loopCount > SAVE_ENC_FRM_CNT_MAX) {
 				if (g_rtsp_ctx) {
 					pthread_mutex_lock(&g_rtsp_ctx->mutex);
 					pData = (void *)RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
@@ -445,6 +702,8 @@ static void *GetVencStream(void *arg) {
 #endif
 
 			RK_MPI_VENC_ReleaseStream(chn, &stFrame);
+			if (write_output_stream)
+				fastboot_maybe_ramp_output_bitrate(chn);
 			loopCount++;
 		} else {
 			fastboot_demo_err("[%s()] chn %d RK_MPI_VENC_GetChnFrame fail %#X\n", __func__, chn,
@@ -592,6 +851,7 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 	int vi_buf_cnt = 1;
 	int video_width, video_height;
 	uint32_t fps = 0, gop = 0;
+	uint32_t output_bitrate_kbps = fastboot_bitrate_kbps(fastboot_initial_bitrate_bps());
 
 	/* wrap params init */
 	if (g_bWrap == true) {
@@ -599,6 +859,9 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 			g_u32WrapLine = handle->app_params.venc_h;
 		else
 			g_u32WrapLine = handle->app_params.venc_h / 16; // 1 / 4 height wrap
+		if (g_u32WrapLine < FASTBOOT_WRAP_MIN_LINE)
+			g_u32WrapLine = FASTBOOT_WRAP_MIN_LINE;
+		fprintf(stderr, "fastboot_h264_fifo: wrap line=%u\n", g_u32WrapLine);
 		// vi_buf_cnt = 3;
 		ctx->vi.dev.chn[VI_MAIN_CHANNEL].stViWrap.bEnable = g_bWrap;
 		ctx->vi.dev.chn[VI_MAIN_CHANNEL].stViWrap.u32BufLine = g_u32WrapLine;
@@ -653,8 +916,15 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 
 	/* venc params init */
 	fps = (uint32_t)get_cmd_val("rk_cam_fps", 10);
+	if (g_fastboot_out_path)
+		fps = (uint32_t)g_fastboot_output_fps;
 	RK_ASSERT(fps > VENC_MAIN_CHANNEL);
 	gop = fps * 2;
+	if (g_fastboot_out_path) {
+		fprintf(stderr, "fastboot_h264_fifo: output fps=%u gop=%u\n", fps, gop);
+		fprintf(stderr, "fastboot_h264_fifo: output initial_bitrate_kbps=%u\n",
+		        output_bitrate_kbps);
+	}
 	for (int i = 0; i != 2; ++i) {
 		if (i == VENC_MAIN_CHANNEL) {
 			video_width = handle->app_params.venc_w;
@@ -670,29 +940,51 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 			ctx->venc.chn[i].stChnAttr.stVencAttr.enType = RK_VIDEO_ID_HEVC;
 
 		if (ctx->venc.chn[i].stChnAttr.stVencAttr.enType == RK_VIDEO_ID_AVC) {
-			ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32BitRate =
-			    handle->app_params.venc_bitrate;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32MaxBitRate =
-			    handle->app_params.venc_bitrate;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32MinBitRate = 200;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32Gop = gop;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32SrcFrameRateNum = fps;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32SrcFrameRateDen = 1;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.fr32DstFrameRateNum = fps;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.fr32DstFrameRateDen = 1;
+			if (g_fastboot_out_path && i == g_fastboot_output_channel) {
+				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32BitRate = output_bitrate_kbps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32Gop = gop;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32SrcFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32SrcFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.fr32DstFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.fr32DstFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32StatTime = 1;
+			} else {
+				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32BitRate =
+				    handle->app_params.venc_bitrate;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32MaxBitRate =
+				    handle->app_params.venc_bitrate;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32MinBitRate = 200;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32Gop = gop;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32SrcFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.u32SrcFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.fr32DstFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.fr32DstFrameRateDen = 1;
+			}
 		} else if (ctx->venc.chn[i].stChnAttr.stVencAttr.enType == RK_VIDEO_ID_HEVC) {
-			ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H265VBR;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32BitRate =
-			    handle->app_params.venc_bitrate;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32MaxBitRate =
-			    handle->app_params.venc_bitrate;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32MinBitRate = 200;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32Gop = gop;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32SrcFrameRateNum = fps;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32SrcFrameRateDen = 1;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.fr32DstFrameRateNum = fps;
-			ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.fr32DstFrameRateDen = 1;
+			if (g_fastboot_out_path && i == g_fastboot_output_channel) {
+				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32BitRate = output_bitrate_kbps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32Gop = gop;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32SrcFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32SrcFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.fr32DstFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.fr32DstFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32StatTime = 1;
+			} else {
+				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H265VBR;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32BitRate =
+				    handle->app_params.venc_bitrate;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32MaxBitRate =
+				    handle->app_params.venc_bitrate;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32MinBitRate = 200;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32Gop = gop;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32SrcFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.u32SrcFrameRateDen = 1;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.fr32DstFrameRateNum = fps;
+				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Vbr.fr32DstFrameRateDen = 1;
+			}
 		}
 
 		ctx->venc.chn[i].stChnAttr.stVencAttr.enPixelFormat = RK_FMT_YUV420SP;
@@ -710,6 +1002,10 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32MaxPicWidth = video_width;
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32MaxPicHeight = video_height;
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32BufSize = video_width * video_height / 3;
+		if (g_fastboot_out_path && i == g_fastboot_output_channel) {
+			fprintf(stderr, "fastboot_h264_fifo: output channel=%d resolution=%dx%d\n", i,
+			        video_width, video_height);
+		}
 
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32StreamBufCnt = 4;
 		ctx->venc.chn[i].stChnAttr.stVencAttr.enMirror = MIRROR_NONE;
@@ -848,18 +1144,22 @@ static int32_t vi_init(VI_CTX_S *ctx, struct meta_info *handle) {
 		return ret;
 	}
 
-	ret = RK_MPI_VI_SetChnAttr(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id,
-	                           &ctx->dev.chn[VI_SUB_CHANNEL].stChnAttr);
-	if (ret) {
-		fastboot_demo_err("VI dev %d set chn %d attr error! ret 0x%08x\n", ctx->dev.dev_id,
-		                  ctx->dev.chn[VI_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
+	if (fastboot_sub_channel_enabled()) {
+		ret = RK_MPI_VI_SetChnAttr(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id,
+		                           &ctx->dev.chn[VI_SUB_CHANNEL].stChnAttr);
+		if (ret) {
+			fastboot_demo_err("VI dev %d set chn %d attr error! ret 0x%08x\n", ctx->dev.dev_id,
+			                  ctx->dev.chn[VI_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 
-	ret = RK_MPI_VI_EnableChn(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id);
-	if (ret) {
-		fastboot_demo_err("create VI dev %d chn 1 error! ret 0x%08x\n", ctx->dev.dev_id, ret);
-		return ret;
+		ret = RK_MPI_VI_EnableChn(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id);
+		if (ret) {
+			fastboot_demo_err("create VI dev %d chn 1 error! ret 0x%08x\n", ctx->dev.dev_id, ret);
+			return ret;
+		}
+	} else {
+		fprintf(stderr, "fastboot_h264_fifo: sub VI channel disabled for FIFO output\n");
 	}
 
 	ret = RK_MPI_VI_SetChnAttr(ctx->dev.dev_id, ctx->dev.chn[VI_IVA_CHANNEL].chn_id,
@@ -888,11 +1188,13 @@ static int32_t vi_deinit(VI_CTX_S *ctx) {
 		        ctx->dev.chn[VI_IVA_CHANNEL].chn_id, ret);
 		return ret;
 	}
-	ret = RK_MPI_VI_DisableChn(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id);
-	if (ret != 0) {
-		RK_LOGE("%s vi dev %d chn %d disable failed: %#x!!", __func__, ctx->dev.dev_id,
-		        ctx->dev.chn[VI_SUB_CHANNEL].chn_id, ret);
-		return ret;
+	if (fastboot_sub_channel_enabled()) {
+		ret = RK_MPI_VI_DisableChn(ctx->dev.dev_id, ctx->dev.chn[VI_SUB_CHANNEL].chn_id);
+		if (ret != 0) {
+			RK_LOGE("%s vi dev %d chn %d disable failed: %#x!!", __func__, ctx->dev.dev_id,
+			        ctx->dev.chn[VI_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 	}
 	ret = RK_MPI_VI_DisableChn(ctx->dev.dev_id, ctx->dev.chn[0].chn_id);
 	if (ret != 0) {
@@ -953,43 +1255,47 @@ static int32_t venc_init(VENC_CTX_S *ctx) {
 		return ret;
 	}
 
-	ret = RK_MPI_VENC_CreateChn(ctx->chn[VENC_SUB_CHANNEL].chn_id,
-	                            &ctx->chn[VENC_SUB_CHANNEL].stChnAttr);
-	if (ret != 0) {
-		fastboot_demo_err("venc [%d] RK_MPI_VENC_CreateChn failed: %#x!",
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
+	if (fastboot_sub_channel_enabled()) {
+		ret = RK_MPI_VENC_CreateChn(ctx->chn[VENC_SUB_CHANNEL].chn_id,
+		                            &ctx->chn[VENC_SUB_CHANNEL].stChnAttr);
+		if (ret != 0) {
+			fastboot_demo_err("venc [%d] RK_MPI_VENC_CreateChn failed: %#x!",
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 
-	ret = RK_MPI_VENC_SetChnRefBufShareAttr(ctx->chn[VENC_SUB_CHANNEL].chn_id,
-	                                        &ctx->chn[VENC_SUB_CHANNEL].stVencChnRefBufShare);
-	if (ret != 0) {
-		fastboot_demo_err("venc [%d] RK_MPI_VENC_SetChnRefBufShareAttr failed: %#x!",
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
+		ret = RK_MPI_VENC_SetChnRefBufShareAttr(ctx->chn[VENC_SUB_CHANNEL].chn_id,
+		                                        &ctx->chn[VENC_SUB_CHANNEL].stVencChnRefBufShare);
+		if (ret != 0) {
+			fastboot_demo_err("venc [%d] RK_MPI_VENC_SetChnRefBufShareAttr failed: %#x!",
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 
-	ret = RK_MPI_VENC_SetRcParam(ctx->chn[VENC_SUB_CHANNEL].chn_id,
-	                             &ctx->chn[VENC_SUB_CHANNEL].stRcParam);
-	if (ret != 0) {
-		fastboot_demo_err("venc [%d] RK_MPI_VENC_SetRcParam failed: %#x!",
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
+		ret = RK_MPI_VENC_SetRcParam(ctx->chn[VENC_SUB_CHANNEL].chn_id,
+		                             &ctx->chn[VENC_SUB_CHANNEL].stRcParam);
+		if (ret != 0) {
+			fastboot_demo_err("venc [%d] RK_MPI_VENC_SetRcParam failed: %#x!",
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 
-	ret = RK_MPI_VENC_EnableSvc(ctx->chn[VENC_SUB_CHANNEL].chn_id, RK_TRUE);
-	if (ret != 0) {
-		fastboot_demo_err("venc [%d] RK_MPI_VENC_EnableSvc failed: %#x!",
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
+		ret = RK_MPI_VENC_EnableSvc(ctx->chn[VENC_SUB_CHANNEL].chn_id, RK_TRUE);
+		if (ret != 0) {
+			fastboot_demo_err("venc [%d] RK_MPI_VENC_EnableSvc failed: %#x!",
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 
-	ret = RK_MPI_VENC_StartRecvFrame(ctx->chn[VENC_SUB_CHANNEL].chn_id,
-	                                 &ctx->chn[VENC_SUB_CHANNEL].stRecvParam);
-	if (ret != 0) {
-		fastboot_demo_err("venc [%d] RK_MPI_VENC_StartRecvFrame failed: %#x!",
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
+		ret = RK_MPI_VENC_StartRecvFrame(ctx->chn[VENC_SUB_CHANNEL].chn_id,
+		                                 &ctx->chn[VENC_SUB_CHANNEL].stRecvParam);
+		if (ret != 0) {
+			fastboot_demo_err("venc [%d] RK_MPI_VENC_StartRecvFrame failed: %#x!",
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
+	} else {
+		fprintf(stderr, "fastboot_h264_fifo: sub VENC channel disabled for FIFO output\n");
 	}
 
 	return ret;
@@ -1009,17 +1315,19 @@ static int32_t venc_deinit(VENC_CTX_S *ctx) {
 		                  ret);
 		return ret;
 	}
-	ret = RK_MPI_VENC_StopRecvFrame(ctx->chn[VENC_SUB_CHANNEL].chn_id);
-	if (ret != 0) {
-		fastboot_demo_err("%s venc chn %d stop failed: %#x!!", __func__,
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
-	}
-	ret = RK_MPI_VENC_DestroyChn(ctx->chn[VENC_SUB_CHANNEL].chn_id);
-	if (ret != 0) {
-		fastboot_demo_err("%s venc chn %d destory failed: %#x!!", __func__,
-		                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
-		return ret;
+	if (fastboot_sub_channel_enabled()) {
+		ret = RK_MPI_VENC_StopRecvFrame(ctx->chn[VENC_SUB_CHANNEL].chn_id);
+		if (ret != 0) {
+			fastboot_demo_err("%s venc chn %d stop failed: %#x!!", __func__,
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
+		ret = RK_MPI_VENC_DestroyChn(ctx->chn[VENC_SUB_CHANNEL].chn_id);
+		if (ret != 0) {
+			fastboot_demo_err("%s venc chn %d destory failed: %#x!!", __func__,
+			                  ctx->chn[VENC_SUB_CHANNEL].chn_id, ret);
+			return ret;
+		}
 	}
 
 	return ret;
@@ -1041,15 +1349,17 @@ static int32_t vi_bind_venc() {
 	if (ret != 0)
 		fastboot_demo_err("VI dev 0 chn 0 bind VENC dev 0 chn 0 failed, ret: 0x%08x\n", ret);
 
-	stSrcChn.enModId = RK_ID_VI;
-	stSrcChn.s32DevId = 0;
-	stSrcChn.s32ChnId = VI_SUB_CHANNEL;
-	stDestChn.enModId = RK_ID_VENC;
-	stDestChn.s32DevId = 0;
-	stDestChn.s32ChnId = VENC_SUB_CHANNEL;
-	ret = RK_MPI_SYS_Bind(&stSrcChn, &stDestChn);
-	if (ret != 0)
-		fastboot_demo_err("VI dev 0 chn 1 bind VENC dev 0 chn 1 failed, ret: 0x%08x\n", ret);
+	if (fastboot_sub_channel_enabled()) {
+		stSrcChn.enModId = RK_ID_VI;
+		stSrcChn.s32DevId = 0;
+		stSrcChn.s32ChnId = VI_SUB_CHANNEL;
+		stDestChn.enModId = RK_ID_VENC;
+		stDestChn.s32DevId = 0;
+		stDestChn.s32ChnId = VENC_SUB_CHANNEL;
+		ret = RK_MPI_SYS_Bind(&stSrcChn, &stDestChn);
+		if (ret != 0)
+			fastboot_demo_err("VI dev 0 chn 1 bind VENC dev 0 chn 1 failed, ret: 0x%08x\n", ret);
+	}
 
 	return ret;
 }
@@ -1070,15 +1380,17 @@ static int32_t vi_unbind_venc() {
 	if (ret != 0)
 		fastboot_demo_err("VI dev 0 chn 0 unbind VENC dev 0 chn 0 failed, ret: 0x%08x\n", ret);
 
-	stSrcChn.enModId = RK_ID_VI;
-	stSrcChn.s32DevId = 0;
-	stSrcChn.s32ChnId = VI_SUB_CHANNEL;
-	stDestChn.enModId = RK_ID_VENC;
-	stDestChn.s32DevId = 0;
-	stDestChn.s32ChnId = VENC_SUB_CHANNEL;
-	ret = RK_MPI_SYS_UnBind(&stSrcChn, &stDestChn);
-	if (ret != 0)
-		fastboot_demo_err("VI dev 0 chn 1 unbind VENC dev 0 chn 1 failed, ret: 0x%08x\n", ret);
+	if (fastboot_sub_channel_enabled()) {
+		stSrcChn.enModId = RK_ID_VI;
+		stSrcChn.s32DevId = 0;
+		stSrcChn.s32ChnId = VI_SUB_CHANNEL;
+		stDestChn.enModId = RK_ID_VENC;
+		stDestChn.s32DevId = 0;
+		stDestChn.s32ChnId = VENC_SUB_CHANNEL;
+		ret = RK_MPI_SYS_UnBind(&stSrcChn, &stDestChn);
+		if (ret != 0)
+			fastboot_demo_err("VI dev 0 chn 1 unbind VENC dev 0 chn 1 failed, ret: 0x%08x\n", ret);
+	}
 
 	return ret;
 }
@@ -1492,6 +1804,8 @@ void smartIr_stop() {}
 #endif
 
 int main(int argc, char *argv[]) {
+	setvbuf(stderr, NULL, _IONBF, 0);
+	fprintf(stderr, "fastboot_h264_fifo: build_id=%s\n", FASTBOOT_H264_FIFO_BUILD_ID);
 	klog("[thunderboot_time] fastboot_demo enter");
 
 	MPI_CTX_S ctx = {0};
@@ -1519,11 +1833,43 @@ int main(int argc, char *argv[]) {
 
 	meta_size = (uint32_t)get_cmd_val("meta_part_size", 16);
 	{
+		const char *channel_env = getenv("FASTBOOT_VENC_CHANNEL");
+		const char *h264_path = getenv("FASTBOOT_H264_OUT");
 		const char *venc0_path = getenv("FASTBOOT_VENC0_PATH");
-		if (venc0_path && venc0_path[0])
+		const char *venc1_path = getenv("FASTBOOT_VENC1_PATH");
+		if (channel_env && channel_env[0] == '1' && channel_env[1] == '\0')
+			g_fastboot_output_channel = VENC_SUB_CHANNEL;
+		else
+			g_fastboot_output_channel = VENC_MAIN_CHANNEL;
+		g_fastboot_output_width = fastboot_parse_positive_env("FASTBOOT_VIDEO_WIDTH",
+		                                                      FASTBOOT_FIFO_DEFAULT_WIDTH);
+		g_fastboot_output_height = fastboot_parse_positive_env("FASTBOOT_VIDEO_HEIGHT",
+		                                                       FASTBOOT_FIFO_DEFAULT_HEIGHT);
+		g_fastboot_output_fps = fastboot_parse_fps_env("FASTBOOT_VIDEO_FPS",
+		                                               FASTBOOT_FIFO_DEFAULT_FPS);
+		g_fastboot_output_bitrate = fastboot_parse_bitrate_env("FASTBOOT_H264_BITRATE",
+		                                                       FASTBOOT_FIFO_DEFAULT_BITRATE);
+		g_fastboot_output_start_bitrate =
+		    fastboot_parse_bitrate_env("FASTBOOT_H264_START_BITRATE",
+		                               FASTBOOT_FIFO_DEFAULT_START_BITRATE);
+		g_fastboot_output_ramp_frames =
+		    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
+		                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
+
+		if (g_fastboot_output_channel == VENC_SUB_CHANNEL && venc1_path && venc1_path[0])
+			g_fastboot_out_path = venc1_path;
+		else if (g_fastboot_output_channel == VENC_MAIN_CHANNEL && venc0_path && venc0_path[0])
 			g_fastboot_out_path = venc0_path;
+		else if (h264_path && h264_path[0])
+			g_fastboot_out_path = h264_path;
+		else if (venc0_path && venc0_path[0])
+			g_fastboot_out_path = venc0_path;
+		else if (venc1_path && venc1_path[0])
+			g_fastboot_out_path = venc1_path;
 		if (g_fastboot_out_path) {
 			fprintf(stderr, "fastboot_h264_fifo: effective output=%s\n", g_fastboot_out_path);
+			fprintf(stderr, "fastboot_h264_fifo: continuous output-channel FIFO enabled channel=%d\n",
+			        g_fastboot_output_channel);
 			fflush(stderr);
 		}
 	}
@@ -1532,6 +1878,7 @@ int main(int argc, char *argv[]) {
 		fastboot_demo_err("get_meta_params failed metaVirmem %p\n", metaVirmem);
 		goto __FAILED;
 	}
+	fastboot_apply_fifo_video_config(&handle);
 
 	meta_params_dump(&handle);
 
@@ -1589,24 +1936,37 @@ int main(int argc, char *argv[]) {
 #endif
 
 #if (ENABLE_RTSP)
-	rtsp_init();
+	if (g_fastboot_out_path) {
+		fprintf(stderr, "fastboot_h264_fifo: RTSP disabled for continuous FIFO output\n");
+		fflush(stderr);
+	} else {
+		rtsp_init();
+	}
 #endif
 
 	pthread_t main_thread0, sub_venc_thread_id, md_nn_thread_id;
+	bool sub_venc_thread_started = false;
 	pthread_create(&main_thread0, NULL, GetVencStream, (void *)VENC_MAIN_CHANNEL);
-	pthread_create(&sub_venc_thread_id, NULL, GetVencStream, (void *)VENC_SUB_CHANNEL);
+	if (fastboot_sub_channel_enabled()) {
+		pthread_create(&sub_venc_thread_id, NULL, GetVencStream, (void *)VENC_SUB_CHANNEL);
+		sub_venc_thread_started = true;
+	} else {
+		fprintf(stderr, "fastboot_h264_fifo: sub VENC stream thread disabled for FIFO output\n");
+	}
 #if defined(ROCKIVA)
 	pthread_create(&md_nn_thread_id, NULL, md_nn_loop, &ctx);
 #endif
 	pthread_join(main_thread0, NULL);
-	pthread_join(sub_venc_thread_id, NULL);
+	if (sub_venc_thread_started)
+		pthread_join(sub_venc_thread_id, NULL);
 #if defined(ROCKIVA)
 	pthread_join(md_nn_thread_id, NULL);
 #endif
 
 __FAILED:
 #if (ENABLE_RTSP)
-	rtsp_deinit();
+	if (g_rtsp_ctx)
+		rtsp_deinit();
 #endif
 	RK_MPI_VI_StopPipe(0);
 	ret = vi_unbind_venc();

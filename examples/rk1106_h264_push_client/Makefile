@@ -29,6 +29,7 @@ HELPER_C := $(EXAMPLE_DIR)/src/rk1106_h264_capture_helper.c
 HELPER := $(BUILD_DIR)/rk1106_h264_capture_helper
 FASTBOOT_MIRROR_C := $(EXAMPLE_DIR)/src/fastboot_demo_mirror/fastboot_demo.c
 FASTBOOT_MIRROR := $(BUILD_DIR)/fastboot_demo_mirror
+FASTBOOT_FIFO := $(BUILD_DIR)/fastboot_h264_fifo
 
 TARGET_OS ?= linux
 TARGET_ARCH ?= arm
@@ -109,6 +110,13 @@ $(FASTBOOT_MIRROR): $(FASTBOOT_MIRROR_C) | check-cross-tools
 fastboot-mirror: $(FASTBOOT_MIRROR)
 	@printf 'fastboot mirror ready: %s\n' "$(FASTBOOT_MIRROR)"
 
+$(FASTBOOT_FIFO): $(FASTBOOT_MIRROR)
+	cp "$(FASTBOOT_MIRROR)" "$@"
+	chmod +x "$@"
+
+fastboot-fifo: $(FASTBOOT_FIFO)
+	@printf 'fastboot fifo ready: %s\n' "$(FASTBOOT_FIFO)"
+
 $(HOST_SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya $(REPO_ROOT)/src/webrtc/media/fastboot_h264_codec.uya | $(BUILD_DIR) check-host-tools
 	cd "$(REPO_ROOT)" && \
 		TARGET_OS="$(HOST_TARGET_OS)" TARGET_ARCH="$(HOST_TARGET_ARCH)" UYA_ROOT="$(UYA_LIB)" \
@@ -124,17 +132,18 @@ host: $(HOST_SENDER)
 strip: $(SENDER)
 	"$(STRIP)" "$(SENDER)" || true
 
-package: $(SENDER) $(HELPER) $(FASTBOOT_MIRROR) board_run.sh host/manual_preview.html host/signaling_server.py README.md
+package: $(SENDER) $(HELPER) $(FASTBOOT_MIRROR) $(FASTBOOT_FIFO) board_run.sh host/manual_preview.html host/signaling_server.py README.md
 	rm -rf "$(PACKAGE_DIR)"
 	mkdir -p "$(PACKAGE_DIR)" "$(PACKAGE_DIR)/host"
 	cp "$(SENDER)" "$(PACKAGE_DIR)/"
 	cp "$(HELPER)" "$(PACKAGE_DIR)/"
 	cp "$(FASTBOOT_MIRROR)" "$(PACKAGE_DIR)/"
+	cp "$(FASTBOOT_FIFO)" "$(PACKAGE_DIR)/fastboot_h264_fifo"
 	cp board_run.sh "$(PACKAGE_DIR)/"
 	cp host/manual_preview.html "$(PACKAGE_DIR)/host/"
 	cp host/signaling_server.py "$(PACKAGE_DIR)/host/"
 	cp README.md "$(PACKAGE_DIR)/"
-	chmod +x "$(PACKAGE_DIR)/board_run.sh" "$(PACKAGE_DIR)/rk1106_h264_sender" "$(PACKAGE_DIR)/rk1106_h264_capture_helper" "$(PACKAGE_DIR)/fastboot_demo_mirror"
+	chmod +x "$(PACKAGE_DIR)/board_run.sh" "$(PACKAGE_DIR)/rk1106_h264_sender" "$(PACKAGE_DIR)/rk1106_h264_capture_helper" "$(PACKAGE_DIR)/fastboot_demo_mirror" "$(PACKAGE_DIR)/fastboot_h264_fifo"
 	@printf 'package ready: %s\n' "$(PACKAGE_DIR)"
 
 clean:
