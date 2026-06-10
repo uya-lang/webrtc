@@ -44,10 +44,10 @@ if [ -n "$SIGNAL_BASE_URL" ]; then
     fi
 fi
 if [ -z "$OFFER_URL" ]; then
-    OFFER_URL=http://192.168.3.8:8080/offer
+    OFFER_URL=http://192.168.3.8:8081/offer
 fi
 if [ -z "$ANSWER_URL" ]; then
-    ANSWER_URL=http://192.168.3.8:8080/answer
+    ANSWER_URL=http://192.168.3.8:8081/answer
 fi
 
 detect_local_host() {

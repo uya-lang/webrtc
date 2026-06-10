@@ -180,6 +180,65 @@ fn check_opus_frame_packetize() i32 {
     return 0i32;
 }
 
+fn check_pcmu_frame_packetize() i32 {
+    var sender: UyaDirectSender = uya_direct_sender_make();
+    var config: UyaDirectSenderConfig = uya_direct_sender_config_make();
+    config.audio_codec_id = CODEC_ID_PCMU;
+    config.audio_payload_type = CODEC_DEFAULT_PT_PCMU;
+    config.audio_ssrc = 0x01020304u32;
+    config.video_ssrc = 0x11223344u32;
+    config.audio_initial_sequence = 30u16;
+    config.audio_initial_timestamp = 80u32;
+    const init_result: !void = uya_direct_sender_init(&sender, config);
+    if init_result.error_id != 0 {
+        return 120i32;
+    }
+    if sender.config.audio_clock_rate_hz != 8000u32 {
+        return 121i32;
+    }
+
+    var pcmu_payload: [byte: 4] = [
+        0xff as byte, 0x7f as byte, 0x55 as byte, 0x00 as byte,
+    ];
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.media_kind = MEDIA_KIND_AUDIO;
+    frame.codec_id = CODEC_ID_PCMU;
+    frame.payload = pcmu_payload[0:4];
+    frame.duration_us = 20000u32;
+    frame.sequence_id = 2u64;
+
+    var packet: [byte: 256] = [];
+    const summary: !DirectSenderPacket = rtp_packetize_encoded_frame(&sender, &frame, packet[0:256]);
+    if summary.error_id != 0 {
+        return 122i32;
+    }
+    if summary.value.payload_type != CODEC_DEFAULT_PT_PCMU
+        || summary.value.sequence_number != 30u16
+        || summary.value.timestamp != 80u32
+        || summary.value.ssrc != 0x01020304u32 {
+        return 123i32;
+    }
+
+    const parsed: !RtpPacket = rtp_packet_parse(packet[0:summary.value.rtp_len]);
+    if parsed.error_id != 0 {
+        return 124i32;
+    }
+    if parsed.value.header.payload_type != 0u8 {
+        return 125i32;
+    }
+    if !bytes_equal(parsed.value.header.payload, pcmu_payload[0:4]) {
+        return 126i32;
+    }
+    if sender.audio_sender.next_sequence != 31u16 || sender.audio_sender.next_timestamp != 240u32 {
+        return 127i32;
+    }
+    if sender.diagnostics.audio_rtp_packets != 1u64 || sender.diagnostics.audio_rtp_payload_bytes != 4u64 {
+        return 128i32;
+    }
+
+    return 0i32;
+}
+
 fn check_vp8_frame_packetize() i32 {
     var sender_result: !UyaDirectSender = sender_make();
     if sender_result.error_id != 0 {
@@ -562,6 +621,12 @@ fn main() i32 {
     result = check_vp8_frame_packetize();
     if result != 0i32 {
         printf("Uya FFmpeg direct sender VP8 packetize tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_pcmu_frame_packetize();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct sender PCMU packetize tests failed: %d\n", result);
         return 1i32;
     }
 

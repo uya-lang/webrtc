@@ -25,6 +25,7 @@ export struct DirectSessionMedia {
     ice_pwd: &[byte] = [],
     codec_id: u16 = CODEC_ID_UNKNOWN,
     payload_type: u8 = 0u8,
+    payload_type_present: bool = false,
     fmtp: &[byte] = [],
     remote_candidate: DirectSessionCandidate = DirectSessionCandidate{},
 }
@@ -246,32 +247,70 @@ fn direct_session_parse_candidate(media: &DirectSessionMedia, value: &[byte]) !v
     media.remote_candidate.port = try direct_session_parse_decimal_u16(port_token);
 }
 
-fn direct_session_parse_rtpmap(media: &DirectSessionMedia, value: &[byte], preferred_video_codec_id: u16) !void {
-    if media == null || media.payload_type != 0u8 {
+fn direct_session_audio_codec_matches_preference(codec_id: u16, preferred_audio_codec_id: u16) bool {
+    return preferred_audio_codec_id == CODEC_ID_UNKNOWN || codec_id == preferred_audio_codec_id;
+}
+
+fn direct_session_try_parse_audio_rtpmap(
+    media: &DirectSessionMedia,
+    payload_token: &[byte],
+    codec_token: &[byte],
+    preferred_audio_codec_id: u16,
+) !bool {
+    if media == null || !media.present {
+        return false;
+    }
+    var codec_id: u16 = CODEC_ID_UNKNOWN;
+    if direct_session_bytes_equal_case_insensitive(codec_token, "opus/48000/2" as &[byte]) {
+        codec_id = CODEC_ID_OPUS;
+    } else if direct_session_bytes_equal_case_insensitive(codec_token, "pcmu/8000" as &[byte]) {
+        codec_id = CODEC_ID_PCMU;
+    } else if direct_session_bytes_equal_case_insensitive(codec_token, "pcma/8000" as &[byte]) {
+        codec_id = CODEC_ID_PCMA;
+    } else {
+        return false;
+    }
+    if !direct_session_audio_codec_matches_preference(codec_id, preferred_audio_codec_id) {
+        return false;
+    }
+    media.codec_id = codec_id;
+    media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+    media.payload_type_present = true;
+    return true;
+}
+
+fn direct_session_parse_rtpmap(
+    media: &DirectSessionMedia,
+    value: &[byte],
+    preferred_video_codec_id: u16,
+    preferred_audio_codec_id: u16,
+) !void {
+    if media == null || media.payload_type_present {
         return;
     }
     var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
     const payload_token: &[byte] = try direct_session_token_cursor_next(&cursor);
     const codec_token: &[byte] = try direct_session_token_cursor_next(&cursor);
 
-    if media.present && direct_session_bytes_equal_case_insensitive(codec_token, "opus/48000/2" as &[byte]) {
-        media.codec_id = CODEC_ID_OPUS;
-        media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+    const audio_matched: bool = try direct_session_try_parse_audio_rtpmap(media, payload_token, codec_token, preferred_audio_codec_id);
+    if audio_matched {
         return;
     }
     if media.present && preferred_video_codec_id == CODEC_ID_VP8 && direct_session_bytes_equal_case_insensitive(codec_token, "vp8/90000" as &[byte]) {
         media.codec_id = CODEC_ID_VP8;
         media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+        media.payload_type_present = true;
         return;
     }
     if media.present && preferred_video_codec_id == CODEC_ID_H264 && direct_session_bytes_equal_case_insensitive(codec_token, "h264/90000" as &[byte]) {
         media.codec_id = CODEC_ID_H264;
         media.payload_type = try direct_session_parse_decimal_u8(payload_token);
+        media.payload_type_present = true;
     }
 }
 
 fn direct_session_parse_fmtp(media: &DirectSessionMedia, value: &[byte]) !void {
-    if media == null || media.payload_type == 0u8 {
+    if media == null || !media.payload_type_present {
         return;
     }
     var cursor: DirectSessionTokenCursor = DirectSessionTokenCursor{ bytes: value };
@@ -300,7 +339,12 @@ fn direct_session_parse_extmap(media: &DirectSessionMedia, value: &[byte]) !void
     }
 }
 
-fn direct_session_parse_attribute(media: &DirectSessionMedia, value: &[byte], preferred_video_codec_id: u16) !void {
+fn direct_session_parse_attribute(
+    media: &DirectSessionMedia,
+    value: &[byte],
+    preferred_video_codec_id: u16,
+    preferred_audio_codec_id: u16,
+) !void {
     if media == null {
         return;
     }
@@ -321,7 +365,7 @@ fn direct_session_parse_attribute(media: &DirectSessionMedia, value: &[byte], pr
         return;
     }
     if direct_session_starts_with(value, "rtpmap:" as &[byte]) {
-        try direct_session_parse_rtpmap(media, value[7:value.len - 7], preferred_video_codec_id);
+        try direct_session_parse_rtpmap(media, value[7:value.len - 7], preferred_video_codec_id, preferred_audio_codec_id);
         return;
     }
     if direct_session_starts_with(value, "fmtp:" as &[byte]) {
@@ -333,8 +377,15 @@ fn direct_session_parse_attribute(media: &DirectSessionMedia, value: &[byte], pr
     }
 }
 
-export fn direct_session_parse_chrome_offer_sdp_for_video_codec(sdp: &[byte], video_codec_id: u16) !DirectSessionOffer {
+export fn direct_session_parse_chrome_offer_sdp_for_audio_video_codecs(
+    sdp: &[byte],
+    audio_codec_id: u16,
+    video_codec_id: u16,
+) !DirectSessionOffer {
     if video_codec_id != CODEC_ID_VP8 && video_codec_id != CODEC_ID_H264 {
+        return error.DirectSessionUnsupportedCodec;
+    }
+    if audio_codec_id != CODEC_ID_UNKNOWN && !direct_session_audio_codec_supported(audio_codec_id) {
         return error.DirectSessionUnsupportedCodec;
     }
 
@@ -353,14 +404,14 @@ export fn direct_session_parse_chrome_offer_sdp_for_video_codec(sdp: &[byte], vi
             continue;
         }
         if scanner.current.kind == ('a' as byte) {
-            try direct_session_parse_attribute(current_media, scanner.current.value, video_codec_id);
+            try direct_session_parse_attribute(current_media, scanner.current.value, video_codec_id, audio_codec_id);
         }
     }
 
     if !offer.audio.present || !offer.video.present {
         return error.DirectSessionInvalidOffer;
     }
-    if offer.audio.payload_type == 0u8 || offer.video.payload_type == 0u8 {
+    if !offer.audio.payload_type_present || !offer.video.payload_type_present {
         return error.DirectSessionUnsupportedCodec;
     }
     if offer.audio.ice_ufrag.len == 0usize || offer.audio.ice_pwd.len == 0usize {
@@ -379,6 +430,10 @@ export fn direct_session_parse_chrome_offer_sdp_for_video_codec(sdp: &[byte], vi
         offer.video.mid = "video" as &[byte];
     }
     return offer;
+}
+
+export fn direct_session_parse_chrome_offer_sdp_for_video_codec(sdp: &[byte], video_codec_id: u16) !DirectSessionOffer {
+    return direct_session_parse_chrome_offer_sdp_for_audio_video_codecs(sdp, CODEC_ID_UNKNOWN, video_codec_id);
 }
 
 export fn direct_session_parse_chrome_offer_sdp(sdp: &[byte]) !DirectSessionOffer {
@@ -447,6 +502,28 @@ fn direct_session_answer_append_candidate(out: &[byte], cursor: &usize, local_ho
     try direct_session_answer_append_line(out, cursor, "a=end-of-candidates" as &[byte]);
 }
 
+fn direct_session_audio_codec_supported(codec_id: u16) bool {
+    return codec_id == CODEC_ID_OPUS || codec_id == CODEC_ID_PCMU || codec_id == CODEC_ID_PCMA;
+}
+
+fn direct_session_answer_append_audio_codec(out: &[byte], cursor: &usize, audio: &DirectSessionMedia) !void {
+    if audio == null || !direct_session_audio_codec_supported(audio.codec_id) {
+        return error.DirectSessionUnsupportedCodec;
+    }
+    try direct_session_answer_append(out, cursor, "a=rtpmap:" as &[byte]);
+    try direct_session_answer_append_u32(out, cursor, audio.payload_type as u32);
+    if audio.codec_id == CODEC_ID_OPUS {
+        try direct_session_answer_append_line(out, cursor, " opus/48000/2" as &[byte]);
+        try direct_session_answer_append(out, cursor, "a=fmtp:" as &[byte]);
+        try direct_session_answer_append_u32(out, cursor, audio.payload_type as u32);
+        try direct_session_answer_append_line(out, cursor, " minptime=10;useinbandfec=1" as &[byte]);
+    } else if audio.codec_id == CODEC_ID_PCMU {
+        try direct_session_answer_append_line(out, cursor, " PCMU/8000" as &[byte]);
+    } else {
+        try direct_session_answer_append_line(out, cursor, " PCMA/8000" as &[byte]);
+    }
+}
+
 fn direct_session_answer_append_common_media(
     out: &[byte],
     cursor: &usize,
@@ -505,12 +582,7 @@ export fn direct_session_write_passive_answer(
     try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
     try direct_session_answer_append(out, &cursor, "\r\nc=IN IP4 0.0.0.0\r\n" as &[byte]);
     try direct_session_answer_append_common_media(out, &cursor, &offer.audio, local_ufrag, local_pwd, local_fingerprint);
-    try direct_session_answer_append(out, &cursor, "a=rtpmap:" as &[byte]);
-    try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
-    try direct_session_answer_append_line(out, &cursor, " opus/48000/2" as &[byte]);
-    try direct_session_answer_append(out, &cursor, "a=fmtp:" as &[byte]);
-    try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
-    try direct_session_answer_append_line(out, &cursor, " minptime=10;useinbandfec=1" as &[byte]);
+    try direct_session_answer_append_audio_codec(out, &cursor, &offer.audio);
     try direct_session_answer_append(out, &cursor, "a=ssrc:" as &[byte]);
     try direct_session_answer_append_u32(out, &cursor, DIRECT_SESSION_DEFAULT_AUDIO_SSRC);
     try direct_session_answer_append_line(out, &cursor, " cname:uya-direct" as &[byte]);

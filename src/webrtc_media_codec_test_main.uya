@@ -150,6 +150,12 @@ fn check_generic_wrappers() i32 {
     if bad_audio.error_id != @error_id(error.CodecInvalidConfig) {
         return 29i32;
     }
+    if codec_require_audio_codec(CODEC_ID_PCMU, 1u8).error_id != 0 {
+        return 30i32;
+    }
+    if codec_require_audio_codec(CODEC_ID_PCMA, 1u8).error_id != 0 {
+        return 31i32;
+    }
     return 0i32;
 }
 

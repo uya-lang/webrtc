@@ -50,10 +50,10 @@ On the host:
 
 ```sh
 python3 examples/rk1106_h264_push_client/host/signaling_server.py \
-    --host 0.0.0.0 --port 8080
+    --host 0.0.0.0 --port 8081
 ```
 
-Open `http://HOST_IP:8080/manual_preview.html` in Chrome and click
+Open `http://HOST_IP:8081/manual_preview.html` in Chrome and click
 `Auto Signal`. Chrome must include `H264/90000` in the offer.
 
 On the board:
@@ -75,7 +75,7 @@ BITRATE=1000000
 GOP=60
 DURATION_US=60000000
 LOCAL_HOST=192.168.3.165
-SIGNAL_BASE_URL=http://192.168.3.8:8080/api
+SIGNAL_BASE_URL=http://192.168.3.8:8081/api
 OFFER_POLL_TRIES=120
 OFFER_POLL_INTERVAL_MS=1000
 FASTBOOT_VENC_CHANNEL=0
@@ -91,8 +91,8 @@ You can also run the binary directly:
 
 ```sh
 ./rk1106_h264_sender \
-    --offer-url http://192.168.3.8:8080/offer \
-    --answer-url http://192.168.3.8:8080/answer \
+    --offer-url http://192.168.3.8:8081/offer \
+    --answer-url http://192.168.3.8:8081/answer \
     --answer-json /userdata/webrtc/answer.json \
     --diagnostics-json /userdata/webrtc/diagnostics.json \
     --v4l2-device /dev/video7 \

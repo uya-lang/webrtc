@@ -39,8 +39,8 @@ Then start WebRTC directly from the V4L2 node:
 
 ```sh
 ./uya_vp8_direct_sender \
-    --offer-url http://192.168.3.8:8080/offer \
-    --answer-url http://192.168.3.8:8080/answer \
+    --offer-url http://192.168.3.8:8081/offer \
+    --answer-url http://192.168.3.8:8081/answer \
     --answer-json /tmp/answer.json \
     --diagnostics-json /tmp/diagnostics.json \
     --v4l2-device /dev/video7 \
@@ -112,10 +112,10 @@ Terminal 1:
 
 ```sh
 python3 examples/rk1106_v4l2_push_client/host/signaling_server.py \
-    --host 127.0.0.1 --port 8080
+    --host 127.0.0.1 --port 8081
 ```
 
-Open `http://127.0.0.1:8080/manual_preview.html` in the browser and click
+Open `http://127.0.0.1:8081/manual_preview.html` in the browser and click
 `Auto Signal`.
 
 Terminal 2:
@@ -134,7 +134,7 @@ WIDTH=320
 HEIGHT=240
 FPS=15
 LOCAL_HOST=127.0.0.1
-SIGNAL_BASE_URL=http://127.0.0.1:8080/api
+SIGNAL_BASE_URL=http://127.0.0.1:8081/api
 ```
 
 Expected sender milestones:
@@ -172,10 +172,10 @@ On the host:
 
 ```sh
 python3 examples/rk1106_v4l2_push_client/host/signaling_server.py \
-    --host 0.0.0.0 --port 8080
+    --host 0.0.0.0 --port 8081
 ```
 
-Open `http://HOST_IP:8080/manual_preview.html` in the browser and click
+Open `http://HOST_IP:8081/manual_preview.html` in the browser and click
 `Auto Signal`. The page creates an offer, posts it to the server, waits for the
 board answer, and sets the answer automatically.
 
@@ -193,8 +193,8 @@ left on the server, the browser will not connect to that answer.
 By default the Uya sender uses these board bring-up addresses:
 
 ```sh
-OFFER_URL=http://192.168.3.8:8080/offer
-ANSWER_URL=http://192.168.3.8:8080/answer
+OFFER_URL=http://192.168.3.8:8081/offer
+ANSWER_URL=http://192.168.3.8:8081/answer
 LOCAL_HOST=192.168.3.165
 ```
 
@@ -229,7 +229,7 @@ HEIGHT=180
 FPS=10
 DURATION_US=60000000
 LOCAL_HOST=192.168.1.50
-SIGNAL_BASE_URL=http://192.168.1.10:8080/api
+SIGNAL_BASE_URL=http://192.168.1.10:8081/api
 OFFER_POLL_TRIES=120  # 0 waits forever
 OFFER_POLL_INTERVAL_MS=1000
 SENDER_LOG=/tmp/rk1106-webrtc-push/sender.log

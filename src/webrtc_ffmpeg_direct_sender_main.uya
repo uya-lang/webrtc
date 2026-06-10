@@ -2447,6 +2447,8 @@ fn run_live_sender(
     const video_ssrc: u32 = DIRECT_SENDER_DEFAULT_VIDEO_SSRC;
     sender_config.audio_ssrc = audio_ssrc;
     sender_config.video_ssrc = video_ssrc;
+    sender_config.audio_codec_id = offer.audio.codec_id;
+    sender_config.audio_clock_rate_hz = codec_default_clock_rate_hz(offer.audio.codec_id, MEDIA_KIND_AUDIO);
     sender_config.audio_payload_type = offer.audio.payload_type;
     sender_config.video_payload_type = offer.video.payload_type;
     sender_config.audio_mid_extension_id = offer.audio.mid_extension_id;

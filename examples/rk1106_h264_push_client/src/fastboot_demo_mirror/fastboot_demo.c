@@ -65,7 +65,7 @@
 #define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-fpslog-aiqfps-20260609o"
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-force-day-20260609p"
 
 #define ENABLE_SMART_IR
 
@@ -381,6 +381,7 @@ static int g_fastboot_output_fps = FASTBOOT_FIFO_DEFAULT_FPS;
 static int g_fastboot_output_bitrate = FASTBOOT_FIFO_DEFAULT_BITRATE;
 static int g_fastboot_output_start_bitrate = FASTBOOT_FIFO_DEFAULT_START_BITRATE;
 static int g_fastboot_output_ramp_frames = FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES;
+static int g_fastboot_force_day = 0;
 static FILE *g_fastboot_output_file = NULL;
 static int g_fastboot_logged_first_output_write = 0;
 static int g_fastboot_logged_open_error = 0;
@@ -632,6 +633,32 @@ static int fastboot_parse_fps_env(const char *name, int fallback) {
 	if (end == value || *end != '\0' || parsed < 1 || parsed > 60)
 		return fallback;
 	return (int)parsed;
+}
+
+static bool fastboot_parse_bool_env(const char *name, bool fallback) {
+	const char *value = getenv(name);
+
+	if (!value || !value[0])
+		return fallback;
+	if (!strcmp(value, "1") || !strcmp(value, "true") || !strcmp(value, "yes") ||
+	    !strcmp(value, "on"))
+		return true;
+	if (!strcmp(value, "0") || !strcmp(value, "false") || !strcmp(value, "no") ||
+	    !strcmp(value, "off"))
+		return false;
+	return fallback;
+}
+
+static void fastboot_apply_force_day(struct meta_info *handle) {
+	if (!g_fastboot_force_day || !handle)
+		return;
+
+	fprintf(stderr,
+	        "fastboot_h264_fifo: force day/color mode enabled color_mode=%d night_mode=%d\n",
+	        handle->app_params.color_mode, handle->app_params.night_mode);
+	fflush(stderr);
+	handle->app_params.color_mode = 0;
+	handle->app_params.night_mode = 0;
 }
 
 static void fastboot_apply_fifo_video_config(struct meta_info *handle) {
@@ -1749,6 +1776,12 @@ void smartIr_start(struct meta_info *handle) {
 	int rk_led_value = (int)get_cmd_val("rk_led_value", 0);
 	int rk_color_mode = (int)handle->app_params.color_mode;
 
+	if (g_fastboot_force_day) {
+		fprintf(stderr, "fastboot_h264_fifo: SmartIR skipped by FASTBOOT_FORCE_DAY\n");
+		fflush(stderr);
+		return;
+	}
+
 	rk_smartIr_t *smartIr_ctx = &g_smartIr_ctx;
 	smartIr_ctx->aiq_ctx = g_aiq_ctx;
 	smartIr_ctx->ir_ctx = rk_smart_ir_init(smartIr_ctx->aiq_ctx);
@@ -1876,6 +1909,7 @@ int main(int argc, char *argv[]) {
 		g_fastboot_output_ramp_frames =
 		    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
 		                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
+		g_fastboot_force_day = fastboot_parse_bool_env("FASTBOOT_FORCE_DAY", false) ? 1 : 0;
 
 		if (g_fastboot_output_channel == VENC_SUB_CHANNEL && venc1_path && venc1_path[0])
 			g_fastboot_out_path = venc1_path;
@@ -1900,6 +1934,7 @@ int main(int argc, char *argv[]) {
 		goto __FAILED;
 	}
 	fastboot_apply_fifo_video_config(&handle);
+	fastboot_apply_force_day(&handle);
 
 	meta_params_dump(&handle);
 

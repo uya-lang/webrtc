@@ -19,6 +19,10 @@ export const CODEC_ID_AV1: u16 = 4u16;
 export const CODEC_ID_RTX: u16 = 5u16;
 export const CODEC_ID_RED: u16 = 6u16;
 export const CODEC_ID_ULPFEC: u16 = 7u16;
+export const CODEC_ID_PCMU: u16 = 8u16;
+export const CODEC_ID_PCMA: u16 = 9u16;
+export const CODEC_DEFAULT_PT_PCMU: u8 = 0u8;
+export const CODEC_DEFAULT_PT_PCMA: u8 = 8u8;
 export const CODEC_DEFAULT_PT_OPUS: u8 = 111u8;
 export const CODEC_DEFAULT_PT_VP8: u8 = 96u8;
 export const CODEC_DEFAULT_PT_RTX: u8 = 97u8;
@@ -150,6 +154,12 @@ export fn codec_id_from_encoding_name(name: &[byte], media_kind: u8) u16 {
         if media_bytes_equal_fold(name, "opus" as &[byte]) {
             return CODEC_ID_OPUS;
         }
+        if media_bytes_equal_fold(name, "pcmu" as &[byte]) {
+            return CODEC_ID_PCMU;
+        }
+        if media_bytes_equal_fold(name, "pcma" as &[byte]) {
+            return CODEC_ID_PCMA;
+        }
         if media_bytes_equal_fold(name, "red" as &[byte]) {
             return CODEC_ID_RED;
         }
@@ -183,6 +193,9 @@ export fn codec_default_clock_rate_hz(codec_id: u16, media_kind: u8) u32 {
     if codec_id == CODEC_ID_OPUS {
         return 48000u32;
     }
+    if codec_id == CODEC_ID_PCMU || codec_id == CODEC_ID_PCMA {
+        return 8000u32;
+    }
     if codec_id == CODEC_ID_VP8 || codec_id == CODEC_ID_H264 || codec_id == CODEC_ID_AV1 || codec_id == CODEC_ID_RTX {
         return 90000u32;
     }
@@ -201,6 +214,12 @@ export fn codec_default_clock_rate_hz(codec_id: u16, media_kind: u8) u32 {
 export fn codec_default_payload_type(codec_id: u16, media_kind: u8) u8 {
     if codec_id == CODEC_ID_OPUS && media_kind == MEDIA_KIND_AUDIO {
         return CODEC_DEFAULT_PT_OPUS;
+    }
+    if codec_id == CODEC_ID_PCMU && media_kind == MEDIA_KIND_AUDIO {
+        return CODEC_DEFAULT_PT_PCMU;
+    }
+    if codec_id == CODEC_ID_PCMA && media_kind == MEDIA_KIND_AUDIO {
+        return CODEC_DEFAULT_PT_PCMA;
     }
     if codec_id == CODEC_ID_VP8 && media_kind == MEDIA_KIND_VIDEO {
         return CODEC_DEFAULT_PT_VP8;
@@ -225,6 +244,12 @@ export fn codec_default_payload_type(codec_id: u16, media_kind: u8) u8 {
 
 export fn codec_id_from_default_payload_type(payload_type: u8, media_kind: u8) u16 {
     if media_kind == MEDIA_KIND_AUDIO {
+        if payload_type == CODEC_DEFAULT_PT_PCMU {
+            return CODEC_ID_PCMU;
+        }
+        if payload_type == CODEC_DEFAULT_PT_PCMA {
+            return CODEC_ID_PCMA;
+        }
         if payload_type == CODEC_DEFAULT_PT_OPUS {
             return CODEC_ID_OPUS;
         }

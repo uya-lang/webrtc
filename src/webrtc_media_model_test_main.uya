@@ -104,41 +104,65 @@ fn check_codec_id_media_kind_mappings() i32 {
     if codec_id_from_encoding_name("OPUS" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_OPUS {
         return 43i32;
     }
-    if codec_id_from_encoding_name("vp8" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_VP8 {
+    if codec_id_from_encoding_name("PCMU" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_PCMU {
         return 44i32;
     }
-    if codec_id_from_encoding_name("av1x" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_AV1 {
+    if codec_id_from_encoding_name("pcma" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_PCMA {
         return 45i32;
     }
-    if codec_id_from_encoding_name("rtx" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_UNKNOWN {
+    if codec_id_from_encoding_name("vp8" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_VP8 {
         return 46i32;
+    }
+    if codec_id_from_encoding_name("av1x" as &[byte], MEDIA_KIND_VIDEO) != CODEC_ID_AV1 {
+        return 47i32;
+    }
+    if codec_id_from_encoding_name("rtx" as &[byte], MEDIA_KIND_AUDIO) != CODEC_ID_UNKNOWN {
+        return 48i32;
     }
 
     if codec_default_clock_rate_hz(CODEC_ID_OPUS, MEDIA_KIND_AUDIO) != 48000u32 {
-        return 47i32;
+        return 49i32;
+    }
+    if codec_default_clock_rate_hz(CODEC_ID_PCMU, MEDIA_KIND_AUDIO) != 8000u32 {
+        return 50i32;
+    }
+    if codec_default_clock_rate_hz(CODEC_ID_PCMA, MEDIA_KIND_AUDIO) != 8000u32 {
+        return 51i32;
     }
     if codec_default_clock_rate_hz(CODEC_ID_VP8, MEDIA_KIND_VIDEO) != 90000u32 {
-        return 48i32;
+        return 52i32;
     }
     if codec_default_clock_rate_hz(CODEC_ID_UNKNOWN, MEDIA_KIND_VIDEO) != 0u32 {
-        return 49i32;
+        return 53i32;
     }
 
     if codec_default_payload_type(CODEC_ID_OPUS, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_OPUS {
-        return 50i32;
+        return 54i32;
+    }
+    if codec_default_payload_type(CODEC_ID_PCMU, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_PCMU {
+        return 55i32;
+    }
+    if codec_default_payload_type(CODEC_ID_PCMA, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_PCMA {
+        return 56i32;
     }
     if codec_default_payload_type(CODEC_ID_H264, MEDIA_KIND_VIDEO) != CODEC_DEFAULT_PT_H264 {
-        return 51i32;
+        return 57i32;
     }
     if codec_default_payload_type(CODEC_ID_H264, MEDIA_KIND_AUDIO) != CODEC_DEFAULT_PT_INVALID {
-        return 52i32;
+        return 58i32;
     }
 
     if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_VP8, MEDIA_KIND_VIDEO) != CODEC_ID_VP8 {
-        return 53i32;
+        return 59i32;
     }
     if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_OPUS, MEDIA_KIND_VIDEO) != CODEC_ID_UNKNOWN {
-        return 54i32;
+        return 60i32;
+    }
+    if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_PCMU, MEDIA_KIND_AUDIO) != CODEC_ID_PCMU {
+        return 61i32;
+    }
+    if codec_id_from_default_payload_type(CODEC_DEFAULT_PT_PCMA, MEDIA_KIND_AUDIO) != CODEC_ID_PCMA {
+        return 62i32;
     }
 
     return 0i32;

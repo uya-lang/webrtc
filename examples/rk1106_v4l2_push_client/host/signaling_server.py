@@ -144,7 +144,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", default=8080, type=int)
+    parser.add_argument("--port", default=8081, type=int)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent

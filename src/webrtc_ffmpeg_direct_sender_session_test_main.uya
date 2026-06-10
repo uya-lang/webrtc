@@ -128,6 +128,111 @@ fn check_chrome_h264_offer_parse_and_passive_answer() i32 {
     return 0i32;
 }
 
+fn check_chrome_h264_pcmu_offer_parse_and_passive_answer() i32 {
+    const offer_sdp: &[byte] = "v=0\r\no=- 548393 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0 8\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+
+    const parsed: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_video_codec(offer_sdp, CODEC_ID_H264);
+    if parsed.error_id != 0 {
+        return 40i32;
+    }
+    if !parsed.value.audio.payload_type_present || parsed.value.audio.payload_type != 0u8 || parsed.value.audio.codec_id != CODEC_ID_PCMU {
+        return 41i32;
+    }
+    if parsed.value.video.payload_type != 102u8 || parsed.value.video.codec_id != CODEC_ID_H264 {
+        return 42i32;
+    }
+
+    var answer: [byte: 4096] = [];
+    const written: !usize = direct_session_write_passive_answer(
+        &parsed.value,
+        "127.0.0.1" as &[byte],
+        50557u16,
+        "uyaDirIce" as &[byte],
+        "uyaDirIcePwd012345678901234" as &[byte],
+        "AA:BB:CC:DD" as &[byte],
+        answer[0:4096],
+    );
+    if written.error_id != 0 {
+        return 43i32;
+    }
+    const answer_sdp: &[byte] = answer[0:written.value];
+    if !bytes_contains(answer_sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 0" as &[byte]) {
+        return 44i32;
+    }
+    if !bytes_contains(answer_sdp, "a=rtpmap:0 PCMU/8000" as &[byte]) {
+        return 45i32;
+    }
+    if bytes_contains(answer_sdp, "opus/48000/2" as &[byte]) || bytes_contains(answer_sdp, "minptime=10" as &[byte]) {
+        return 46i32;
+    }
+    return 0i32;
+}
+
+fn check_chrome_h264_pcma_offer_parse_and_passive_answer() i32 {
+    const offer_sdp: &[byte] = "v=0\r\no=- 548394 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 8\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:8 PCMA/8000\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+
+    const parsed: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_video_codec(offer_sdp, CODEC_ID_H264);
+    if parsed.error_id != 0 {
+        return 50i32;
+    }
+    if !parsed.value.audio.payload_type_present || parsed.value.audio.payload_type != 8u8 || parsed.value.audio.codec_id != CODEC_ID_PCMA {
+        return 51i32;
+    }
+
+    var answer: [byte: 4096] = [];
+    const written: !usize = direct_session_write_passive_answer(
+        &parsed.value,
+        "127.0.0.1" as &[byte],
+        50558u16,
+        "uyaDirIce" as &[byte],
+        "uyaDirIcePwd012345678901234" as &[byte],
+        "AA:BB:CC:DD" as &[byte],
+        answer[0:4096],
+    );
+    if written.error_id != 0 {
+        return 52i32;
+    }
+    const answer_sdp: &[byte] = answer[0:written.value];
+    if !bytes_contains(answer_sdp, "m=audio 9 UDP/TLS/RTP/SAVPF 8" as &[byte]) {
+        return 53i32;
+    }
+    if !bytes_contains(answer_sdp, "a=rtpmap:8 PCMA/8000" as &[byte]) {
+        return 54i32;
+    }
+    if bytes_contains(answer_sdp, "opus/48000/2" as &[byte]) || bytes_contains(answer_sdp, "minptime=10" as &[byte]) {
+        return 55i32;
+    }
+    return 0i32;
+}
+
+fn check_chrome_h264_audio_preference_parse() i32 {
+    const offer_sdp: &[byte] = "v=0\r\no=- 548395 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111 0 8\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\na=rtcp-fb:102 nack pli\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+
+    const preferred: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_audio_video_codecs(
+        offer_sdp,
+        CODEC_ID_PCMU,
+        CODEC_ID_H264,
+    );
+    if preferred.error_id != 0 {
+        return 60i32;
+    }
+    if preferred.value.audio.codec_id != CODEC_ID_PCMU || preferred.value.audio.payload_type != 0u8 {
+        return 61i32;
+    }
+
+    const opus_only: &[byte] = "v=0\r\no=- 548396 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=rtcp-mux\r\na=rtpmap:102 H264/90000\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host\r\n" as &[byte];
+    const rejected: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp_for_audio_video_codecs(
+        opus_only,
+        CODEC_ID_PCMU,
+        CODEC_ID_H264,
+    );
+    if rejected.error_id != @error_id(error.DirectSessionUnsupportedCodec) {
+        return 62i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     const result: i32 = check_chrome_offer_parse_and_passive_answer();
     if result != 0i32 {
@@ -137,6 +242,21 @@ fn main() i32 {
     const h264_result: i32 = check_chrome_h264_offer_parse_and_passive_answer();
     if h264_result != 0i32 {
         printf("Uya FFmpeg direct sender H264 session tests failed: %d\n", h264_result);
+        return 1i32;
+    }
+    const pcmu_result: i32 = check_chrome_h264_pcmu_offer_parse_and_passive_answer();
+    if pcmu_result != 0i32 {
+        printf("Uya FFmpeg direct sender H264 PCMU session tests failed: %d\n", pcmu_result);
+        return 1i32;
+    }
+    const pcma_result: i32 = check_chrome_h264_pcma_offer_parse_and_passive_answer();
+    if pcma_result != 0i32 {
+        printf("Uya FFmpeg direct sender H264 PCMA session tests failed: %d\n", pcma_result);
+        return 1i32;
+    }
+    const preference_result: i32 = check_chrome_h264_audio_preference_parse();
+    if preference_result != 0i32 {
+        printf("Uya FFmpeg direct sender H264 audio preference tests failed: %d\n", preference_result);
         return 1i32;
     }
     printf("Uya FFmpeg direct sender pure session tests passed\n");

@@ -118,7 +118,7 @@ fn codec_is_video_codec(codec_id: u16) bool {
 }
 
 fn codec_is_audio_codec(codec_id: u16) bool {
-    return codec_id == CODEC_ID_OPUS;
+    return codec_id == CODEC_ID_OPUS || codec_id == CODEC_ID_PCMU || codec_id == CODEC_ID_PCMA;
 }
 
 fn codec_ascii_lower(ch: byte) byte {

@@ -97,7 +97,7 @@
   <video id="remoteVideo" autoplay playsinline muted controls></video>
   <div class="row">
     <label class="inline-label" for="signalUrl">Signal URL</label>
-    <input id="signalUrl" type="url" spellcheck="false" placeholder="http://HOST:8080/api">
+    <input id="signalUrl" type="url" spellcheck="false" placeholder="http://HOST:8081/api">
   </div>
   <div class="row">
     <button id="autoSignal">Auto Signal</button>
@@ -217,6 +217,12 @@ async function createOffer() {
     playRemoteVideo();
   });
   const audioTransceiver = pc.addTransceiver('audio', {direction: 'recvonly'});
+  // Board sender only supports RK1106 G711; force the offer to PCMU/PCMA so the
+  // sender-side precheck accepts the negotiated audio codec and audio frames are actually pushed.
+  audioTransceiver.setCodecPreferences([
+    {mimeType: 'audio/PCMU', clockRate: 8000, channels: 1},
+    {mimeType: 'audio/PCMA', clockRate: 8000, channels: 1},
+  ]);
   const videoTransceiver = pc.addTransceiver('video', {direction: 'recvonly'});
   applyLowLatencyReceiverHint(audioTransceiver.receiver);
   applyLowLatencyReceiverHint(videoTransceiver.receiver);

@@ -1,0 +1,161 @@
+@c_import(
+    "../../../examples/rk1106_h264_push_client/src/rk1106_g711_audio_shim.c",
+    "-I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include -I/media/winger/_dde_home/winger/wingo/work/rk/builder/rv1103b_clean/rv1103b_linux_ipc_sdk/media/out/include/rockchip",
+    "-ldl"
+);
+
+use webrtc.media.model;
+
+export error Rk1106G711AudioInvalidArgument;
+export error Rk1106G711AudioOpenFailed;
+export error Rk1106G711AudioReadFailed;
+export error Rk1106G711AudioBufferTooSmall;
+export error Rk1106G711AudioUnsupportedCodec;
+
+export const RK1106_G711_AUDIO_STATUS_OK: i32 = 0i32;
+export const RK1106_G711_AUDIO_STATUS_INVALID_ARGUMENT: i32 = -1i32;
+export const RK1106_G711_AUDIO_STATUS_OPEN_FAILED: i32 = -2i32;
+export const RK1106_G711_AUDIO_STATUS_READ_FAILED: i32 = -3i32;
+export const RK1106_G711_AUDIO_STATUS_BUFFER_TOO_SMALL: i32 = -4i32;
+export const RK1106_G711_AUDIO_STATUS_UNSUPPORTED_CODEC: i32 = -5i32;
+
+export const RK1106_G711_AUDIO_SAMPLE_RATE_HZ: u32 = 8000u32;
+export const RK1106_G711_AUDIO_CHANNELS: u32 = 1u32;
+export const RK1106_G711_AUDIO_FRAME_SAMPLES: u32 = 480u32;
+export const RK1106_G711_AUDIO_FRAME_DURATION_US: u32 = 60000u32;
+
+export struct Rk1106G711AudioConfig {
+    codec_id: u16 = CODEC_ID_PCMU,
+    sample_rate_hz: u32 = RK1106_G711_AUDIO_SAMPLE_RATE_HZ,
+    channels: u32 = RK1106_G711_AUDIO_CHANNELS,
+    frame_samples: u32 = RK1106_G711_AUDIO_FRAME_SAMPLES,
+}
+
+export struct Rk1106G711AudioReader {
+    handle: usize = 0usize,
+    config: Rk1106G711AudioConfig = Rk1106G711AudioConfig{},
+    sequence_id: u64 = 0u64,
+}
+
+extern fn uya_rk1106_g711_audio_open(
+    codec_id: u32,
+    sample_rate: u32,
+    channels: u32,
+    frame_samples: u32,
+    out_handle: &usize,
+) i32;
+
+extern fn uya_rk1106_g711_audio_read_packet(
+    handle: usize,
+    out_payload: &byte,
+    out_capacity: usize,
+    out_len: &usize,
+    out_pts_us: &u64,
+) i32;
+
+extern fn uya_rk1106_g711_audio_close(handle: usize) i32;
+
+fn rk1106_g711_audio_codec_supported(codec_id: u16) bool {
+    return codec_id == CODEC_ID_PCMU || codec_id == CODEC_ID_PCMA;
+}
+
+fn rk1106_g711_audio_status_to_error(status: i32) !void {
+    if status == RK1106_G711_AUDIO_STATUS_OK {
+        return;
+    }
+    if status == RK1106_G711_AUDIO_STATUS_INVALID_ARGUMENT {
+        return error.Rk1106G711AudioInvalidArgument;
+    }
+    if status == RK1106_G711_AUDIO_STATUS_OPEN_FAILED {
+        return error.Rk1106G711AudioOpenFailed;
+    }
+    if status == RK1106_G711_AUDIO_STATUS_READ_FAILED {
+        return error.Rk1106G711AudioReadFailed;
+    }
+    if status == RK1106_G711_AUDIO_STATUS_BUFFER_TOO_SMALL {
+        return error.Rk1106G711AudioBufferTooSmall;
+    }
+    return error.Rk1106G711AudioUnsupportedCodec;
+}
+
+export fn rk1106_g711_audio_config_make(codec_id: u16) !Rk1106G711AudioConfig {
+    if !rk1106_g711_audio_codec_supported(codec_id) {
+        return error.Rk1106G711AudioUnsupportedCodec;
+    }
+    return Rk1106G711AudioConfig{
+        codec_id: codec_id,
+        sample_rate_hz: RK1106_G711_AUDIO_SAMPLE_RATE_HZ,
+        channels: RK1106_G711_AUDIO_CHANNELS,
+        frame_samples: RK1106_G711_AUDIO_FRAME_SAMPLES,
+    };
+}
+
+export fn rk1106_g711_audio_open(config: Rk1106G711AudioConfig) !Rk1106G711AudioReader {
+    if !rk1106_g711_audio_codec_supported(config.codec_id)
+        || config.sample_rate_hz != RK1106_G711_AUDIO_SAMPLE_RATE_HZ
+        || config.channels != RK1106_G711_AUDIO_CHANNELS
+        || config.frame_samples == 0u32 {
+        return error.Rk1106G711AudioInvalidArgument;
+    }
+
+    var handle: usize = 0usize;
+    const status: i32 = uya_rk1106_g711_audio_open(
+        config.codec_id as u32,
+        config.sample_rate_hz,
+        config.channels,
+        config.frame_samples,
+        &handle,
+    );
+    try rk1106_g711_audio_status_to_error(status);
+    if handle == 0usize {
+        return error.Rk1106G711AudioOpenFailed;
+    }
+    return Rk1106G711AudioReader{
+        handle: handle,
+        config: config,
+        sequence_id: 0u64,
+    };
+}
+
+export fn rk1106_g711_audio_close(reader: &Rk1106G711AudioReader) !void {
+    if reader == null || reader.handle == 0usize {
+        return;
+    }
+    const status: i32 = uya_rk1106_g711_audio_close(reader.handle);
+    reader.handle = 0usize;
+    try rk1106_g711_audio_status_to_error(status);
+}
+
+export fn rk1106_g711_audio_read_frame(reader: &Rk1106G711AudioReader, out_payload: &[byte]) !EncodedFrame {
+    if reader == null || reader.handle == 0usize || out_payload.len == 0usize {
+        return error.Rk1106G711AudioInvalidArgument;
+    }
+    var out_len: usize = 0usize;
+    var out_pts_us: u64 = 0u64;
+    const status: i32 = uya_rk1106_g711_audio_read_packet(
+        reader.handle,
+        &out_payload[0],
+        out_payload.len,
+        &out_len,
+        &out_pts_us,
+    );
+    try rk1106_g711_audio_status_to_error(status);
+    if out_len == 0usize || out_len > out_payload.len {
+        return error.Rk1106G711AudioReadFailed;
+    }
+
+    const frame: EncodedFrame = EncodedFrame{
+        codec_id: reader.config.codec_id,
+        media_kind: MEDIA_KIND_AUDIO,
+        timestamp: out_pts_us,
+        duration_us: RK1106_G711_AUDIO_FRAME_DURATION_US,
+        payload: out_payload[0:out_len],
+        is_keyframe: false,
+        sequence_id: reader.sequence_id,
+        spatial_id: ENCODED_FRAME_NO_SPATIAL_ID,
+        temporal_id: ENCODED_FRAME_NO_TEMPORAL_ID,
+        marker: false,
+    };
+    reader.sequence_id = reader.sequence_id + 1u64;
+    return frame;
+}

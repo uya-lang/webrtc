@@ -25,6 +25,7 @@ SENDER := $(BUILD_DIR)/rk1106_h264_sender
 HOST_SENDER_C := $(BUILD_DIR)/rk1106_h264_sender_host.c
 HOST_SENDER := $(BUILD_DIR)/rk1106_h264_sender_host
 SHIM_C := $(EXAMPLE_DIR)/src/rk1106_h264_encoder_shim.c
+AUDIO_SHIM_C := $(EXAMPLE_DIR)/src/rk1106_g711_audio_shim.c
 HELPER_C := $(EXAMPLE_DIR)/src/rk1106_h264_capture_helper.c
 HELPER := $(BUILD_DIR)/rk1106_h264_capture_helper
 FASTBOOT_MIRROR_C := $(EXAMPLE_DIR)/src/fastboot_demo_mirror/fastboot_demo.c
@@ -63,7 +64,13 @@ check-tools: check-cross-tools
 $(BUILD_DIR):
 	mkdir -p "$@"
 
-$(SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya $(REPO_ROOT)/src/webrtc/media/fastboot_h264_codec.uya | $(BUILD_DIR) check-host-tools
+$(SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya \
+		$(REPO_ROOT)/src/webrtc/media/direct_sender.uya \
+		$(REPO_ROOT)/src/webrtc/media/direct_session.uya \
+		$(REPO_ROOT)/src/webrtc/media/model.uya \
+		$(REPO_ROOT)/src/webrtc/media/rk1106_g711_audio.uya \
+		$(REPO_ROOT)/src/webrtc/media/fastboot_h264_codec.uya \
+		$(AUDIO_SHIM_C) | $(BUILD_DIR) check-host-tools
 	cd "$(REPO_ROOT)" && \
 		TARGET_OS="$(TARGET_OS)" TARGET_ARCH="$(TARGET_ARCH)" UYA_ROOT="$(UYA_LIB)" \
 		"$(UYA)" build "src/webrtc_rk1106_h264_sender_main.uya" \
@@ -71,8 +78,10 @@ $(SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya $(REPO_ROOT)/sr
 	python3 "$(PATCH_UYA_C99)" "$@"
 	python3 "$(EXAMPLE_DIR)/tools/patch_arm_pthread_create_stub.py" "$@"
 
-$(SENDER): $(SENDER_C) | check-cross-tools
-	"$(CROSS_CC)" $(RK_CFLAGS) -o "$@" "$(SENDER_C)" 		-L"$(MPP_LIB)" -Wl,-rpath-link,"$(MPP_LIB)" 		-lm -pthread
+$(SENDER): $(SENDER_C) $(AUDIO_SHIM_C) | check-cross-tools
+	"$(CROSS_CC)" $(RK_CFLAGS) -o "$@" "$(SENDER_C)" "$(AUDIO_SHIM_C)" \
+		-L"$(MPP_LIB)" -Wl,-rpath-link,"$(MPP_LIB)" \
+		$(RK_LDFLAGS)
 
 MPP_PROBE_C := $(EXAMPLE_DIR)/tools/mpp_probe_main.c
 MPP_PROBE := $(BUILD_DIR)/mpp_probe
@@ -117,14 +126,20 @@ $(FASTBOOT_FIFO): $(FASTBOOT_MIRROR)
 fastboot-fifo: $(FASTBOOT_FIFO)
 	@printf 'fastboot fifo ready: %s\n' "$(FASTBOOT_FIFO)"
 
-$(HOST_SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya $(REPO_ROOT)/src/webrtc/media/fastboot_h264_codec.uya | $(BUILD_DIR) check-host-tools
+$(HOST_SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya \
+		$(REPO_ROOT)/src/webrtc/media/direct_sender.uya \
+		$(REPO_ROOT)/src/webrtc/media/direct_session.uya \
+		$(REPO_ROOT)/src/webrtc/media/model.uya \
+		$(REPO_ROOT)/src/webrtc/media/rk1106_g711_audio.uya \
+		$(REPO_ROOT)/src/webrtc/media/fastboot_h264_codec.uya \
+		$(AUDIO_SHIM_C) | $(BUILD_DIR) check-host-tools
 	cd "$(REPO_ROOT)" && \
 		TARGET_OS="$(HOST_TARGET_OS)" TARGET_ARCH="$(HOST_TARGET_ARCH)" UYA_ROOT="$(UYA_LIB)" \
 		"$(UYA)" build "src/webrtc_rk1106_h264_sender_main.uya" \
 			--no-split-c --c99 -o "$@"
 
-$(HOST_SENDER): $(HOST_SENDER_C) $(SHIM_C) | check-host-encoder-tools
-	"$(HOST_CC)" $(HOST_CFLAGS) -o "$@" "$(HOST_SENDER_C)" "$(SHIM_C)" $(HOST_LDFLAGS)
+$(HOST_SENDER): $(HOST_SENDER_C) $(SHIM_C) $(AUDIO_SHIM_C) | check-host-encoder-tools
+	"$(HOST_CC)" $(HOST_CFLAGS) -o "$@" "$(HOST_SENDER_C)" "$(SHIM_C)" "$(AUDIO_SHIM_C)" $(HOST_LDFLAGS)
 
 host: $(HOST_SENDER)
 	@printf 'host fallback sender ready: %s\n' "$(HOST_SENDER)"

@@ -35,6 +35,8 @@ export struct UyaDirectSenderConfig {
     mtu_bytes: usize = DIRECT_SENDER_DEFAULT_MTU_BYTES,
     audio_ssrc: u32 = DIRECT_SENDER_DEFAULT_AUDIO_SSRC,
     video_ssrc: u32 = DIRECT_SENDER_DEFAULT_VIDEO_SSRC,
+    audio_codec_id: u16 = CODEC_ID_OPUS,
+    audio_clock_rate_hz: u32 = 0u32,
     audio_payload_type: u8 = CODEC_DEFAULT_PT_OPUS,
     video_payload_type: u8 = CODEC_DEFAULT_PT_VP8,
     audio_mid_extension_id: u8 = 0u8,
@@ -126,6 +128,21 @@ export fn uya_direct_sender_make() UyaDirectSender {
     return UyaDirectSender{};
 }
 
+fn direct_sender_audio_codec_supported(codec_id: u16) bool {
+    return codec_id == CODEC_ID_OPUS || codec_id == CODEC_ID_PCMU || codec_id == CODEC_ID_PCMA;
+}
+
+fn direct_sender_normalize_config(config: UyaDirectSenderConfig) !UyaDirectSenderConfig {
+    var normalized: UyaDirectSenderConfig = config;
+    if normalized.audio_codec_id == CODEC_ID_UNKNOWN {
+        normalized.audio_codec_id = CODEC_ID_OPUS;
+    }
+    if normalized.audio_clock_rate_hz == 0u32 {
+        normalized.audio_clock_rate_hz = codec_default_clock_rate_hz(normalized.audio_codec_id, MEDIA_KIND_AUDIO);
+    }
+    return normalized;
+}
+
 fn direct_sender_validate_config(config: &UyaDirectSenderConfig) !void {
     if config == null || config.mtu_bytes <= RTP_HEADER_MIN_BYTES {
         return error.DirectSenderInvalidConfig;
@@ -133,7 +150,16 @@ fn direct_sender_validate_config(config: &UyaDirectSenderConfig) !void {
     if config.mtu_bytes > DIRECT_SENDER_MAX_RTP_PAYLOAD_BYTES + RTP_HEADER_MIN_BYTES {
         return error.DirectSenderInvalidConfig;
     }
-    if config.audio_payload_type == 0u8 || config.video_payload_type == 0u8 {
+    if !direct_sender_audio_codec_supported(config.audio_codec_id) {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.audio_clock_rate_hz != codec_default_clock_rate_hz(config.audio_codec_id, MEDIA_KIND_AUDIO) {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.audio_payload_type == 0u8 && config.audio_codec_id != CODEC_ID_PCMU {
+        return error.DirectSenderInvalidConfig;
+    }
+    if config.video_payload_type == 0u8 {
         return error.DirectSenderInvalidConfig;
     }
     if config.audio_mid_extension_id > 14u8 || config.video_mid_extension_id > 14u8 {
@@ -151,23 +177,24 @@ export fn uya_direct_sender_init(sender: &UyaDirectSender, config: UyaDirectSend
     if sender == null {
         return error.DirectSenderInvalidConfig;
     }
-    try direct_sender_validate_config(&config);
+    const normalized_config: UyaDirectSenderConfig = try direct_sender_normalize_config(config);
+    try direct_sender_validate_config(&normalized_config);
 
     try rtp_sender_state_init(
         &sender.audio_sender,
-        config.audio_ssrc,
-        config.audio_initial_sequence,
-        config.audio_initial_timestamp,
-        DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ,
+        normalized_config.audio_ssrc,
+        normalized_config.audio_initial_sequence,
+        normalized_config.audio_initial_timestamp,
+        normalized_config.audio_clock_rate_hz,
     );
     try rtp_sender_state_init(
         &sender.video_sender,
-        config.video_ssrc,
-        config.video_initial_sequence,
-        config.video_initial_timestamp,
+        normalized_config.video_ssrc,
+        normalized_config.video_initial_sequence,
+        normalized_config.video_initial_timestamp,
         DIRECT_SENDER_VIDEO_CLOCK_RATE_HZ,
     );
-    sender.config = config;
+    sender.config = normalized_config;
     sender.diagnostics = uya_direct_sender_diagnostics_make();
 }
 
@@ -183,6 +210,21 @@ fn direct_sender_packetize_opus(frame: &EncodedFrame, out_payload: &[byte]) !usi
     var cfg: OpusRtpPacketizeConfig = opus_rtp_packetize_config_make();
     cfg.max_payload_bytes = out_payload.len;
     return opus_rtp_packetize(frame.payload, &cfg, out_payload);
+}
+
+fn direct_sender_packetize_passthrough(frame: &EncodedFrame, out_payload: &[byte]) !usize {
+    if frame == null || frame.payload.len == 0usize {
+        return error.DirectSenderFrameRequired;
+    }
+    if frame.payload.len > out_payload.len {
+        return error.DirectSenderPayloadTooLarge;
+    }
+    var index: usize = 0usize;
+    while index < frame.payload.len {
+        out_payload[index] = frame.payload[index];
+        index = index + 1usize;
+    }
+    return frame.payload.len;
 }
 
 fn direct_sender_packetize_vp8(frame: &EncodedFrame, out_payload: &[byte]) !usize {
@@ -231,15 +273,7 @@ fn direct_sender_packetize_h264_single_nal(frame: &EncodedFrame, out_payload: &[
     if frame == null || frame.payload.len == 0usize {
         return error.DirectSenderFrameRequired;
     }
-    if frame.payload.len > out_payload.len {
-        return error.DirectSenderPayloadTooLarge;
-    }
-    var index: usize = 0usize;
-    while index < frame.payload.len {
-        out_payload[index] = frame.payload[index];
-        index = index + 1usize;
-    }
-    return frame.payload.len;
+    return direct_sender_packetize_passthrough(frame, out_payload);
 }
 
 fn direct_sender_packetize_payload(frame: &EncodedFrame, out_payload: &[byte]) !usize {
@@ -253,6 +287,9 @@ fn direct_sender_packetize_payload(frame: &EncodedFrame, out_payload: &[byte]) !
     if frame.media_kind == MEDIA_KIND_AUDIO && frame.codec_id == CODEC_ID_OPUS {
         return direct_sender_packetize_opus(frame, out_payload);
     }
+    if frame.media_kind == MEDIA_KIND_AUDIO && (frame.codec_id == CODEC_ID_PCMU || frame.codec_id == CODEC_ID_PCMA) {
+        return direct_sender_packetize_passthrough(frame, out_payload);
+    }
     if frame.media_kind == MEDIA_KIND_VIDEO && frame.codec_id == CODEC_ID_VP8 {
         return direct_sender_packetize_vp8(frame, out_payload);
     }
@@ -264,7 +301,7 @@ fn direct_sender_packetize_payload(frame: &EncodedFrame, out_payload: &[byte]) !
 
 fn direct_sender_stamp_for_frame(sender: &UyaDirectSender, frame: &EncodedFrame) !RtpSenderStamp {
     if frame.media_kind == MEDIA_KIND_AUDIO {
-        const increment: u32 = direct_sender_timestamp_increment(frame.duration_us, DIRECT_SENDER_AUDIO_CLOCK_RATE_HZ);
+        const increment: u32 = direct_sender_timestamp_increment(frame.duration_us, sender.config.audio_clock_rate_hz);
         return rtp_sender_stamp_packet(&sender.audio_sender, increment);
     }
     if frame.media_kind == MEDIA_KIND_VIDEO {
@@ -275,7 +312,10 @@ fn direct_sender_stamp_for_frame(sender: &UyaDirectSender, frame: &EncodedFrame)
 }
 
 fn direct_sender_payload_type_for_frame(sender: &UyaDirectSender, frame: &EncodedFrame) !u8 {
-    if frame.media_kind == MEDIA_KIND_AUDIO && frame.codec_id == CODEC_ID_OPUS {
+    if frame.media_kind == MEDIA_KIND_AUDIO && direct_sender_audio_codec_supported(frame.codec_id) {
+        if frame.codec_id != sender.config.audio_codec_id {
+            return error.DirectSenderUnsupportedCodec;
+        }
         return sender.config.audio_payload_type;
     }
     if frame.media_kind == MEDIA_KIND_VIDEO && frame.codec_id == CODEC_ID_VP8 {
