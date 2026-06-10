@@ -2004,17 +2004,13 @@ static int fastboot_audio_capture_init(void) {
 		return -1;
 	}
 
-	/* AMIX configuration is NOT needed for RV1106B ACodec (verified with
-	 * simple_ai_bind_aenc which works without any AMIX on this platform).
-	 * Leaving this commented out to match the working test program. */
-#if 0
+	/* Boost mic gain: analog 20dB + digital +15dB */
 	{
 		const char *amix_controls[][2] = {
-			{"ADC Main MICBIAS",       "On"},
-			{"ADC MIC Left Switch",     "Work"},
-			{"ADC MIC Left Gain",       "2"},
-			{"ADC Digital Left Volume", "195"},
-			{"ADC MICBIAS Voltage",     "VREFx0_9"},
+			{"ADC Main MICBIAS",       "On"},    /* power mic */
+			{"ADC MIC Left Switch",     "Work"},  /* unmute */
+			{"ADC MIC Left Gain",       "2"},     /* 20dB analog boost */
+			{"ADC Digital Left Volume", "255"},   /* +30dB digital (max) */
 			{NULL, NULL}
 		};
 		int i;
@@ -2026,7 +2022,6 @@ static int fastboot_audio_capture_init(void) {
 		}
 		fflush(stderr);
 	}
-#endif
 
 	fprintf(stderr, "fastboot_h264_fifo: audio AI->AENC G711 ready codec=%d output=%s\n",
 	        g_fastboot_audio_codec_id, g_fastboot_audio_out_path);
@@ -2116,20 +2111,6 @@ static void *GetAencStream(void *arg) {
 		if (!payload) {
 			RK_MPI_AENC_ReleaseStream(g_fastboot_audio_aenc_chn, &stream);
 			continue;
-		}
-
-		/* Diagnostic: dump raw 1024-byte AENC output for comparison with test program */
-		{
-			static FILE *raw_dump = NULL;
-			if (!raw_dump) {
-				raw_dump = fopen("/tmp/aenc_raw.g711u", "ab");
-				if (raw_dump)
-					fprintf(stderr, "fastboot_h264_fifo: raw AENC dump -> /tmp/aenc_raw.g711u\n");
-			}
-			if (raw_dump) {
-				fwrite(payload, 1, stream.u32Len, raw_dump);
-				fflush(raw_dump);
-			}
 		}
 
 		/* Split 1024-byte AENC frames into 480-byte G711 chunks for WebRTC.

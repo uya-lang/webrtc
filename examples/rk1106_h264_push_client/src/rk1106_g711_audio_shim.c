@@ -707,7 +707,6 @@ typedef struct UyaHostG711Audio {
     uint32_t channels;
     uint32_t frame_samples;
     uint64_t pts_us;
-    FILE *pcm_dump;
     FILE *fifo;
     int fifo_fallback_silence;
 } UyaHostG711Audio;
@@ -735,7 +734,6 @@ int uya_rk1106_g711_audio_open(
     audio->sample_rate = sample_rate;
     audio->channels = channels;
     audio->frame_samples = frame_samples;
-    audio->pcm_dump = uya_rk1106_g711_pcm_dump_open();
 
     /* Hardcoded FIFO path — avoids shell env-var propagation issues on busybox */
     fifo_path = "/tmp/fastboot.g711";
@@ -780,8 +778,6 @@ int uya_rk1106_g711_audio_read_packet(
             *out_len = frame_bytes;
             *out_pts_us = audio->pts_us;
             audio->pts_us += ((uint64_t)frame_bytes * 1000000ULL) / audio->sample_rate;
-            /* Raw G711 dump (no decode needed for FIFO passthrough) */
-            uya_rk1106_g711_pcm_dump_write(audio->pcm_dump, out_payload, frame_bytes);
             return UYA_RK1106_G711_AUDIO_STATUS_OK;
         }
         if (n > 0) {
@@ -794,8 +790,6 @@ int uya_rk1106_g711_audio_read_packet(
     /* Fallback: synthetic silence */
     status = uya_rk1106_g711_fill_silence_packet(audio->codec_id, audio->sample_rate, audio->frame_samples,
         &audio->pts_us, out_payload, out_capacity, out_len, out_pts_us);
-    if (status == UYA_RK1106_G711_AUDIO_STATUS_OK)
-        uya_rk1106_g711_pcm_dump_silence(audio->pcm_dump, audio->frame_samples, audio->channels);
     return status;
 }
 
@@ -807,10 +801,6 @@ int uya_rk1106_g711_audio_close(size_t handle)
     if (audio->fifo) {
         fclose(audio->fifo);
         audio->fifo = NULL;
-    }
-    if (audio->pcm_dump) {
-        fclose(audio->pcm_dump);
-        audio->pcm_dump = NULL;
     }
     free(audio);
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
