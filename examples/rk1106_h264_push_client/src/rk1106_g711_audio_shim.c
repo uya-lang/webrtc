@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+
+#define UYA_RK1106_AUDIO_PCM_DUMP_DEFAULT_PATH "/userdata/sender.pcm"
 
 #define UYA_RK1106_G711_AUDIO_STATUS_OK 0
 #define UYA_RK1106_G711_AUDIO_STATUS_INVALID_ARGUMENT -1
@@ -31,6 +34,45 @@ int uya_rk1106_g711_audio_read_packet(
     size_t *out_len,
     uint64_t *out_pts_us);
 int uya_rk1106_g711_audio_close(size_t handle);
+
+static FILE *uya_rk1106_g711_pcm_dump_open(void)
+{
+    const char *path = getenv("UYA_RK1106_AUDIO_PCM_DUMP_PATH");
+    FILE *file;
+
+    if (!path || !path[0])
+        path = UYA_RK1106_AUDIO_PCM_DUMP_DEFAULT_PATH;
+    file = fopen(path, "wb");
+    if (file)
+        fprintf(stderr, "rk1106_g711_audio_shim: PCM dump -> %s\n", path);
+    else
+        fprintf(stderr, "rk1106_g711_audio_shim: failed to open PCM dump %s\n", path);
+    return file;
+}
+
+static void uya_rk1106_g711_pcm_dump_write(FILE *file, const void *data, size_t len)
+{
+    if (!file || !data || len == 0)
+        return;
+    if (fwrite(data, 1, len, file) != len)
+        fprintf(stderr, "rk1106_g711_audio_shim: PCM dump write failed\n");
+    fflush(file);
+}
+
+static void uya_rk1106_g711_pcm_dump_silence(FILE *file, uint32_t frame_samples, uint32_t channels)
+{
+    size_t bytes;
+    unsigned char *zeros;
+
+    if (!file || frame_samples == 0 || channels == 0)
+        return;
+    bytes = (size_t)frame_samples * (size_t)channels * sizeof(int16_t);
+    zeros = (unsigned char *)calloc(1, bytes);
+    if (!zeros)
+        return;
+    uya_rk1106_g711_pcm_dump_write(file, zeros, bytes);
+    free(zeros);
+}
 
 static int uya_rk1106_g711_env_enabled(const char *name)
 {
@@ -95,6 +137,7 @@ typedef RK_S32 (*uya_rk_aenc_create_chn_fn)(AENC_CHN, const AENC_CHN_ATTR_S *);
 typedef RK_S32 (*uya_rk_aenc_destroy_chn_fn)(AENC_CHN);
 typedef RK_S32 (*uya_rk_aenc_get_stream_fn)(AENC_CHN, AUDIO_STREAM_S *, RK_S32);
 typedef RK_S32 (*uya_rk_aenc_release_stream_fn)(AENC_CHN, const AUDIO_STREAM_S *);
+typedef RK_S32 (*uya_rk_ai_save_file_fn)(AUDIO_DEV, AI_CHN, const AUDIO_SAVE_FILE_INFO_S *);
 typedef RK_VOID *(*uya_rk_mb_handle_to_addr_fn)(MB_BLK);
 
 typedef struct UyaRkMpiAudioApi {
@@ -114,6 +157,7 @@ typedef struct UyaRkMpiAudioApi {
     uya_rk_aenc_destroy_chn_fn aenc_destroy_chn;
     uya_rk_aenc_get_stream_fn aenc_get_stream;
     uya_rk_aenc_release_stream_fn aenc_release_stream;
+    uya_rk_ai_save_file_fn ai_save_file;
     uya_rk_mb_handle_to_addr_fn mb_handle_to_addr;
 } UyaRkMpiAudioApi;
 
@@ -133,7 +177,67 @@ typedef struct UyaRk1106G711Audio {
     int ai_chn_enabled;
     int aenc_created;
     int bound;
+    int pcm_save_enabled;
+    FILE *pcm_dump;
 } UyaRk1106G711Audio;
+
+static int16_t uya_rk1106_g711_ulaw_decode(unsigned char ulaw)
+{
+    int sign;
+    int exponent;
+    int mantissa;
+    int sample;
+
+    ulaw = (unsigned char)~ulaw;
+    sign = (ulaw & 0x80) ? -1 : 1;
+    exponent = (ulaw >> 4) & 0x07;
+    mantissa = ulaw & 0x0F;
+    sample = ((mantissa << 3) + 0x84) << exponent;
+    sample = (sample - 0x84) * sign;
+    return (int16_t)sample;
+}
+
+static int16_t uya_rk1106_g711_alaw_decode(unsigned char alaw)
+{
+    int sign;
+    int exponent;
+    int mantissa;
+    int sample;
+
+    alaw ^= 0x55u;
+    sign = (alaw & 0x80) ? -1 : 1;
+    exponent = (alaw >> 4) & 0x07;
+    mantissa = alaw & 0x0F;
+    if (exponent == 0)
+        sample = (mantissa << 4) + 8;
+    else
+        sample = ((mantissa << 4) + 0x108) << (exponent - 1);
+    return (int16_t)(sample * sign);
+}
+
+static void uya_rk1106_g711_pcm_dump_g711_frame(
+    FILE *file,
+    uint32_t codec_id,
+    const unsigned char *payload,
+    size_t len)
+{
+    size_t index;
+    int16_t sample;
+
+    if (!file || !payload || len == 0)
+        return;
+    for (index = 0; index < len; index++) {
+        if (codec_id == UYA_RK1106_G711_AUDIO_CODEC_PCMU)
+            sample = uya_rk1106_g711_ulaw_decode(payload[index]);
+        else
+            sample = uya_rk1106_g711_alaw_decode(payload[index]);
+        if (fwrite(&sample, sizeof(sample), 1, file) != 1) {
+            fprintf(stderr, "rk1106_g711_audio_shim: PCM dump write failed\n");
+            return;
+        }
+    }
+    fflush(file);
+}
 
 static int uya_rk1106_g711_codec_to_rk(uint32_t codec_id, RK_CODEC_ID_E *out_type)
 {
@@ -172,6 +276,7 @@ static int uya_rk1106_g711_load_api(UyaRkMpiAudioApi *api)
     api->aenc_destroy_chn = (uya_rk_aenc_destroy_chn_fn)RK_MPI_AENC_DestroyChn;
     api->aenc_get_stream = (uya_rk_aenc_get_stream_fn)RK_MPI_AENC_GetStream;
     api->aenc_release_stream = (uya_rk_aenc_release_stream_fn)RK_MPI_AENC_ReleaseStream;
+    api->ai_save_file = (uya_rk_ai_save_file_fn)RK_MPI_AI_SaveFile;
     api->mb_handle_to_addr = (uya_rk_mb_handle_to_addr_fn)RK_MPI_MB_Handle2VirAddr;
     fprintf(stderr, "rk1106_g711_audio_shim: using static Rockchip MPI audio symbols\n");
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
@@ -268,13 +373,15 @@ static int uya_rk1106_g711_load_api(UyaRkMpiAudioApi *api)
     api->aenc_destroy_chn = (uya_rk_aenc_destroy_chn_fn)uya_rk1106_g711_dlsym(api->lib, "RK_MPI_AENC_DestroyChn");
     api->aenc_get_stream = (uya_rk_aenc_get_stream_fn)uya_rk1106_g711_dlsym(api->lib, "RK_MPI_AENC_GetStream");
     api->aenc_release_stream = (uya_rk_aenc_release_stream_fn)uya_rk1106_g711_dlsym(api->lib, "RK_MPI_AENC_ReleaseStream");
+    api->ai_save_file = (uya_rk_ai_save_file_fn)uya_rk1106_g711_dlsym(api->lib, "RK_MPI_AI_SaveFile");
     api->mb_handle_to_addr = (uya_rk_mb_handle_to_addr_fn)uya_rk1106_g711_dlsym(api->lib, "RK_MPI_MB_Handle2VirAddr");
 
     if (!api->sys_init || !api->sys_exit || !api->sys_bind || !api->sys_unbind ||
         !api->ai_set_pub_attr || !api->ai_enable || !api->ai_disable ||
         !api->ai_enable_chn || !api->ai_disable_chn || !api->ai_set_chn_param ||
         !api->ai_set_track_mode || !api->aenc_create_chn || !api->aenc_destroy_chn ||
-        !api->aenc_get_stream || !api->aenc_release_stream || !api->mb_handle_to_addr) {
+        !api->aenc_get_stream || !api->aenc_release_stream ||
+        !api->ai_save_file || !api->mb_handle_to_addr) {
         fprintf(stderr, "rk1106_g711_audio_shim: missing Rockchip MPI audio symbols\n");
         dlclose(api->lib);
         memset(api, 0, sizeof(*api));
@@ -310,6 +417,62 @@ static void uya_rk1106_g711_fill_ai_attr(AIO_ATTR_S *attr, uint32_t sample_rate,
     attr->u32PtNumPerFrm = frame_samples;
     attr->u32EXFlag = 0;
     attr->u32ChnCnt = 2;
+}
+
+static void uya_rk1106_g711_split_pcm_path(
+    const char *full_path,
+    char *dir,
+    size_t dir_sz,
+    char *name,
+    size_t name_sz)
+{
+    const char *slash;
+
+    if (!full_path || !full_path[0] || !dir || !name || dir_sz == 0 || name_sz == 0)
+        return;
+    slash = strrchr(full_path, '/');
+    if (!slash) {
+        snprintf(dir, dir_sz, ".");
+        snprintf(name, name_sz, "%s", full_path);
+        return;
+    }
+    if (slash == full_path) {
+        snprintf(dir, dir_sz, "/");
+        snprintf(name, name_sz, "%s", slash + 1);
+        return;
+    }
+    snprintf(dir, dir_sz, "%.*s", (int)(slash - full_path), full_path);
+    snprintf(name, name_sz, "%s", slash + 1);
+}
+
+static int uya_rk1106_g711_start_pcm_save(UyaRk1106G711Audio *audio)
+{
+    const char *full_path = getenv("UYA_RK1106_AUDIO_PCM_DUMP_PATH");
+    AUDIO_SAVE_FILE_INFO_S save;
+    char dir[MAX_AUDIO_FILE_PATH_LEN];
+    char name[MAX_AUDIO_FILE_NAME_LEN];
+    int rc;
+
+    if (!audio || !audio->api.ai_save_file)
+        return UYA_RK1106_G711_AUDIO_STATUS_INVALID_ARGUMENT;
+    if (!full_path || !full_path[0])
+        full_path = UYA_RK1106_AUDIO_PCM_DUMP_DEFAULT_PATH;
+
+    uya_rk1106_g711_split_pcm_path(full_path, dir, sizeof(dir), name, sizeof(name));
+    memset(&save, 0, sizeof(save));
+    save.bCfg = RK_TRUE;
+    save.u32FileSize = 65536;
+    snprintf((char *)save.aFilePath, sizeof(save.aFilePath), "%s", dir);
+    snprintf((char *)save.aFileName, sizeof(save.aFileName), "%s", name);
+    rc = audio->api.ai_save_file(audio->ai_dev, audio->ai_chn, &save);
+    if (rc != RK_SUCCESS) {
+        fprintf(stderr, "rk1106_g711_audio_shim: RK_MPI_AI_SaveFile failed rc=0x%08x path=%s/%s\n",
+            rc, dir, name);
+        return UYA_RK1106_G711_AUDIO_STATUS_OPEN_FAILED;
+    }
+    audio->pcm_save_enabled = 1;
+    fprintf(stderr, "rk1106_g711_audio_shim: PCM save via MPI -> %s/%s\n", dir, name);
+    return UYA_RK1106_G711_AUDIO_STATUS_OK;
 }
 
 static void uya_rk1106_g711_fill_aenc_attr(AENC_CHN_ATTR_S *attr, RK_CODEC_ID_E type, uint32_t sample_rate, uint32_t channels)
@@ -354,7 +517,9 @@ static int uya_rk1106_g711_audio_init(UyaRk1106G711Audio *audio)
 
     memset(&ai_params, 0, sizeof(ai_params));
     ai_params.enLoopbackMode = AUDIO_LOOPBACK_NONE;
-    ai_params.s32UsrFrmDepth = 1;
+    ai_params.s32UsrFrmDepth = 4;
+    ai_params.u32MapPtNumPerFrm = audio->frame_samples;
+    ai_params.enSamplerate = (AUDIO_SAMPLE_RATE_E)audio->sample_rate;
     (void)audio->api.ai_set_chn_param(audio->ai_dev, audio->ai_chn, &ai_params);
     if (audio->channels == 1)
         (void)audio->api.ai_set_track_mode(audio->ai_dev, AUDIO_TRACK_FRONT_LEFT);
@@ -365,6 +530,8 @@ static int uya_rk1106_g711_audio_init(UyaRk1106G711Audio *audio)
     if (uya_rk1106_g711_check(rc, "RK_MPI_AI_EnableChn") != UYA_RK1106_G711_AUDIO_STATUS_OK)
         return UYA_RK1106_G711_AUDIO_STATUS_OPEN_FAILED;
     audio->ai_chn_enabled = 1;
+    if (uya_rk1106_g711_start_pcm_save(audio) != UYA_RK1106_G711_AUDIO_STATUS_OK)
+        fprintf(stderr, "rk1106_g711_audio_shim: warning: PCM save disabled, G711 push continues\n");
 
     uya_rk1106_g711_fill_aenc_attr(&aenc_attr, rk_codec, audio->sample_rate, audio->channels);
     rc = audio->api.aenc_create_chn(audio->aenc_chn, &aenc_attr);
@@ -384,6 +551,7 @@ static int uya_rk1106_g711_audio_init(UyaRk1106G711Audio *audio)
     if (uya_rk1106_g711_check(rc, "RK_MPI_SYS_Bind AI->AENC") != UYA_RK1106_G711_AUDIO_STATUS_OK)
         return UYA_RK1106_G711_AUDIO_STATUS_OPEN_FAILED;
     audio->bound = 1;
+    audio->pcm_dump = uya_rk1106_g711_pcm_dump_open();
     fprintf(stderr, "rk1106_g711_audio_shim: AI->AENC G711 ready codec=%u sample_rate=%u frame_samples=%u\n",
         audio->codec_id, audio->sample_rate, audio->frame_samples);
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
@@ -417,10 +585,9 @@ int uya_rk1106_g711_audio_open(
     audio->channels = channels;
     audio->frame_samples = frame_samples;
 
-    if (uya_rk1106_g711_env_enabled("UYA_RK1106_G711_AUDIO_SILENCE") ||
-        !uya_rk1106_g711_env_enabled("UYA_RK1106_G711_AUDIO_MPI")) {
+    if (uya_rk1106_g711_env_enabled("UYA_RK1106_G711_AUDIO_SILENCE")) {
         audio->synthetic_silence = 1;
-        fprintf(stderr, "rk1106_g711_audio_shim: synthetic G711 silence enabled\n");
+        fprintf(stderr, "rk1106_g711_audio_shim: synthetic G711 silence enabled (PCM will be all zeros)\n");
         *out_handle = (size_t)audio;
         return UYA_RK1106_G711_AUDIO_STATUS_OK;
     }
@@ -463,8 +630,12 @@ int uya_rk1106_g711_audio_read_packet(
     if (audio->api.aenc_get_stream(audio->aenc_chn, &stream, 100) != RK_SUCCESS)
         return UYA_RK1106_G711_AUDIO_STATUS_READ_FAILED;
 
+    if (!stream.pMbBlk || stream.u32Len == 0) {
+        audio->api.aenc_release_stream(audio->aenc_chn, &stream);
+        return UYA_RK1106_G711_AUDIO_STATUS_READ_FAILED;
+    }
     payload = audio->api.mb_handle_to_addr(stream.pMbBlk);
-    if (!payload || stream.u32Len == 0) {
+    if (!payload) {
         audio->api.aenc_release_stream(audio->aenc_chn, &stream);
         return UYA_RK1106_G711_AUDIO_STATUS_READ_FAILED;
     }
@@ -480,6 +651,7 @@ int uya_rk1106_g711_audio_read_packet(
         *out_pts_us = audio->fallback_pts_us;
         audio->fallback_pts_us += ((uint64_t)audio->frame_samples * 1000000ULL) / audio->sample_rate;
     }
+    uya_rk1106_g711_pcm_dump_g711_frame(audio->pcm_dump, audio->codec_id, out_payload, *out_len);
     audio->api.aenc_release_stream(audio->aenc_chn, &stream);
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
 }
@@ -489,6 +661,11 @@ int uya_rk1106_g711_audio_close(size_t handle)
     UyaRk1106G711Audio *audio = (UyaRk1106G711Audio *)handle;
     if (!audio)
         return UYA_RK1106_G711_AUDIO_STATUS_OK;
+    audio->pcm_save_enabled = 0;
+    if (audio->pcm_dump) {
+        fclose(audio->pcm_dump);
+        audio->pcm_dump = NULL;
+    }
     if (audio->bound) {
         MPP_CHN_S ai_chn;
         MPP_CHN_S aenc_chn;
@@ -520,11 +697,19 @@ int uya_rk1106_g711_audio_close(size_t handle)
 
 #else
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 typedef struct UyaHostG711Audio {
     uint32_t codec_id;
     uint32_t sample_rate;
+    uint32_t channels;
     uint32_t frame_samples;
     uint64_t pts_us;
+    FILE *pcm_dump;
+    FILE *fifo;
+    int fifo_fallback_silence;
 } UyaHostG711Audio;
 
 int uya_rk1106_g711_audio_open(
@@ -535,6 +720,7 @@ int uya_rk1106_g711_audio_open(
     size_t *out_handle)
 {
     UyaHostG711Audio *audio;
+    const char *fifo_path;
 
     if (out_handle)
         *out_handle = 0;
@@ -547,7 +733,22 @@ int uya_rk1106_g711_audio_open(
         return UYA_RK1106_G711_AUDIO_STATUS_OPEN_FAILED;
     audio->codec_id = codec_id;
     audio->sample_rate = sample_rate;
+    audio->channels = channels;
     audio->frame_samples = frame_samples;
+    audio->pcm_dump = uya_rk1106_g711_pcm_dump_open();
+
+    /* Hardcoded FIFO path — avoids shell env-var propagation issues on busybox */
+    fifo_path = "/tmp/fastboot.g711";
+    audio->fifo = fopen(fifo_path, "rb");
+    if (!audio->fifo) {
+        fprintf(stderr, "rk1106_g711_audio_shim: FIFO open failed path=%s errno=%d, falling back to silence\n",
+                fifo_path, errno);
+        audio->fifo_fallback_silence = 1;
+    } else {
+        fprintf(stderr, "rk1106_g711_audio_shim: FIFO reader opened (blocking) path=%s codec=%u frame_bytes=%u\n",
+                fifo_path, codec_id, frame_samples);
+    }
+
     *out_handle = (size_t)audio;
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
 }
@@ -560,6 +761,8 @@ int uya_rk1106_g711_audio_read_packet(
     uint64_t *out_pts_us)
 {
     UyaHostG711Audio *audio = (UyaHostG711Audio *)handle;
+    int status;
+    size_t frame_bytes;
 
     if (out_len)
         *out_len = 0;
@@ -567,13 +770,49 @@ int uya_rk1106_g711_audio_read_packet(
         *out_pts_us = 0;
     if (!audio || !out_payload || !out_len || !out_pts_us)
         return UYA_RK1106_G711_AUDIO_STATUS_INVALID_ARGUMENT;
-    return uya_rk1106_g711_fill_silence_packet(audio->codec_id, audio->sample_rate, audio->frame_samples,
+
+    frame_bytes = audio->frame_samples;
+
+    /* Try FIFO read first */
+    if (audio->fifo && !audio->fifo_fallback_silence) {
+        size_t n = fread(out_payload, 1, frame_bytes, audio->fifo);
+        if (n == frame_bytes) {
+            *out_len = frame_bytes;
+            *out_pts_us = audio->pts_us;
+            audio->pts_us += ((uint64_t)frame_bytes * 1000000ULL) / audio->sample_rate;
+            /* Raw G711 dump (no decode needed for FIFO passthrough) */
+            uya_rk1106_g711_pcm_dump_write(audio->pcm_dump, out_payload, frame_bytes);
+            return UYA_RK1106_G711_AUDIO_STATUS_OK;
+        }
+        if (n > 0) {
+            /* partial read -- clear and retry next time */
+            clearerr(audio->fifo);
+        }
+        /* FIFO empty or partial: fall through to silence for this frame */
+    }
+
+    /* Fallback: synthetic silence */
+    status = uya_rk1106_g711_fill_silence_packet(audio->codec_id, audio->sample_rate, audio->frame_samples,
         &audio->pts_us, out_payload, out_capacity, out_len, out_pts_us);
+    if (status == UYA_RK1106_G711_AUDIO_STATUS_OK)
+        uya_rk1106_g711_pcm_dump_silence(audio->pcm_dump, audio->frame_samples, audio->channels);
+    return status;
 }
 
 int uya_rk1106_g711_audio_close(size_t handle)
 {
-    free((void *)handle);
+    UyaHostG711Audio *audio = (UyaHostG711Audio *)handle;
+    if (!audio)
+        return UYA_RK1106_G711_AUDIO_STATUS_OK;
+    if (audio->fifo) {
+        fclose(audio->fifo);
+        audio->fifo = NULL;
+    }
+    if (audio->pcm_dump) {
+        fclose(audio->pcm_dump);
+        audio->pcm_dump = NULL;
+    }
+    free(audio);
     return UYA_RK1106_G711_AUDIO_STATUS_OK;
 }
 

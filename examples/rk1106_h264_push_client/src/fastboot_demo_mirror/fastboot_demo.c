@@ -17,6 +17,11 @@
 #include "rk_mpi_sys.h"
 #include "rk_mpi_venc.h"
 #include "rk_mpi_vi.h"
+#include "rk_comm_aio.h"
+#include "rk_comm_aenc.h"
+#include "rk_mpi_ai.h"
+#include "rk_mpi_aenc.h"
+#include "rk_mpi_amix.h"
 #if defined(ROCKIVA)
 #include "rockiva/rockiva_ba_api.h"
 #include "rockiva/rockiva_common.h"
@@ -390,6 +395,18 @@ static int g_fastboot_bitrate_ramp_done = 0;
 static unsigned int g_fastboot_output_write_count = 0;
 static unsigned int g_fastboot_last_output_heartbeat_count = 0;
 static RK_U64 g_fastboot_last_output_heartbeat_us = 0;
+
+/* ---- audio G711 capture (FASTBOOT_AUDIO_OUT env var) ---- */
+#define FASTBOOT_AUDIO_SAMPLE_RATE 8000
+#define FASTBOOT_AUDIO_CHANNELS 1
+#define FASTBOOT_AUDIO_FRAME_SAMPLES 480
+static const char *g_fastboot_audio_out_path = NULL;
+static FILE *g_fastboot_audio_output_file = NULL;
+static int g_fastboot_audio_logged_first_write = 0;
+static int g_fastboot_audio_codec_id = 0; /* 0=PCMU (u-law), 8=PCMA (a-law) */
+static AUDIO_DEV g_fastboot_audio_ai_dev = 0;
+static AI_CHN g_fastboot_audio_ai_chn = 0;
+static AENC_CHN g_fastboot_audio_aenc_chn = 0;
 
 static bool fastboot_sub_channel_enabled(void) {
 	return !g_fastboot_out_path || g_fastboot_output_channel == VENC_SUB_CHANNEL;
@@ -1857,6 +1874,350 @@ void smartIr_start(struct meta_info *handle) {}
 void smartIr_stop() {}
 #endif
 
+/* ---- audio G711 capture (FASTBOOT_AUDIO_OUT env var) ---- */
+
+static int fastboot_audio_capture_init(void) {
+	RK_CODEC_ID_E enCodecType;
+	AIO_ATTR_S ai_attr;
+	AI_CHN_PARAM_S ai_params;
+	AENC_CHN_ATTR_S aenc_attr;
+	MPP_CHN_S ai_chn;
+	MPP_CHN_S aenc_chn;
+	int rc;
+
+	if (!g_fastboot_audio_out_path)
+		return 0;
+
+	fprintf(stderr, "fastboot_h264_fifo: audio capture init codec=%d sample_rate=%d frame_samples=%d\n",
+	        g_fastboot_audio_codec_id, FASTBOOT_AUDIO_SAMPLE_RATE, FASTBOOT_AUDIO_FRAME_SAMPLES);
+	fflush(stderr);
+
+	/* Dump /proc/asound/cards for diagnostics */
+	{
+		FILE *asound = fopen("/proc/asound/cards", "r");
+		if (asound) {
+			char buf[256];
+			fprintf(stderr, "fastboot_h264_fifo: --- /proc/asound/cards ---\n");
+			while (fgets(buf, sizeof(buf), asound))
+				fprintf(stderr, "fastboot_h264_fifo: %s", buf);
+			fprintf(stderr, "fastboot_h264_fifo: --- end /proc/asound/cards ---\n");
+			fclose(asound);
+		} else {
+			fprintf(stderr, "fastboot_h264_fifo: /proc/asound/cards not available\n");
+		}
+		fflush(stderr);
+	}
+
+	/* AI device: read card name from FASTBOOT_AUDIO_CARD env, default "hw:0,0" */
+	{
+		const char *card = getenv("FASTBOOT_AUDIO_CARD");
+		if (!card || !card[0])
+			card = "hw:0,0";
+		fprintf(stderr, "fastboot_h264_fifo: audio card=%s\n", card);
+		memset(&ai_attr, 0, sizeof(ai_attr));
+		snprintf((char *)ai_attr.u8CardName, sizeof(ai_attr.u8CardName), "%s", card);
+	}
+	/* RV1106B/RV1103B ACodec uses SAI with 2 logical device channels
+	 * (L=MIC, R=loopback/silence).  Match the rk_mpi_ai_test defaults:
+	 *   --device_ch=2 --out_ch=1
+	 * The output channel count and mono downmix are handled by AI_CHN_PARAM_S
+	 * and the track-mode selection below.
+	 */
+	ai_attr.soundCard.channels = 2;
+	ai_attr.soundCard.sampleRate = FASTBOOT_AUDIO_SAMPLE_RATE;
+	ai_attr.soundCard.bitWidth = AUDIO_BIT_WIDTH_16;
+	ai_attr.enSamplerate = (AUDIO_SAMPLE_RATE_E)FASTBOOT_AUDIO_SAMPLE_RATE;
+	ai_attr.enBitwidth = AUDIO_BIT_WIDTH_16;
+	ai_attr.enSoundmode = AUDIO_SOUND_MODE_MONO;
+	ai_attr.u32EXFlag = 0;
+	ai_attr.u32FrmNum = 2;  /* 2 frames × 1024 samples = 256ms buffer */
+	ai_attr.u32PtNumPerFrm = 1024;  /* RV1106B AI works at 1024 (verified with simple_ai_bind_aenc) */
+	ai_attr.u32ChnCnt = 2;
+	fprintf(stderr, "fastboot_h264_fifo: AI attr card=%s pt_num=%u chn_cnt=%u sample_rate=%d\n",
+	        ai_attr.u8CardName, ai_attr.u32PtNumPerFrm, ai_attr.u32ChnCnt,
+	        FASTBOOT_AUDIO_SAMPLE_RATE);
+	fflush(stderr);
+
+	rc = RK_MPI_AI_SetPubAttr(g_fastboot_audio_ai_dev, &ai_attr);
+	if (rc != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_SetPubAttr(ch=2) failed rc=0x%08x, retrying ch=1\n", rc);
+		/* Fallback: try 1 channel */
+		ai_attr.soundCard.channels = 1;
+		ai_attr.u32ChnCnt = 1;
+		rc = RK_MPI_AI_SetPubAttr(g_fastboot_audio_ai_dev, &ai_attr);
+		if (rc != RK_SUCCESS) {
+			fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_SetPubAttr(ch=1) also failed rc=0x%08x\n", rc);
+			return -1;
+		}
+		fprintf(stderr, "fastboot_h264_fifo: AI fallback to 1 channel succeeded\n");
+		fflush(stderr);
+	}
+	rc = RK_MPI_AI_Enable(g_fastboot_audio_ai_dev);
+	if (rc != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_Enable failed rc=0x%08x\n", rc);
+		return -1;
+	}
+
+	memset(&ai_params, 0, sizeof(ai_params));
+	ai_params.enLoopbackMode = AUDIO_LOOPBACK_NONE;
+	ai_params.s32UsrFrmDepth = 1;  /* match simple_ai_bind_aenc */
+	/* Don't set u32MapPtNumPerFrm — let driver use default */
+	(void)RK_MPI_AI_SetChnParam(g_fastboot_audio_ai_dev, g_fastboot_audio_ai_chn, &ai_params);
+	(void)RK_MPI_AI_SetTrackMode(g_fastboot_audio_ai_dev, AUDIO_TRACK_FRONT_LEFT);
+
+	rc = RK_MPI_AI_EnableChn(g_fastboot_audio_ai_dev, g_fastboot_audio_ai_chn);
+	if (rc != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_EnableChn failed rc=0x%08x\n", rc);
+		return -1;
+	}
+
+	/* AENC channel: G711 PCMU/PCMA */
+	/* FASTBOOT_AUDIO_CODEC env: 0=PCMU (u-law, default), 1=PCMA (a-law) */
+	enCodecType = (g_fastboot_audio_codec_id == 1) ? RK_AUDIO_ID_PCM_ALAW : RK_AUDIO_ID_PCM_MULAW;
+	memset(&aenc_attr, 0, sizeof(aenc_attr));
+	aenc_attr.enType = enCodecType;
+	aenc_attr.u32BufCount = 4;
+	aenc_attr.u32Depth = 4;
+	aenc_attr.stCodecAttr.enType = enCodecType;
+	aenc_attr.stCodecAttr.enBitwidth = AUDIO_BIT_WIDTH_16;
+	aenc_attr.stCodecAttr.u32Channels = FASTBOOT_AUDIO_CHANNELS;
+	aenc_attr.stCodecAttr.u32SampleRate = FASTBOOT_AUDIO_SAMPLE_RATE;
+
+	rc = RK_MPI_AENC_CreateChn(g_fastboot_audio_aenc_chn, &aenc_attr);
+	if (rc != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AENC_CreateChn failed rc=0x%08x\n", rc);
+		return -1;
+	}
+
+	/* Bind AI -> AENC */
+	memset(&ai_chn, 0, sizeof(ai_chn));
+	memset(&aenc_chn, 0, sizeof(aenc_chn));
+	ai_chn.enModId = RK_ID_AI;
+	ai_chn.s32DevId = g_fastboot_audio_ai_dev;
+	ai_chn.s32ChnId = g_fastboot_audio_ai_chn;
+	aenc_chn.enModId = RK_ID_AENC;
+	aenc_chn.s32DevId = 0;
+	aenc_chn.s32ChnId = g_fastboot_audio_aenc_chn;
+	rc = RK_MPI_SYS_Bind(&ai_chn, &aenc_chn);
+	if (rc != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_SYS_Bind AI->AENC failed rc=0x%08x\n", rc);
+		return -1;
+	}
+
+	/* AMIX configuration is NOT needed for RV1106B ACodec (verified with
+	 * simple_ai_bind_aenc which works without any AMIX on this platform).
+	 * Leaving this commented out to match the working test program. */
+#if 0
+	{
+		const char *amix_controls[][2] = {
+			{"ADC Main MICBIAS",       "On"},
+			{"ADC MIC Left Switch",     "Work"},
+			{"ADC MIC Left Gain",       "2"},
+			{"ADC Digital Left Volume", "195"},
+			{"ADC MICBIAS Voltage",     "VREFx0_9"},
+			{NULL, NULL}
+		};
+		int i;
+		for (i = 0; amix_controls[i][0]; i++) {
+			rc = RK_MPI_AMIX_SetControl(0, amix_controls[i][0],
+			                            (char *)amix_controls[i][1]);
+			fprintf(stderr, "fastboot_h264_fifo: AMIX set '%s'='%s' rc=0x%08x\n",
+			        amix_controls[i][0], amix_controls[i][1], rc);
+		}
+		fflush(stderr);
+	}
+#endif
+
+	fprintf(stderr, "fastboot_h264_fifo: audio AI->AENC G711 ready codec=%d output=%s\n",
+	        g_fastboot_audio_codec_id, g_fastboot_audio_out_path);
+	fflush(stderr);
+	return 0;
+}
+
+static void *GetAencStream(void *arg) {
+	AUDIO_STREAM_S stream;
+	void *payload;
+	FILE *file = NULL;
+	size_t wrote;
+	int s32Ret;
+	unsigned int frame_count = 0;
+	unsigned int empty_count = 0;
+	unsigned int err_count = 0;
+	(void)arg;
+
+	if (!g_fastboot_audio_out_path || !g_fastboot_audio_out_path[0]) {
+		fprintf(stderr, "fastboot_h264_fifo: audio thread: no output path, exiting\n");
+		return NULL;
+	}
+
+	fprintf(stderr, "fastboot_h264_fifo: audio thread started output=%s\n", g_fastboot_audio_out_path);
+	fflush(stderr);
+
+	/* Open output FIFO in this thread (non-blocking + retry).
+	 * The sender opens the read end after DTLS completes. */
+	{
+		int fd;
+		int retries = 0;
+		while (!quit && !g_fastboot_audio_output_file) {
+			fd = open(g_fastboot_audio_out_path,
+			          O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+			if (fd >= 0) {
+				g_fastboot_audio_output_file = fdopen(fd, "ab");
+				if (!g_fastboot_audio_output_file) {
+					fprintf(stderr, "fastboot_h264_fifo: fdopen audio FIFO failed errno=%d\n", errno);
+					close(fd);
+					return NULL;
+				}
+				fprintf(stderr, "fastboot_h264_fifo: audio FIFO opened (retries=%d)\n", retries);
+				break;
+			}
+			if (errno != ENXIO) {
+				fprintf(stderr, "fastboot_h264_fifo: audio FIFO open error errno=%d\n", errno);
+				return NULL;
+			}
+			if (retries == 0)
+				fprintf(stderr, "fastboot_h264_fifo: audio FIFO waiting for reader...\n");
+			retries++;
+			if ((retries % 50) == 0)
+				fprintf(stderr, "fastboot_h264_fifo: audio FIFO still waiting (retries=%d)\n", retries);
+			usleep(100000);  /* 100ms */
+		}
+	}
+	if (!g_fastboot_audio_output_file) {
+		fprintf(stderr, "fastboot_h264_fifo: audio thread exiting (no FIFO)\n");
+		return NULL;
+	}
+
+	memset(&stream, 0, sizeof(stream));
+
+	while (!quit) {
+		s32Ret = RK_MPI_AENC_GetStream(g_fastboot_audio_aenc_chn, &stream, 200);  /* shorter timeout = lower latency */
+		if (s32Ret != RK_SUCCESS) {
+			err_count++;
+			if (err_count <= 5 || (err_count % 50) == 0) {
+				fprintf(stderr, "fastboot_h264_fifo: audio GetStream failed rc=0x%08x err_count=%u empty_count=%u\n",
+				        s32Ret, err_count, empty_count);
+				fflush(stderr);
+			}
+			continue;
+		}
+		if (!stream.pMbBlk || stream.u32Len == 0) {
+			RK_MPI_AENC_ReleaseStream(g_fastboot_audio_aenc_chn, &stream);
+			empty_count++;
+			if (empty_count <= 3 || (empty_count % 50) == 0) {
+				fprintf(stderr, "fastboot_h264_fifo: audio GetStream empty pMbBlk=%p len=%u empty_count=%u\n",
+				        (void *)stream.pMbBlk, stream.u32Len, empty_count);
+				fflush(stderr);
+			}
+			continue;
+		}
+
+		payload = RK_MPI_MB_Handle2VirAddr(stream.pMbBlk);
+		if (!payload) {
+			RK_MPI_AENC_ReleaseStream(g_fastboot_audio_aenc_chn, &stream);
+			continue;
+		}
+
+		/* Diagnostic: dump raw 1024-byte AENC output for comparison with test program */
+		{
+			static FILE *raw_dump = NULL;
+			if (!raw_dump) {
+				raw_dump = fopen("/tmp/aenc_raw.g711u", "ab");
+				if (raw_dump)
+					fprintf(stderr, "fastboot_h264_fifo: raw AENC dump -> /tmp/aenc_raw.g711u\n");
+			}
+			if (raw_dump) {
+				fwrite(payload, 1, stream.u32Len, raw_dump);
+				fflush(raw_dump);
+			}
+		}
+
+		/* Split 1024-byte AENC frames into 480-byte G711 chunks for WebRTC.
+		 * The AI hardware produces 1024-sample frames (verified with
+		 * simple_ai_bind_aenc), but the sender expects 480-byte frames
+		 * (60ms @ 8000Hz 1ch G711).  Accumulate remainders across frames. */
+		{
+			static unsigned char buf[2048];
+			static size_t buf_len = 0;
+			size_t consumed = 0;
+			size_t chunk;
+
+			/* Append current frame to buffer */
+			if (buf_len + stream.u32Len > sizeof(buf)) {
+				fprintf(stderr, "fastboot_h264_fifo: audio buffer overflow, resetting\n");
+				buf_len = 0;
+			}
+			memcpy(buf + buf_len, payload, stream.u32Len);
+			buf_len += stream.u32Len;
+
+			/* Emit 480-byte chunks (FIFO already opened in init) */
+			file = g_fastboot_audio_output_file;
+
+			while (file && buf_len >= FASTBOOT_AUDIO_FRAME_SAMPLES) {
+				chunk = FASTBOOT_AUDIO_FRAME_SAMPLES;
+				wrote = fwrite(buf + consumed, 1, chunk, file);
+				fflush(file);
+				consumed += chunk;
+				buf_len -= chunk;
+				frame_count++;
+				if (!g_fastboot_audio_logged_first_write) {
+					fprintf(stderr,
+					        "fastboot_h264_fifo: first audio write bytes=%zu chunk=%zu pts=%llu\n",
+					        wrote, chunk, (unsigned long long)stream.u64TimeStamp);
+					fflush(stderr);
+					g_fastboot_audio_logged_first_write = 1;
+				}
+			}
+
+			/* Compact: move remainder to start of buffer */
+			if (consumed > 0 && buf_len > 0)
+				memmove(buf, buf + consumed, buf_len);
+
+			if (frame_count > 0 && (frame_count % 150) == 0) {
+				fprintf(stderr, "fastboot_h264_fifo: audio heartbeat count=%u aenc_bytes=%u buf_remain=%zu\n",
+				        frame_count, stream.u32Len, buf_len);
+				fflush(stderr);
+			}
+		}
+
+		RK_MPI_AENC_ReleaseStream(g_fastboot_audio_aenc_chn, &stream);
+	}
+
+	if (g_fastboot_audio_output_file) {
+		fclose(g_fastboot_audio_output_file);
+		g_fastboot_audio_output_file = NULL;
+	}
+	fprintf(stderr, "fastboot_h264_fifo: audio thread stopped frames=%u\n", frame_count);
+	return NULL;
+}
+
+static void fastboot_audio_capture_deinit(void) {
+	MPP_CHN_S ai_chn;
+	MPP_CHN_S aenc_chn;
+
+	if (!g_fastboot_audio_out_path)
+		return;
+
+	memset(&ai_chn, 0, sizeof(ai_chn));
+	memset(&aenc_chn, 0, sizeof(aenc_chn));
+	ai_chn.enModId = RK_ID_AI;
+	ai_chn.s32DevId = g_fastboot_audio_ai_dev;
+	ai_chn.s32ChnId = g_fastboot_audio_ai_chn;
+	aenc_chn.enModId = RK_ID_AENC;
+	aenc_chn.s32DevId = 0;
+	aenc_chn.s32ChnId = g_fastboot_audio_aenc_chn;
+
+	(void)RK_MPI_SYS_UnBind(&ai_chn, &aenc_chn);
+	(void)RK_MPI_AENC_DestroyChn(g_fastboot_audio_aenc_chn);
+	(void)RK_MPI_AI_DisableChn(g_fastboot_audio_ai_dev, g_fastboot_audio_ai_chn);
+	(void)RK_MPI_AI_Disable(g_fastboot_audio_ai_dev);
+	if (g_fastboot_audio_output_file) {
+		fclose(g_fastboot_audio_output_file);
+		g_fastboot_audio_output_file = NULL;
+	}
+	fprintf(stderr, "fastboot_h264_fifo: audio capture deinitialized\n");
+}
+
 int main(int argc, char *argv[]) {
 	setvbuf(stderr, NULL, _IONBF, 0);
 	fprintf(stderr, "fastboot_h264_fifo: build_id=%s\n", FASTBOOT_H264_FIFO_BUILD_ID);
@@ -1926,6 +2287,19 @@ int main(int argc, char *argv[]) {
 			fprintf(stderr, "fastboot_h264_fifo: continuous output-channel FIFO enabled channel=%d\n",
 			        g_fastboot_output_channel);
 			fflush(stderr);
+		}
+	}
+	{
+		const char *audio_path = getenv("FASTBOOT_AUDIO_OUT");
+		if (audio_path && audio_path[0]) {
+			g_fastboot_audio_out_path = audio_path;
+			g_fastboot_audio_codec_id = fastboot_parse_nonnegative_env(
+			    "FASTBOOT_AUDIO_CODEC", 0, 1);
+			fprintf(stderr, "fastboot_h264_fifo: audio output=%s codec=%d\n",
+			        g_fastboot_audio_out_path, g_fastboot_audio_codec_id);
+			fflush(stderr);
+		} else {
+			fprintf(stderr, "fastboot_h264_fifo: audio capture disabled (FASTBOOT_AUDIO_OUT not set)\n");
 		}
 	}
 	metaVirmem = get_meta_params(&handle);
@@ -2000,9 +2374,24 @@ int main(int argc, char *argv[]) {
 	}
 #endif
 
+	if (g_fastboot_audio_out_path) {
+		ret = fastboot_audio_capture_init();
+		if (ret != 0) {
+			fastboot_demo_err("audio capture init failed ret=%d\n", ret);
+			fprintf(stderr, "fastboot_h264_fifo: audio capture disabled (init failed)\n");
+			g_fastboot_audio_out_path = NULL;
+		}
+	}
+
 	pthread_t main_thread0, sub_venc_thread_id, md_nn_thread_id;
+	pthread_t audio_thread_id;
 	bool sub_venc_thread_started = false;
+	bool audio_thread_started = false;
 	pthread_create(&main_thread0, NULL, GetVencStream, (void *)VENC_MAIN_CHANNEL);
+	if (g_fastboot_audio_out_path) {
+		pthread_create(&audio_thread_id, NULL, GetAencStream, NULL);
+		audio_thread_started = true;
+	}
 	if (fastboot_sub_channel_enabled()) {
 		pthread_create(&sub_venc_thread_id, NULL, GetVencStream, (void *)VENC_SUB_CHANNEL);
 		sub_venc_thread_started = true;
@@ -2013,13 +2402,18 @@ int main(int argc, char *argv[]) {
 	pthread_create(&md_nn_thread_id, NULL, md_nn_loop, &ctx);
 #endif
 	pthread_join(main_thread0, NULL);
+	quit = true;
 	if (sub_venc_thread_started)
 		pthread_join(sub_venc_thread_id, NULL);
+	if (audio_thread_started)
+		pthread_join(audio_thread_id, NULL);
 #if defined(ROCKIVA)
 	pthread_join(md_nn_thread_id, NULL);
 #endif
 
 __FAILED:
+	quit = true;
+	fastboot_audio_capture_deinit();
 #if (ENABLE_RTSP)
 	if (g_rtsp_ctx)
 		rtsp_deinit();

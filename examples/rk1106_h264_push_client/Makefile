@@ -79,8 +79,10 @@ $(SENDER_C): $(REPO_ROOT)/src/webrtc_rk1106_h264_sender_main.uya \
 	python3 "$(EXAMPLE_DIR)/tools/patch_arm_pthread_create_stub.py" "$@"
 
 $(SENDER): $(SENDER_C) $(AUDIO_SHIM_C) | check-cross-tools
-	"$(CROSS_CC)" $(RK_CFLAGS) -o "$@" "$(SENDER_C)" "$(AUDIO_SHIM_C)" \
-		-L"$(MPP_LIB)" -Wl,-rpath-link,"$(MPP_LIB)" \
+	# Sender reads audio G711 frames from a FIFO filled by fastboot_h264_fifo helper.
+	# No Rockchip MPI / librockit.a dependency → no sys_bind symbol conflict.
+	"$(CROSS_CC)" $(RK_CFLAGS) \
+		-I"$(MPI_INC)" -o "$@" "$(SENDER_C)" "$(AUDIO_SHIM_C)" \
 		$(RK_LDFLAGS)
 
 MPP_PROBE_C := $(EXAMPLE_DIR)/tools/mpp_probe_main.c
@@ -113,7 +115,7 @@ $(FASTBOOT_MIRROR): $(FASTBOOT_MIRROR_C) | check-cross-tools
 		-I"$(MEDIA_OUT)/include/rkaiq/uAPI2" -I"$(MEDIA_OUT)/include/rkaiq/algos" -I"$(MEDIA_OUT)/include/rkaiq/common" \
 		-I"$(MEDIA_OUT)/include/rkaiq/xcore" -I"$(MEDIA_OUT)/include/rkaiq/iq_parser" -I"$(MEDIA_OUT)/include/rkaiq/iq_parser_v2" \
 		-I"$(MEDIA_OUT)/include/rkaiq/smartIr" -L"$(MPP_LIB)" -Wl,-rpath-link,"$(MPP_LIB)" \
-		-Wl,-Bstatic -pthread -lrockit -lrtsp -lrockchip_mpp -lrksysutils -lsmartIr -lrkaudio_detect -lrkaudio_vqe -lrga \
+		-Wl,-Bstatic -pthread -lrockit -lrtsp -lrockchip_mpp -lrksysutils -lsmartIr -lrkaudio_detect -lrkaudio_vqe -lrkaudio -lrga \
 		-Wl,-Bdynamic -lrkaiq -lstdc++ -lm
 
 fastboot-mirror: $(FASTBOOT_MIRROR)
