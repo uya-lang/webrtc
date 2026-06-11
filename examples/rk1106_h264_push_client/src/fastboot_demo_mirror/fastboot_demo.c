@@ -66,15 +66,16 @@
 #define FASTBOOT_FIFO_DEFAULT_HEIGHT 720
 #define FASTBOOT_FIFO_DEFAULT_FPS 30
 #define FASTBOOT_FIFO_DEFAULT_BITRATE 600000
-#define FASTBOOT_FIFO_DEFAULT_START_BITRATE 300000
+#define FASTBOOT_FIFO_DEFAULT_START_BITRATE FASTBOOT_FIFO_DEFAULT_BITRATE
 #define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
-#define FASTBOOT_FIFO_DEFAULT_GOP 15
+#define FASTBOOT_FIFO_DEFAULT_GOP 5
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
 #define FASTBOOT_VIDEO_FIFO_OPEN_RETRY_US 100000
 #define FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES 300
 #define FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS 120
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-live-drop-20260611a"
+#define FASTBOOT_H264_PARAMETER_SET_CACHE_BYTES 8192
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-gop5-spspps-safe-live-drop-20260611a"
 
 #define ENABLE_SMART_IR
 
@@ -400,6 +401,12 @@ static int g_fastboot_bitrate_ramp_done = 0;
 static unsigned int g_fastboot_output_write_count = 0;
 static unsigned int g_fastboot_last_output_heartbeat_count = 0;
 static RK_U64 g_fastboot_last_output_heartbeat_us = 0;
+static unsigned char g_fastboot_h264_parameter_sets[FASTBOOT_H264_PARAMETER_SET_CACHE_BYTES];
+static size_t g_fastboot_h264_parameter_sets_len = 0;
+static int g_fastboot_h264_parameter_sets_available = 0;
+static int g_fastboot_logged_h264_parameter_sets_cached = 0;
+static int g_fastboot_logged_h264_parameter_sets_prepended = 0;
+static int g_fastboot_logged_h264_idr_without_parameter_sets = 0;
 
 /* ---- audio G711 capture (FASTBOOT_AUDIO_OUT env var) ---- */
 #define FASTBOOT_AUDIO_SAMPLE_RATE 8000
@@ -579,6 +586,112 @@ static int fastboot_open_output_stream_file(int chn) {
 	return g_fastboot_output_file ? 0 : -1;
 }
 
+static size_t fastboot_h264_start_code_len_at(const unsigned char *bytes, size_t len,
+                                              size_t offset) {
+	if (!bytes)
+		return 0;
+	if (offset + 3 <= len && bytes[offset] == 0 && bytes[offset + 1] == 0 &&
+	    bytes[offset + 2] == 1)
+		return 3;
+	if (offset + 4 <= len && bytes[offset] == 0 && bytes[offset + 1] == 0 &&
+	    bytes[offset + 2] == 0 && bytes[offset + 3] == 1)
+		return 4;
+	return 0;
+}
+
+static size_t fastboot_h264_find_next_start_code(const unsigned char *bytes, size_t len,
+                                                 size_t offset) {
+	size_t cursor = offset;
+
+	while (cursor < len) {
+		if (fastboot_h264_start_code_len_at(bytes, len, cursor) != 0)
+			return cursor;
+		cursor++;
+	}
+	return len;
+}
+
+static bool fastboot_h264_payload_has_sps_pps(const void *payload, size_t len) {
+	const unsigned char *bytes = (const unsigned char *)payload;
+	bool has_sps = false;
+	bool has_pps = false;
+	size_t cursor;
+
+	if (!bytes || len == 0)
+		return false;
+	cursor = fastboot_h264_find_next_start_code(bytes, len, 0);
+	while (cursor < len) {
+		size_t start_len = fastboot_h264_start_code_len_at(bytes, len, cursor);
+		size_t nal_start, next_start;
+		unsigned char nal_type;
+		if (start_len == 0)
+			break;
+		nal_start = cursor + start_len;
+		if (nal_start >= len)
+			break;
+		next_start = fastboot_h264_find_next_start_code(bytes, len, nal_start);
+		(void)next_start;
+		nal_type = bytes[nal_start] & 0x1f;
+		if (nal_type == 7)
+			has_sps = true;
+		else if (nal_type == 8)
+			has_pps = true;
+		if (has_sps && has_pps)
+			return true;
+		cursor = fastboot_h264_find_next_start_code(bytes, len, nal_start);
+	}
+	return false;
+}
+
+static void fastboot_h264_cache_parameter_sets(const void *payload, size_t len) {
+	const unsigned char *bytes = (const unsigned char *)payload;
+	size_t cursor, write_len = 0;
+	bool has_sps = false;
+	bool has_pps = false;
+
+	if (!bytes || len == 0)
+		return;
+	cursor = fastboot_h264_find_next_start_code(bytes, len, 0);
+	while (cursor < len) {
+		size_t start_len = fastboot_h264_start_code_len_at(bytes, len, cursor);
+		size_t nal_start, next_start, nal_total_len;
+		unsigned char nal_type;
+		if (start_len == 0)
+			break;
+		nal_start = cursor + start_len;
+		if (nal_start >= len)
+			break;
+		next_start = fastboot_h264_find_next_start_code(bytes, len, nal_start);
+		nal_total_len = next_start - cursor;
+		nal_type = bytes[nal_start] & 0x1f;
+		if (nal_type == 7 || nal_type == 8) {
+			if (write_len + nal_total_len > sizeof(g_fastboot_h264_parameter_sets)) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: H264 SPS/PPS cache too small; not caching parameter sets\n");
+				fflush(stderr);
+				return;
+			}
+			memcpy(g_fastboot_h264_parameter_sets + write_len, bytes + cursor, nal_total_len);
+			write_len += nal_total_len;
+			if (nal_type == 7)
+				has_sps = true;
+			else
+				has_pps = true;
+		}
+		cursor = next_start;
+	}
+	if (has_sps && has_pps && write_len > 0) {
+		g_fastboot_h264_parameter_sets_len = write_len;
+		g_fastboot_h264_parameter_sets_available = 1;
+		if (!g_fastboot_logged_h264_parameter_sets_cached) {
+			fprintf(stderr, "fastboot_h264_fifo: cached H264 SPS/PPS bytes=%zu\n",
+			        write_len);
+			fflush(stderr);
+			g_fastboot_logged_h264_parameter_sets_cached = 1;
+		}
+	}
+}
+
 static unsigned int fastboot_drain_output_venc_backlog(int chn) {
 	VENC_STREAM_S drainFrame;
 	unsigned int drained = 0;
@@ -598,6 +711,9 @@ static unsigned int fastboot_drain_output_venc_backlog(int chn) {
 		ret = RK_MPI_VENC_GetStream(chn, &drainFrame, 0);
 		if (ret != RK_SUCCESS)
 			break;
+		fastboot_h264_cache_parameter_sets(
+		    (void *)RK_MPI_MB_Handle2VirAddr(drainFrame.pstPack->pMbBlk),
+		    drainFrame.pstPack->u32Len);
 		RK_MPI_VENC_ReleaseStream(chn, &drainFrame);
 		drained++;
 	}
@@ -650,11 +766,50 @@ static bool fastboot_h264_payload_has_idr(const void *payload, size_t len) {
 	return false;
 }
 
+static size_t fastboot_h264_write_output_payload(FILE *file, const void *payload, size_t len,
+                                                 size_t *expected_len) {
+	size_t wrote = 0;
+
+	if (expected_len)
+		*expected_len = len;
+	if (!file || !payload || len == 0)
+		return 0;
+
+	fastboot_h264_cache_parameter_sets(payload, len);
+	if (fastboot_h264_payload_has_idr(payload, len) &&
+	    !fastboot_h264_payload_has_sps_pps(payload, len)) {
+		if (g_fastboot_h264_parameter_sets_available &&
+		    g_fastboot_h264_parameter_sets_len > 0) {
+			if (expected_len)
+				*expected_len = len + g_fastboot_h264_parameter_sets_len;
+			wrote += fwrite(g_fastboot_h264_parameter_sets, 1,
+			                g_fastboot_h264_parameter_sets_len, file);
+			wrote += fwrite(payload, 1, len, file);
+			if (!g_fastboot_logged_h264_parameter_sets_prepended) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: prepended cached H264 SPS/PPS bytes=%zu\n",
+				        g_fastboot_h264_parameter_sets_len);
+				fflush(stderr);
+				g_fastboot_logged_h264_parameter_sets_prepended = 1;
+			}
+			return wrote;
+		}
+		if (!g_fastboot_logged_h264_idr_without_parameter_sets) {
+			fprintf(stderr,
+			        "fastboot_h264_fifo: H264 IDR has no SPS/PPS and cache is empty\n");
+			fflush(stderr);
+			g_fastboot_logged_h264_idr_without_parameter_sets = 1;
+		}
+	}
+	return fwrite(payload, 1, len, file);
+}
+
 static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	char OutPath[256];
 	void *pData = RK_NULL;
 	FILE *file = NULL;
 	size_t wrote = 0;
+	size_t expected_wrote = 0;
 	bool keep_open = false;
 
 	if (g_fastboot_out_path && chn == g_fastboot_output_channel) {
@@ -674,12 +829,19 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 
 	if (file) {
 		pData = (void *)RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
-		wrote = fwrite(pData, 1, stFrame.pstPack->u32Len, file);
+		if (keep_open) {
+			wrote = fastboot_h264_write_output_payload(file, pData,
+			                                           stFrame.pstPack->u32Len,
+			                                           &expected_wrote);
+		} else {
+			wrote = fwrite(pData, 1, stFrame.pstPack->u32Len, file);
+			expected_wrote = stFrame.pstPack->u32Len;
+		}
 		fflush(file);
 		if (chn == g_fastboot_output_channel && !g_fastboot_logged_first_output_write) {
 			fprintf(stderr,
-			        "fastboot_h264_fifo: first output-channel write channel=%d bytes=%zu requested=%u\n",
-			        chn, wrote, stFrame.pstPack->u32Len);
+			        "fastboot_h264_fifo: first output-channel write channel=%d bytes=%zu requested=%zu\n",
+			        chn, wrote, expected_wrote);
 			fflush(stderr);
 			g_fastboot_logged_first_output_write = 1;
 		}
@@ -712,10 +874,10 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 				g_fastboot_last_output_heartbeat_us = now_us;
 				g_fastboot_last_output_heartbeat_count = g_fastboot_output_write_count;
 			}
-			if (wrote != stFrame.pstPack->u32Len && !g_fastboot_logged_short_write) {
+			if (wrote != expected_wrote && !g_fastboot_logged_short_write) {
 				fprintf(stderr,
-				        "fastboot_h264_fifo: short output-channel write channel=%d bytes=%zu requested=%u errno=%d\n",
-				        chn, wrote, stFrame.pstPack->u32Len, errno);
+				        "fastboot_h264_fifo: short output-channel write channel=%d bytes=%zu requested=%zu errno=%d\n",
+				        chn, wrote, expected_wrote, errno);
 				fflush(stderr);
 				g_fastboot_logged_short_write = 1;
 			}

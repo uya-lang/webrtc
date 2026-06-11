@@ -83,8 +83,9 @@ FASTBOOT_VIDEO_WIDTH=1280
 FASTBOOT_VIDEO_HEIGHT=720
 FASTBOOT_VIDEO_FPS=30
 FASTBOOT_H264_BITRATE=600000
-FASTBOOT_H264_START_BITRATE=300000
+FASTBOOT_H264_START_BITRATE=600000
 FASTBOOT_H264_RAMP_FRAMES=60
+FASTBOOT_H264_GOP=5
 ```
 
 You can also run the binary directly:
@@ -185,11 +186,11 @@ H264 file -> H264 RTP/SRTP -> Chrome
 - `SUPPRESS_KERNEL_LOGS`
 
 默认 fastboot helper 使用 720p 主码流，`FASTBOOT_VIDEO_FPS=30`，
-`FASTBOOT_H264_BITRATE=600000`。启动阶段默认先用
-`FASTBOOT_H264_START_BITRATE=300000`，写出 `FASTBOOT_H264_RAMP_FRAMES=60`
-帧后恢复到目标码率，减轻首帧/启动缓存冲击。码率参数使用 bps；
-helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。设置
-`FASTBOOT_H264_RAMP_FRAMES=0` 可以关闭启动码率爬升。
+`FASTBOOT_H264_BITRATE=600000`，`FASTBOOT_H264_START_BITRATE` 默认等于目标码率，
+`FASTBOOT_H264_GOP=5`，优先保证首帧和低延迟。码率参数使用 bps；
+helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。如果需要重新启用低码率启动，
+可以把 `FASTBOOT_H264_START_BITRATE` 设成低于目标码率的值；
+`FASTBOOT_H264_RAMP_FRAMES=0` 可以显式关闭启动码率爬升。
 `SUPPRESS_KERNEL_LOGS=1` 默认临时压低内核串口日志，避免 WiFi flow-control
 日志刷屏；调试内核/驱动时可用 `SUPPRESS_KERNEL_LOGS=0 ./board_run.sh`。
 如果 Chrome 统计里 `framesDropped`、`freezeCount`、`pliCount` 或 `nackCount`

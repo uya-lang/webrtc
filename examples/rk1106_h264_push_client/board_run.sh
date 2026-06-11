@@ -22,9 +22,9 @@ FASTBOOT_VIDEO_WIDTH=${FASTBOOT_VIDEO_WIDTH:-1280}
 FASTBOOT_VIDEO_HEIGHT=${FASTBOOT_VIDEO_HEIGHT:-720}
 FASTBOOT_VIDEO_FPS=${FASTBOOT_VIDEO_FPS:-30}
 FASTBOOT_H264_BITRATE=${FASTBOOT_H264_BITRATE:-$H264_BITRATE}
-FASTBOOT_H264_START_BITRATE=${FASTBOOT_H264_START_BITRATE:-300000}
+FASTBOOT_H264_START_BITRATE=${FASTBOOT_H264_START_BITRATE:-$FASTBOOT_H264_BITRATE}
 FASTBOOT_H264_RAMP_FRAMES=${FASTBOOT_H264_RAMP_FRAMES:-60}
-FASTBOOT_H264_GOP=${FASTBOOT_H264_GOP:-15}
+FASTBOOT_H264_GOP=${FASTBOOT_H264_GOP:-5}
 DIAG_PATH=${DIAG_PATH:-/tmp/rk1106_h264_sender_diagnostics.json}
 BOOT_TRACE_LOG=${BOOT_TRACE_LOG:-/tmp/rk1106_h264_sender_boot.log}
 SENDER_STDOUT_LOG=${SENDER_STDOUT_LOG:-/tmp/rk1106_h264_sender.stdout.log}
@@ -101,6 +101,27 @@ print_local_ipv4s() {
     if command -v ifconfig >/dev/null 2>&1; then
         ifconfig 2>/dev/null >&2 || true
     fi
+}
+
+ensure_executable_binary() {
+    path=$1
+    label=$2
+    if [ ! -f "$path" ]; then
+        echo "board_run: $label binary is missing: $path" >&2
+        return 1
+    fi
+    if [ ! -x "$path" ]; then
+        echo "board_run: $label binary exists but is not executable, trying chmod +x: $path" >&2
+        chmod +x "$path" 2>/dev/null || {
+            echo "board_run: chmod +x failed for $label binary: $path" >&2
+            return 1
+        }
+    fi
+    if [ ! -x "$path" ]; then
+        echo "board_run: $label binary is still not executable: $path" >&2
+        return 1
+    fi
+    return 0
 }
 
 print_tail() {
@@ -260,12 +281,12 @@ if [ -z "$MEDIA_PATH" ]; then
 fi
 ls -l "$DIR/rk1106_h264_sender" "$DIR/fastboot_h264_fifo" >&2 || true
 
-if [ ! -x "$DIR/rk1106_h264_sender" ]; then
+if ! ensure_executable_binary "$DIR/rk1106_h264_sender" "sender"; then
     echo "board_run: sender binary is missing or not executable: $DIR/rk1106_h264_sender" >&2
     echo "board_run: run this script from the package directory containing rk1106_h264_sender" >&2
     exit 11
 fi
-if [ -z "$MEDIA_PATH" ] && [ ! -x "$DIR/fastboot_h264_fifo" ]; then
+if [ -z "$MEDIA_PATH" ] && ! ensure_executable_binary "$DIR/fastboot_h264_fifo" "helper"; then
     echo "board_run: helper binary is missing or not executable: $DIR/fastboot_h264_fifo" >&2
     echo "board_run: run this script from the package directory containing fastboot_h264_fifo" >&2
     exit 10
