@@ -82,6 +82,15 @@
       font-size: 14px;
       word-break: break-word;
     }
+    .metrics {
+      margin: 0;
+      min-height: 3.5em;
+      overflow-x: auto;
+      color: #cbd5e1;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     label {
       font-size: 14px;
       color: #cbd5e1;
@@ -109,6 +118,7 @@
     <button id="closePeer" class="secondary">Close</button>
   </div>
   <div id="status" class="status">idle</div>
+  <pre id="metrics" class="metrics">timing: idle</pre>
   <section class="grid">
     <div class="panel">
       <label for="offerBox">offer JSON</label>
@@ -123,8 +133,16 @@
 <script>
 let pc = null;
 let pollToken = 0;
+let statsPollToken = 0;
+let statsTimer = null;
+let timing = {};
+let latestStatsText = 'stats video: waiting';
+let firstFrameWatchArmed = false;
+const ANSWER_WAIT_TIMEOUT_MS = 240000;
+const ANSWER_POLL_INTERVAL_MS = 200;
 
 const statusEl = document.getElementById('status');
+const metricsEl = document.getElementById('metrics');
 const offerBox = document.getElementById('offerBox');
 const answerBox = document.getElementById('answerBox');
 const remoteVideo = document.getElementById('remoteVideo');
@@ -137,6 +155,48 @@ if (location.protocol === 'http:' || location.protocol === 'https:') {
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function resetDiagnostics() {
+  timing = {start: performance.now()};
+  latestStatsText = 'stats video: waiting';
+  firstFrameWatchArmed = false;
+  renderDiagnostics();
+}
+
+function markTiming(name) {
+  if (!timing.start) timing.start = performance.now();
+  if (!timing[name]) {
+    timing[name] = performance.now();
+    console.info(`preview timing ${name}=${Math.round(timing[name] - timing.start)}ms`);
+  }
+  renderDiagnostics();
+}
+
+function timingPart(label, name, base) {
+  if (!timing[name]) return null;
+  return `${label}=${Math.round(timing[name] - base)}ms`;
+}
+
+function renderDiagnostics() {
+  const base = timing.start || timing.offerStart || performance.now();
+  const parts = [
+    timingPart('offer', 'offerStart', base),
+    timingPart('offerReady', 'offerReady', base),
+    timingPart('offerPublished', 'offerPublished', base),
+    timingPart('answerSet', 'answerSet', base),
+    timingPart('iceConnected', 'iceConnected', base),
+    timingPart('connected', 'connected', base),
+    timingPart('track', 'track', base),
+    timingPart('firstFrame', 'firstFrame', base),
+  ].filter(Boolean);
+  if (timing.connected && timing.firstFrame) {
+    parts.push(`connectedToFirstFrame=${Math.round(timing.firstFrame - timing.connected)}ms`);
+  }
+  if (timing.answerSet && timing.firstFrame) {
+    parts.push(`answerToFirstFrame=${Math.round(timing.firstFrame - timing.answerSet)}ms`);
+  }
+  metricsEl.textContent = `${parts.length ? `timing ${parts.join(' | ')}` : 'timing: idle'}\n${latestStatsText}`;
 }
 
 function sleep(ms) {
@@ -190,12 +250,15 @@ function applyLowLatencyReceiverHint(receiver) {
 
 function closePeer() {
   pollToken++;
+  stopStatsPolling();
   if (pc) {
     pc.close();
     pc = null;
   }
   remoteVideo.srcObject = null;
+  firstFrameWatchArmed = false;
   setStatus('closed');
+  renderDiagnostics();
 }
 
 async function playRemoteVideo() {
@@ -206,14 +269,80 @@ async function playRemoteVideo() {
   }
 }
 
+function armFirstFrameWatch() {
+  if (firstFrameWatchArmed) return;
+  firstFrameWatchArmed = true;
+  const markFirstFrame = () => markTiming('firstFrame');
+  if ('requestVideoFrameCallback' in remoteVideo) {
+    remoteVideo.requestVideoFrameCallback(markFirstFrame);
+  } else {
+    remoteVideo.addEventListener('loadeddata', markFirstFrame, {once: true});
+  }
+}
+
+function stopStatsPolling() {
+  statsPollToken++;
+  if (statsTimer) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
+}
+
+function statValue(stat, key, fallback = '-') {
+  return stat[key] ?? fallback;
+}
+
+async function pollVideoStats(peer, token) {
+  if (!peer || token !== statsPollToken) return;
+  try {
+    const report = await peer.getStats();
+    let videoText = 'stats video: waiting';
+    report.forEach((stat) => {
+      if (stat.type !== 'inbound-rtp' || stat.isRemote) return;
+      if (stat.kind !== 'video' && stat.mediaType !== 'video') return;
+      const jitterDelay = stat.jitterBufferEmittedCount
+        ? (stat.jitterBufferDelay / stat.jitterBufferEmittedCount).toFixed(3)
+        : '-';
+      videoText = [
+        `stats video packets=${statValue(stat, 'packetsReceived')}`,
+        `bytes=${statValue(stat, 'bytesReceived')}`,
+        `framesReceived=${statValue(stat, 'framesReceived')}`,
+        `framesDecoded=${statValue(stat, 'framesDecoded')}`,
+        `keyFramesDecoded=${statValue(stat, 'keyFramesDecoded')}`,
+        `size=${statValue(stat, 'frameWidth')}x${statValue(stat, 'frameHeight')}`,
+        `pli=${statValue(stat, 'pliCount')}`,
+        `nack=${statValue(stat, 'nackCount')}`,
+        `jitterDelay=${jitterDelay}`,
+      ].join(' ');
+    });
+    latestStatsText = videoText;
+  } catch (error) {
+    latestStatsText = `stats error: ${error.message}`;
+  }
+  renderDiagnostics();
+}
+
+function startStatsPolling(peer) {
+  stopStatsPolling();
+  const token = ++statsPollToken;
+  pollVideoStats(peer, token);
+  statsTimer = setInterval(() => pollVideoStats(peer, token), 1000);
+}
+
 async function createOffer() {
   closePeer();
+  resetDiagnostics();
+  markTiming('offerStart');
   pc = new RTCPeerConnection({iceServers: []});
   const stream = new MediaStream();
   remoteVideo.srcObject = stream;
   pc.addEventListener('track', (event) => {
     applyLowLatencyReceiverHint(event.receiver);
     stream.addTrack(event.track);
+    if (event.track.kind === 'video') {
+      markTiming('track');
+      armFirstFrameWatch();
+    }
     playRemoteVideo();
   });
   const audioTransceiver = pc.addTransceiver('audio', {direction: 'recvonly'});
@@ -227,18 +356,28 @@ async function createOffer() {
   applyLowLatencyReceiverHint(audioTransceiver.receiver);
   applyLowLatencyReceiverHint(videoTransceiver.receiver);
   const peer = pc;
-  peer.addEventListener('connectionstatechange', () => setStatus(`connection: ${peer.connectionState}`));
-  peer.addEventListener('iceconnectionstatechange', () => setStatus(`ice: ${peer.iceConnectionState}`));
+  peer.addEventListener('connectionstatechange', () => {
+    if (peer.connectionState === 'connected') markTiming('connected');
+    setStatus(`connection: ${peer.connectionState}`);
+  });
+  peer.addEventListener('iceconnectionstatechange', () => {
+    if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
+      markTiming('iceConnected');
+    }
+    setStatus(`ice: ${peer.iceConnectionState}`);
+  });
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
   await waitForIceGatheringComplete(peer);
   offerBox.value = JSON.stringify(peer.localDescription, null, 2);
+  markTiming('offerReady');
   setStatus('offer ready');
 }
 
 async function publishOffer() {
   if (!offerBox.value.trim()) await createOffer();
   await postSignal('offer', offerBox.value);
+  markTiming('offerPublished');
   setStatus('offer published');
 }
 
@@ -249,6 +388,8 @@ async function setAnswerFromBox() {
   }
   const answer = JSON.parse(answerBox.value);
   await pc.setRemoteDescription(answer);
+  markTiming('answerSet');
+  startStatsPolling(pc);
   setStatus('answer set');
   await playRemoteVideo();
 }
@@ -260,19 +401,22 @@ async function waitForAnswer() {
   }
   const token = ++pollToken;
   setStatus('waiting for answer');
-  for (let i = 0; i < 240 && token === pollToken; i++) {
+  const deadline = performance.now() + ANSWER_WAIT_TIMEOUT_MS;
+  while (performance.now() < deadline && token === pollToken) {
     const answer = await getSignal('answer');
     if (answer) {
       answerBox.value = JSON.stringify(answer, null, 2);
       await setAnswerFromBox();
       return;
     }
-    await sleep(1000);
+    await sleep(ANSWER_POLL_INTERVAL_MS);
   }
   if (token === pollToken) setStatus('answer wait timed out');
 }
 
-document.getElementById('autoSignal').addEventListener('click', async () => {
+const autoSignalButton = document.getElementById('autoSignal');
+
+async function runAutoSignal() {
   try {
     await createOffer();
     await publishOffer();
@@ -280,7 +424,9 @@ document.getElementById('autoSignal').addEventListener('click', async () => {
   } catch (error) {
     setStatus(error.message);
   }
-});
+}
+
+autoSignalButton.addEventListener('click', runAutoSignal);
 
 document.getElementById('createOffer').addEventListener('click', async () => {
   try {
@@ -320,6 +466,10 @@ document.getElementById('setAnswer').addEventListener('click', async () => {
 });
 
 document.getElementById('closePeer').addEventListener('click', closePeer);
+
+window.addEventListener('load', () => {
+  setTimeout(() => autoSignalButton.click(), 0);
+}, {once: true});
 </script>
 </body>
 </html>

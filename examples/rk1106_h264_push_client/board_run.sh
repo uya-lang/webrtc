@@ -24,7 +24,7 @@ FASTBOOT_VIDEO_FPS=${FASTBOOT_VIDEO_FPS:-30}
 FASTBOOT_H264_BITRATE=${FASTBOOT_H264_BITRATE:-$H264_BITRATE}
 FASTBOOT_H264_START_BITRATE=${FASTBOOT_H264_START_BITRATE:-$FASTBOOT_H264_BITRATE}
 FASTBOOT_H264_RAMP_FRAMES=${FASTBOOT_H264_RAMP_FRAMES:-60}
-FASTBOOT_H264_GOP=${FASTBOOT_H264_GOP:-5}
+FASTBOOT_H264_GOP=${FASTBOOT_H264_GOP:-$H264_GOP}
 DIAG_PATH=${DIAG_PATH:-/tmp/rk1106_h264_sender_diagnostics.json}
 BOOT_TRACE_LOG=${BOOT_TRACE_LOG:-/tmp/rk1106_h264_sender_boot.log}
 SENDER_STDOUT_LOG=${SENDER_STDOUT_LOG:-/tmp/rk1106_h264_sender.stdout.log}
@@ -37,6 +37,20 @@ PRINT_LOGS_ON_SUCCESS=${PRINT_LOGS_ON_SUCCESS:-1}
 LIVE_LOGS=${LIVE_LOGS:-1}
 SUPPRESS_KERNEL_LOGS=${SUPPRESS_KERNEL_LOGS:-1}
 KERNEL_PRINTK_PREV=
+
+now_ms() {
+    if [ -r /proc/uptime ] && command -v awk >/dev/null 2>&1; then
+        awk '{printf "%d", $1 * 1000}' /proc/uptime 2>/dev/null && return
+    fi
+    date +%s
+}
+
+BOARD_RUN_START_MS=$(now_ms)
+log_phase() {
+    phase_now_ms=$(now_ms)
+    phase_elapsed_ms=$((phase_now_ms - BOARD_RUN_START_MS))
+    echo "board_run: phase=$1 elapsed_ms=$phase_elapsed_ms" >&2
+}
 
 if [ -n "$SIGNAL_BASE_URL" ]; then
     SIGNAL_BASE_URL=${SIGNAL_BASE_URL%/}
@@ -221,6 +235,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+log_phase "start"
 rm -f "$FIFO_PATH" "/tmp/fastboot.g711" "$DIAG_PATH" \
     "$BOOT_TRACE_LOG" \
     "$SENDER_STDOUT_LOG" "$SENDER_STDERR_LOG" \
@@ -293,10 +308,12 @@ if [ -z "$MEDIA_PATH" ] && ! ensure_executable_binary "$DIR/fastboot_h264_fifo" 
 fi
 
 echo "board_run: preflight sender --help" >&2
+log_phase "sender_help_start"
 set +e
 "$DIR/rk1106_h264_sender" --help >"$SENDER_HELP_STDOUT_LOG" 2>"$SENDER_HELP_STDERR_LOG"
 SENDER_HELP_STATUS=$?
 set -e
+log_phase "sender_help_done"
 if grep -q "^rk1106_h264_sender" "$SENDER_HELP_STDERR_LOG" "$SENDER_HELP_STDOUT_LOG" 2>/dev/null; then
     echo "board_run: sender --help usable status=$SENDER_HELP_STATUS" >&2
 else
@@ -305,14 +322,15 @@ else
 fi
 
 if [ -z "$MEDIA_PATH" ]; then
+    log_phase "helper_start"
     FASTBOOT_H264_OUT="$FIFO_PATH" FASTBOOT_VENC_CHANNEL="$FASTBOOT_VENC_CHANNEL" FASTBOOT_AUDIO_OUT="/tmp/fastboot.g711" FASTBOOT_AUDIO_CARD="$FASTBOOT_AUDIO_CARD" FASTBOOT_VIDEO_WIDTH="$FASTBOOT_VIDEO_WIDTH" FASTBOOT_VIDEO_HEIGHT="$FASTBOOT_VIDEO_HEIGHT" FASTBOOT_VIDEO_FPS="$FASTBOOT_VIDEO_FPS" FASTBOOT_H264_BITRATE="$FASTBOOT_H264_BITRATE" FASTBOOT_H264_START_BITRATE="$FASTBOOT_H264_START_BITRATE" FASTBOOT_H264_RAMP_FRAMES="$FASTBOOT_H264_RAMP_FRAMES" FASTBOOT_H264_GOP="$FASTBOOT_H264_GOP" "$DIR/fastboot_h264_fifo" >"$HELPER_STDOUT_LOG" 2>"$HELPER_STDERR_LOG" &
     FASTBOOT_PID=$!
     echo "board_run: helper_pid=$FASTBOOT_PID" >&2
-    sleep 1
     if ! kill -0 "$FASTBOOT_PID" 2>/dev/null; then
         echo "board_run: helper exited before sender start" >&2
         exit 10
     fi
+    log_phase "helper_spawned"
 else
     echo "board_run: file-only media mode; fastboot helper disabled" >&2
 fi
@@ -332,12 +350,17 @@ echo "board_run: sender args: $*" >&2
 echo "board_run: audio_fifo=/tmp/fastboot.g711" >&2
 set +e
 export UYA_RK1106_G711_AUDIO_FIFO=/tmp/fastboot.g711
+if [ -z "$MEDIA_PATH" ]; then
+    export UYA_RK1106_PREBUFFER_H264=1
+fi
+log_phase "sender_start"
 ("$DIR/rk1106_h264_sender" "$@" >"$SENDER_STDOUT_LOG" 2>"$SENDER_STDERR_LOG") &
 SENDER_PID=$!
 wait "$SENDER_PID"
 SENDER_STATUS=$?
 SENDER_PID=
 set -e
+log_phase "sender_exit"
 stop_live_logs
 echo "board_run: sender_status=$SENDER_STATUS" >&2
 exit "$SENDER_STATUS"

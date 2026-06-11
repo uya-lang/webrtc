@@ -75,7 +75,7 @@
 #define FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES 300
 #define FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS 120
 #define FASTBOOT_H264_PARAMETER_SET_CACHE_BYTES 8192
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-gop5-spspps-safe-live-drop-20260611a"
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-gop-env-spspps-safe-live-drop-startup-catchup-20260611d"
 
 #define ENABLE_SMART_IR
 
@@ -407,6 +407,7 @@ static int g_fastboot_h264_parameter_sets_available = 0;
 static int g_fastboot_logged_h264_parameter_sets_cached = 0;
 static int g_fastboot_logged_h264_parameter_sets_prepended = 0;
 static int g_fastboot_logged_h264_idr_without_parameter_sets = 0;
+static int g_fastboot_logged_h264_start_idr_not_decodable = 0;
 
 /* ---- audio G711 capture (FASTBOOT_AUDIO_OUT env var) ---- */
 #define FASTBOOT_AUDIO_SAMPLE_RATE 8000
@@ -766,6 +767,14 @@ static bool fastboot_h264_payload_has_idr(const void *payload, size_t len) {
 	return false;
 }
 
+static bool fastboot_h264_payload_is_decodable_idr(const void *payload, size_t len) {
+	if (!fastboot_h264_payload_has_idr(payload, len))
+		return false;
+	if (fastboot_h264_payload_has_sps_pps(payload, len))
+		return true;
+	return g_fastboot_h264_parameter_sets_available && g_fastboot_h264_parameter_sets_len > 0;
+}
+
 static size_t fastboot_h264_write_output_payload(FILE *file, const void *payload, size_t len,
                                                  size_t *expected_len) {
 	size_t wrote = 0;
@@ -1032,6 +1041,7 @@ static void *GetVencStream(void *arg) {
 				klog("[thunderboot_time] get venc all reserved frames");
 			if (write_output_stream && wait_output_idr) {
 				pData = (void *)RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
+				fastboot_h264_cache_parameter_sets(pData, stFrame.pstPack->u32Len);
 				if (!fastboot_h264_payload_has_idr(pData, stFrame.pstPack->u32Len)) {
 					RK_MPI_VENC_ReleaseStream(chn, &stFrame);
 					output_pre_idr_drops++;
@@ -1052,9 +1062,32 @@ static void *GetVencStream(void *arg) {
 					wait_output_idr = false;
 					continue;
 				}
+				if (!fastboot_h264_payload_is_decodable_idr(pData, stFrame.pstPack->u32Len)) {
+					RK_MPI_VENC_ReleaseStream(chn, &stFrame);
+					output_pre_idr_drops++;
+					if (!g_fastboot_logged_h264_start_idr_not_decodable ||
+					    (output_pre_idr_drops % 30) == 0) {
+						fprintf(stderr,
+						        "fastboot_h264_fifo: dropping startup IDR without SPS/PPS channel=%d drops=%u\n",
+						        chn, output_pre_idr_drops);
+						fflush(stderr);
+						g_fastboot_logged_h264_start_idr_not_decodable = 1;
+						(void)RK_MPI_VENC_RequestIDR(chn, RK_TRUE);
+					}
+					if (output_pre_idr_drops < FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS)
+						continue;
+					fprintf(stderr,
+					        "fastboot_h264_fifo: decodable IDR wait limit reached channel=%d drops=%u, waiting for SPS/PPS cache\n",
+					        chn, output_pre_idr_drops);
+					fflush(stderr);
+					output_pre_idr_drops = 0;
+					continue;
+				}
 				fprintf(stderr,
-				        "fastboot_h264_fifo: first live output IDR channel=%d pre_idr_drops=%u\n",
-				        chn, output_pre_idr_drops);
+				        "fastboot_h264_fifo: first live output decodable IDR channel=%d pre_idr_drops=%u has_sps_pps=%d cached_sps_pps=%d\n",
+				        chn, output_pre_idr_drops,
+				        fastboot_h264_payload_has_sps_pps(pData, stFrame.pstPack->u32Len) ? 1 : 0,
+				        g_fastboot_h264_parameter_sets_available ? 1 : 0);
 				fflush(stderr);
 				wait_output_idr = false;
 			}
