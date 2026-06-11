@@ -32,18 +32,26 @@ rg -Fq 'HELPER_STDERR_LOG=${HELPER_STDERR_LOG:-/dev/null}' "$board_run"
 rg -Fq 'set -- "$@" --prebuffer-h264' "$board_run"
 rg -Fq 'export UYA_RK1106_PREBUFFER_H264=1' "$board_run"
 rg -Fq 'const CLI_H264_STARTUP_KEYFRAME_BURST_COUNT: u32 = 1u32;' src/webrtc_rk1106_h264_sender_main.uya
-rg -Fq 'const CLI_H264_LIVE_LAG_DROP_THRESHOLD_US: u64 = 500_000u64;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'const CLI_H264_RESUME_KEYFRAME_MAX_DELAY_US: u64 = 500_000u64;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'const CLI_H264_LIVE_LAG_DROP_THRESHOLD_US: u64 = CLI_H264_RESUME_KEYFRAME_MAX_DELAY_US;' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'const CLI_H264_VCL_PARSE_WAIT_BYTES: usize = 16usize;' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'var disable_audio: bool = true;' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'audio RTP disabled for low-latency video mode' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'H264 live lag drop event=' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'keyframe_available = false;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'H264 resume requires IDR pending_delay_under_us=' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'H264 startup resume queue_delay_us=' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'media heartbeat h264_live_lag_stale_idrs=' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'media heartbeat h264_last_resume_delay_us=' src/webrtc_rk1106_h264_sender_main.uya
+! rg -Fq 'first H264 frame sent from cached keyframe' src/webrtc_rk1106_h264_sender_main.uya
 ! rg -Fq 'adaptive H264 frame_duration_us' src/webrtc_rk1106_h264_sender_main.uya
 
 rg -Fq 'H264_GOP=15' "$readme"
 rg -Fq 'FASTBOOT_H264_GOP=15' "$readme"
 rg -Fq 'const CLI_DEFAULT_H264_GOP: u32 = 15u32;' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'connectedToFirstFrame' "$readme"
-rg -Fq '避免后续重复 IDR' "$readme"
+rg -Fq '从当前 FIFO 队头向后扫描' "$readme"
+rg -Fq '低于 500ms 的可解码 IDR' "$readme"
 rg -Fq 'RTP duration 固定使用配置帧间隔' "$readme"
 
 rg -Fq "find_browser_executable" tests/rk1106_h264_chrome_first_screen.py

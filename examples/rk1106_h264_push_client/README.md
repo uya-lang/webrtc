@@ -234,20 +234,21 @@ helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。如果需要重
 `FASTBOOT_H264_RAMP_FRAMES=0` 可以显式关闭启动码率爬升。
 实时 FIFO 模式下 `board_run.sh` 会自动传 `--prebuffer-h264`，并保留
 `UYA_RK1106_PREBUFFER_H264=1` 作为兼容开关：sender 在 DTLS/SRTP ready 前
-预读并缓存最近的完整 H264 IDR 访问单元。
+预读 H264 码流、缓存 SPS/PPS，并尽量让 FIFO 靠近实时。
 首屏关键帧必须本身带 SPS/PPS，或能从缓存 prepend SPS/PPS；helper 和 sender
 都会跳过裸 IDR，避免 Chrome 已 connected 但解码器继续等参数集。连接 ready 后
-只把缓存的可解码关键帧发给 Chrome 一次，减少首屏等待，同时避免后续重复 IDR
-占用 RTP 时间线导致播放端延时累积。`MEDIA_PATH` 文件回放模式
+不会直接发送旧缓存 IDR，而是从当前 FIFO 队头向后扫描：在第一个队列剩余估算
+低于 500ms 的可解码 IDR 之前，所有旧 P 帧和旧 IDR 都丢掉；找到该 IDR 后
+从它开始发送，后面更新的 P 帧继续顺序发送，并把这个 IDR 更新为新的 keyframe
+缓存。`MEDIA_PATH` 文件回放模式
 不会自动预读，避免连接前把测试文件消费完。
-sender 正常 live 发送会顺序读取 Annex-B 帧，不再为了追最新帧丢掉 P 帧；Chrome
-统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。Annex-B access
+Chrome 统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。Annex-B access
 unit 切分会等到 VCL slice header 足够后再判断新画面，避免把同一画面的多 slice IDR
 拆成多个 RTP 时间戳。首屏验证时优先看
 网页上的 `answerToFirstFrame` / `connectedToFirstFrame`，正常目标是低于 1000ms；
 后续长时间播放重点看 `freezePer1000` 和 `jitterTargetDelay`。实时 FIFO 模式下如果
-sender 发现发送调度已经落后 500ms，会丢到下一个可解码 IDR 并重置发送节拍，避免
-继续按顺序补旧 P 帧把观看延时拖到 1 秒以上；RTP duration 固定使用配置帧间隔，
+sender 发现发送调度或 FIFO backlog 已经达到 500ms，会重新执行同样的 IDR 扫描，
+避免继续按顺序补旧帧把观看延时拖到 1 秒以上；RTP duration 固定使用配置帧间隔，
 避免一次发送卡顿把播放器媒体时间线拉长。`codec` 应显示 H264，
 `framesDropped`、`freeze`、`pli`、`nack` 不应持续增长。
 `SUPPRESS_KERNEL_LOGS=1` 默认临时压低内核串口日志，避免 WiFi flow-control
