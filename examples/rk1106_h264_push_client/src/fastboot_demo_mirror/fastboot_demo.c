@@ -68,9 +68,13 @@
 #define FASTBOOT_FIFO_DEFAULT_BITRATE 600000
 #define FASTBOOT_FIFO_DEFAULT_START_BITRATE 300000
 #define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
+#define FASTBOOT_FIFO_DEFAULT_GOP 15
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-audio-late-start-20260611a"
+#define FASTBOOT_VIDEO_FIFO_OPEN_RETRY_US 100000
+#define FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES 300
+#define FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS 120
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-live-drop-20260611a"
 
 #define ENABLE_SMART_IR
 
@@ -386,6 +390,7 @@ static int g_fastboot_output_fps = FASTBOOT_FIFO_DEFAULT_FPS;
 static int g_fastboot_output_bitrate = FASTBOOT_FIFO_DEFAULT_BITRATE;
 static int g_fastboot_output_start_bitrate = FASTBOOT_FIFO_DEFAULT_START_BITRATE;
 static int g_fastboot_output_ramp_frames = FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES;
+static int g_fastboot_output_gop = FASTBOOT_FIFO_DEFAULT_GOP;
 static int g_fastboot_force_day = 0;
 static FILE *g_fastboot_output_file = NULL;
 static int g_fastboot_logged_first_output_write = 0;
@@ -524,6 +529,127 @@ static void fastboot_maybe_ramp_output_bitrate(int chn) {
 	g_fastboot_bitrate_ramp_done = 1;
 }
 
+static int fastboot_open_output_stream_file(int chn) {
+	char OutPath[256];
+	int retries = 0;
+
+	if (!g_fastboot_out_path || chn != g_fastboot_output_channel)
+		return 0;
+	if (g_fastboot_output_file)
+		return 0;
+
+	snprintf(OutPath, sizeof(OutPath), "%s", g_fastboot_out_path);
+	while (!quit && !g_fastboot_output_file) {
+		int fd = open(OutPath, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_APPEND | O_CREAT, 0644);
+		if (fd >= 0) {
+			int flags = fcntl(fd, F_GETFL, 0);
+			if (flags >= 0)
+				(void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+			g_fastboot_output_file = fdopen(fd, "ab");
+			if (!g_fastboot_output_file) {
+				fprintf(stderr, "fastboot_h264_fifo: fdopen output FIFO failed errno=%d path=%s\n",
+				        errno, OutPath);
+				close(fd);
+				return -1;
+			}
+			fprintf(stderr, "fastboot_h264_fifo: output FIFO opened channel=%d retries=%d path=%s\n",
+			        chn, retries, OutPath);
+			fflush(stderr);
+			return 0;
+		}
+		if (errno != ENXIO) {
+			fprintf(stderr, "fastboot_h264_fifo: open output FIFO failed channel=%d errno=%d path=%s\n",
+			        chn, errno, OutPath);
+			fflush(stderr);
+			return -1;
+		}
+		if (retries == 0) {
+			fprintf(stderr, "fastboot_h264_fifo: output FIFO waiting for reader channel=%d path=%s\n",
+			        chn, OutPath);
+			fflush(stderr);
+		}
+		retries++;
+		if ((retries % 50) == 0) {
+			fprintf(stderr, "fastboot_h264_fifo: output FIFO still waiting channel=%d retries=%d\n",
+			        chn, retries);
+			fflush(stderr);
+		}
+		usleep(FASTBOOT_VIDEO_FIFO_OPEN_RETRY_US);
+	}
+	return g_fastboot_output_file ? 0 : -1;
+}
+
+static unsigned int fastboot_drain_output_venc_backlog(int chn) {
+	VENC_STREAM_S drainFrame;
+	unsigned int drained = 0;
+	int ret;
+
+	if (!g_fastboot_out_path || chn != g_fastboot_output_channel)
+		return 0;
+
+	memset(&drainFrame, 0, sizeof(drainFrame));
+	drainFrame.pstPack = malloc(sizeof(VENC_PACK_S));
+	if (!drainFrame.pstPack) {
+		fprintf(stderr, "fastboot_h264_fifo: startup drain skipped malloc failed channel=%d\n", chn);
+		return 0;
+	}
+
+	while (!quit && drained < FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES) {
+		ret = RK_MPI_VENC_GetStream(chn, &drainFrame, 0);
+		if (ret != RK_SUCCESS)
+			break;
+		RK_MPI_VENC_ReleaseStream(chn, &drainFrame);
+		drained++;
+	}
+	free(drainFrame.pstPack);
+
+	if (drained > 0) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: drained stale startup VENC frames channel=%d count=%u max=%u\n",
+		        chn, drained, FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES);
+		fflush(stderr);
+	}
+	ret = RK_MPI_VENC_RequestIDR(chn, RK_TRUE);
+	if (ret != RK_SUCCESS) {
+		fprintf(stderr, "fastboot_h264_fifo: request IDR after startup drain failed channel=%d ret=0x%08x\n",
+		        chn, ret);
+		fflush(stderr);
+	} else {
+		fprintf(stderr, "fastboot_h264_fifo: requested IDR after startup drain channel=%d\n", chn);
+		fflush(stderr);
+	}
+	return drained;
+}
+
+static bool fastboot_h264_payload_has_idr(const void *payload, size_t len) {
+	const unsigned char *bytes = (const unsigned char *)payload;
+	size_t i = 0;
+	bool saw_start_code = false;
+
+	if (!bytes || len == 0)
+		return false;
+	while (i + 4 < len) {
+		size_t nal_start = 0;
+		if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1) {
+			nal_start = i + 3;
+		} else if (i + 5 < len && bytes[i] == 0 && bytes[i + 1] == 0 &&
+		           bytes[i + 2] == 0 && bytes[i + 3] == 1) {
+			nal_start = i + 4;
+		}
+		if (nal_start > 0 && nal_start < len) {
+			saw_start_code = true;
+			if ((bytes[nal_start] & 0x1f) == 5)
+				return true;
+			i = nal_start + 1;
+			continue;
+		}
+		i++;
+	}
+	if (!saw_start_code)
+		return (bytes[0] & 0x1f) == 5;
+	return false;
+}
+
 static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	char OutPath[256];
 	void *pData = RK_NULL;
@@ -539,8 +665,8 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	}
 
 	if (keep_open) {
-		if (!g_fastboot_output_file)
-			g_fastboot_output_file = fopen(OutPath, "ab");
+		if (!g_fastboot_output_file && fastboot_open_output_stream_file(chn) != 0)
+			return;
 		file = g_fastboot_output_file;
 	} else {
 		file = fopen(OutPath, "ab");
@@ -711,19 +837,65 @@ static void *GetVencStream(void *arg) {
 	int chn = (int)arg;
 	int s32Ret;
 	VENC_STREAM_S stFrame;
+	bool write_output_stream = g_fastboot_out_path && chn == g_fastboot_output_channel;
+	bool wait_output_idr = write_output_stream;
+	unsigned int output_pre_idr_drops = 0;
 	char filename[64];
 	snprintf(filename, sizeof(filename), "/tmp/pts_chn_%d.txt", chn);
 
 	FILE *fp = fopen(filename, "wb");
 
 	stFrame.pstPack = malloc(sizeof(VENC_PACK_S));
+	if (!stFrame.pstPack) {
+		fprintf(stderr, "fastboot_h264_fifo: VENC stream pack malloc failed channel=%d\n", chn);
+		if (fp)
+			fclose(fp);
+		return NULL;
+	}
+
+	if (write_output_stream) {
+		if (fastboot_open_output_stream_file(chn) != 0) {
+			free(stFrame.pstPack);
+			if (fp)
+				fclose(fp);
+			return NULL;
+		}
+		fastboot_drain_output_venc_backlog(chn);
+	}
 
 	while (!quit) {
 		s32Ret = RK_MPI_VENC_GetStream(chn, &stFrame, 1000);
 		if (s32Ret == RK_SUCCESS) {
-			bool write_output_stream = g_fastboot_out_path && chn == g_fastboot_output_channel;
 			if (loopCount == (FASTBOOT_RESERVED_FRAME_NUM - 1) && chn == VENC_MAIN_CHANNEL)
 				klog("[thunderboot_time] get venc all reserved frames");
+			if (write_output_stream && wait_output_idr) {
+				pData = (void *)RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
+				if (!fastboot_h264_payload_has_idr(pData, stFrame.pstPack->u32Len)) {
+					RK_MPI_VENC_ReleaseStream(chn, &stFrame);
+					output_pre_idr_drops++;
+					if (output_pre_idr_drops == 1 ||
+					    (output_pre_idr_drops % 30) == 0) {
+						fprintf(stderr,
+						        "fastboot_h264_fifo: dropping pre-IDR output frame channel=%d drops=%u\n",
+						        chn, output_pre_idr_drops);
+						fflush(stderr);
+						(void)RK_MPI_VENC_RequestIDR(chn, RK_TRUE);
+					}
+					if (output_pre_idr_drops < FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS)
+						continue;
+					fprintf(stderr,
+					        "fastboot_h264_fifo: IDR wait limit reached channel=%d drops=%u, starting output\n",
+					        chn, output_pre_idr_drops);
+					fflush(stderr);
+					wait_output_idr = false;
+					continue;
+				}
+				fprintf(stderr,
+				        "fastboot_h264_fifo: first live output IDR channel=%d pre_idr_drops=%u\n",
+				        chn, output_pre_idr_drops);
+				fflush(stderr);
+				wait_output_idr = false;
+			}
 			if (write_output_stream)
 				save_video_stream_to_file(chn, stFrame);
 			if (loopCount <= SAVE_ENC_FRM_CNT_MAX) {
@@ -770,6 +942,11 @@ static void *GetVencStream(void *arg) {
 
 	if (fp)
 		fclose(fp);
+
+	if (write_output_stream && g_fastboot_output_file) {
+		fclose(g_fastboot_output_file);
+		g_fastboot_output_file = NULL;
+	}
 
 	free(stFrame.pstPack);
 	return NULL;
@@ -977,6 +1154,8 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 		fps = (uint32_t)g_fastboot_output_fps;
 	RK_ASSERT(fps > VENC_MAIN_CHANNEL);
 	gop = fps * 2;
+	if (g_fastboot_out_path)
+		gop = (uint32_t)g_fastboot_output_gop;
 	if (g_fastboot_out_path) {
 		fprintf(stderr, "fastboot_h264_fifo: output fps=%u gop=%u\n", fps, gop);
 		fprintf(stderr, "fastboot_h264_fifo: output initial_bitrate_kbps=%u\n",
@@ -2290,10 +2469,12 @@ int main(int argc, char *argv[]) {
 		g_fastboot_output_start_bitrate =
 		    fastboot_parse_bitrate_env("FASTBOOT_H264_START_BITRATE",
 		                               FASTBOOT_FIFO_DEFAULT_START_BITRATE);
-		g_fastboot_output_ramp_frames =
-		    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
-		                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
-		g_fastboot_force_day = fastboot_parse_bool_env("FASTBOOT_FORCE_DAY", false) ? 1 : 0;
+			g_fastboot_output_ramp_frames =
+			    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
+			                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
+			g_fastboot_output_gop = fastboot_parse_positive_env("FASTBOOT_H264_GOP",
+			                                                    FASTBOOT_FIFO_DEFAULT_GOP);
+			g_fastboot_force_day = fastboot_parse_bool_env("FASTBOOT_FORCE_DAY", false) ? 1 : 0;
 
 		if (g_fastboot_output_channel == VENC_SUB_CHANNEL && venc1_path && venc1_path[0])
 			g_fastboot_out_path = venc1_path;
