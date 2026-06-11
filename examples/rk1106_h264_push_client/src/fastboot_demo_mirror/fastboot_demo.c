@@ -66,8 +66,8 @@
 #define FASTBOOT_FIFO_DEFAULT_HEIGHT 720
 #define FASTBOOT_FIFO_DEFAULT_FPS 30
 #define FASTBOOT_FIFO_DEFAULT_BITRATE 600000
-#define FASTBOOT_FIFO_DEFAULT_START_BITRATE FASTBOOT_FIFO_DEFAULT_BITRATE
-#define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
+#define FASTBOOT_FIFO_DEFAULT_START_BITRATE (FASTBOOT_FIFO_DEFAULT_BITRATE / 4)
+#define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 90
 #define FASTBOOT_FIFO_DEFAULT_GOP 5
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
@@ -75,7 +75,7 @@
 #define FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES 0
 #define FASTBOOT_VIDEO_STARTUP_IDR_MAX_DROPS 120
 #define FASTBOOT_H264_PARAMETER_SET_CACHE_BYTES 8192
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-gop-env-spspps-safe-zero-startup-drain-20260611e"
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p-startup-quarter-av-20260611a"
 
 #define ENABLE_SMART_IR
 
@@ -385,14 +385,19 @@ void klog(const char *log) { return; }
 
 static const char *g_fastboot_out_path = NULL;
 static int g_fastboot_output_channel = VENC_MAIN_CHANNEL;
+static int g_fastboot_startup_output_channel = -1;
+static volatile int g_fastboot_active_output_channel = VENC_MAIN_CHANNEL;
 static int g_fastboot_output_width = FASTBOOT_FIFO_DEFAULT_WIDTH;
 static int g_fastboot_output_height = FASTBOOT_FIFO_DEFAULT_HEIGHT;
+static int g_fastboot_startup_output_width = FASTBOOT_FIFO_DEFAULT_WIDTH / 2;
+static int g_fastboot_startup_output_height = FASTBOOT_FIFO_DEFAULT_HEIGHT / 2;
 static int g_fastboot_output_fps = FASTBOOT_FIFO_DEFAULT_FPS;
 static int g_fastboot_output_bitrate = FASTBOOT_FIFO_DEFAULT_BITRATE;
 static int g_fastboot_output_start_bitrate = FASTBOOT_FIFO_DEFAULT_START_BITRATE;
 static int g_fastboot_output_ramp_frames = FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES;
 static int g_fastboot_output_gop = FASTBOOT_FIFO_DEFAULT_GOP;
 static int g_fastboot_startup_drain_max_frames = FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES;
+static int g_fastboot_output_switch_done = 1;
 static int g_fastboot_force_day = 0;
 static FILE *g_fastboot_output_file = NULL;
 static int g_fastboot_logged_first_output_write = 0;
@@ -426,12 +431,49 @@ static int g_fastboot_audio_ai_chn_enabled = 0;
 static int g_fastboot_audio_aenc_created = 0;
 static int g_fastboot_audio_bound = 0;
 
+static bool fastboot_valid_venc_channel(int chn) {
+	return chn == VENC_MAIN_CHANNEL || chn == VENC_SUB_CHANNEL;
+}
+
+static bool fastboot_output_switch_enabled(void) {
+	return g_fastboot_out_path && fastboot_valid_venc_channel(g_fastboot_startup_output_channel) &&
+	       g_fastboot_startup_output_channel != g_fastboot_output_channel &&
+	       g_fastboot_output_ramp_frames > 0;
+}
+
+static bool fastboot_output_role_channel(int chn) {
+	return g_fastboot_out_path &&
+	       (chn == g_fastboot_output_channel ||
+	        (fastboot_output_switch_enabled() && chn == g_fastboot_startup_output_channel));
+}
+
+static bool fastboot_active_output_channel(int chn) {
+	return g_fastboot_out_path && chn == g_fastboot_active_output_channel;
+}
+
+static int fastboot_sub_channel_width(void) {
+	if (fastboot_output_switch_enabled() &&
+	    g_fastboot_startup_output_channel == VENC_SUB_CHANNEL)
+		return g_fastboot_startup_output_width;
+	return SUB_CHANNEL_WIDTH;
+}
+
+static int fastboot_sub_channel_height(void) {
+	if (fastboot_output_switch_enabled() &&
+	    g_fastboot_startup_output_channel == VENC_SUB_CHANNEL)
+		return g_fastboot_startup_output_height;
+	return SUB_CHANNEL_HEIGHT;
+}
+
 static bool fastboot_sub_channel_enabled(void) {
-	return !g_fastboot_out_path || g_fastboot_output_channel == VENC_SUB_CHANNEL;
+	return !g_fastboot_out_path || g_fastboot_output_channel == VENC_SUB_CHANNEL ||
+	       (fastboot_output_switch_enabled() &&
+	        g_fastboot_startup_output_channel == VENC_SUB_CHANNEL);
 }
 
 static bool fastboot_bitrate_ramp_enabled(void) {
-	return g_fastboot_out_path && g_fastboot_output_ramp_frames > 0 &&
+	return g_fastboot_out_path && !fastboot_output_switch_enabled() &&
+	       g_fastboot_output_ramp_frames > 0 &&
 	       g_fastboot_output_start_bitrate > 0 &&
 	       g_fastboot_output_start_bitrate < g_fastboot_output_bitrate;
 }
@@ -439,6 +481,18 @@ static bool fastboot_bitrate_ramp_enabled(void) {
 static int fastboot_initial_bitrate_bps(void) {
 	if (fastboot_bitrate_ramp_enabled())
 		return g_fastboot_output_start_bitrate;
+	return g_fastboot_output_bitrate;
+}
+
+static int fastboot_channel_initial_bitrate_bps(int chn) {
+	if (fastboot_output_switch_enabled()) {
+		if (chn == g_fastboot_startup_output_channel)
+			return g_fastboot_output_start_bitrate;
+		if (chn == g_fastboot_output_channel)
+			return g_fastboot_output_bitrate;
+	}
+	if (chn == g_fastboot_output_channel)
+		return fastboot_initial_bitrate_bps();
 	return g_fastboot_output_bitrate;
 }
 
@@ -542,7 +596,7 @@ static int fastboot_open_output_stream_file(int chn) {
 	char OutPath[256];
 	int retries = 0;
 
-	if (!g_fastboot_out_path || chn != g_fastboot_output_channel)
+	if (!g_fastboot_out_path || !fastboot_active_output_channel(chn))
 		return 0;
 	if (g_fastboot_output_file)
 		return 0;
@@ -699,7 +753,7 @@ static unsigned int fastboot_drain_output_venc_backlog(int chn) {
 	unsigned int drained = 0;
 	int ret;
 
-	if (!g_fastboot_out_path || chn != g_fastboot_output_channel)
+	if (!g_fastboot_out_path || !fastboot_active_output_channel(chn))
 		return 0;
 
 	memset(&drainFrame, 0, sizeof(drainFrame));
@@ -814,6 +868,36 @@ static size_t fastboot_h264_write_output_payload(FILE *file, const void *payload
 	return fwrite(payload, 1, len, file);
 }
 
+static void fastboot_h264_clear_parameter_set_cache(void) {
+	g_fastboot_h264_parameter_sets_len = 0;
+	g_fastboot_h264_parameter_sets_available = 0;
+	g_fastboot_logged_h264_parameter_sets_cached = 0;
+	g_fastboot_logged_h264_parameter_sets_prepended = 0;
+	g_fastboot_logged_h264_idr_without_parameter_sets = 0;
+	g_fastboot_logged_h264_start_idr_not_decodable = 0;
+}
+
+static void fastboot_maybe_switch_output_channel_after_write(int chn) {
+	int ret;
+
+	if (!fastboot_output_switch_enabled() || g_fastboot_output_switch_done)
+		return;
+	if (chn != g_fastboot_startup_output_channel)
+		return;
+	if (g_fastboot_output_write_count < (unsigned int)g_fastboot_output_ramp_frames)
+		return;
+
+	g_fastboot_active_output_channel = g_fastboot_output_channel;
+	g_fastboot_output_switch_done = 1;
+	fastboot_h264_clear_parameter_set_cache();
+	ret = RK_MPI_VENC_RequestIDR(g_fastboot_output_channel, RK_TRUE);
+	fprintf(stderr,
+	        "fastboot_h264_fifo: startup output switch frame=%u from_channel=%d to_channel=%d target_resolution=%dx%d request_idr_ret=0x%08x\n",
+	        g_fastboot_output_write_count, chn, g_fastboot_output_channel,
+	        g_fastboot_output_width, g_fastboot_output_height, ret);
+	fflush(stderr);
+}
+
 static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	char OutPath[256];
 	void *pData = RK_NULL;
@@ -821,8 +905,9 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 	size_t wrote = 0;
 	size_t expected_wrote = 0;
 	bool keep_open = false;
+	bool active_output = fastboot_active_output_channel(chn);
 
-	if (g_fastboot_out_path && chn == g_fastboot_output_channel) {
+	if (g_fastboot_out_path && active_output) {
 		snprintf(OutPath, sizeof(OutPath), "%s", g_fastboot_out_path);
 		keep_open = true;
 	} else {
@@ -848,14 +933,14 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 			expected_wrote = stFrame.pstPack->u32Len;
 		}
 		fflush(file);
-		if (chn == g_fastboot_output_channel && !g_fastboot_logged_first_output_write) {
+		if (active_output && !g_fastboot_logged_first_output_write) {
 			fprintf(stderr,
 			        "fastboot_h264_fifo: first output-channel write channel=%d bytes=%zu requested=%zu\n",
 			        chn, wrote, expected_wrote);
 			fflush(stderr);
 			g_fastboot_logged_first_output_write = 1;
 		}
-		if (chn == g_fastboot_output_channel) {
+		if (active_output) {
 			RK_U64 now_us = TEST_COMM_GetNowUs();
 			g_fastboot_output_write_count++;
 			if (g_fastboot_output_write_count == 30 || g_fastboot_output_write_count == 31 ||
@@ -891,8 +976,9 @@ static void save_video_stream_to_file(int chn, VENC_STREAM_S stFrame) {
 				fflush(stderr);
 				g_fastboot_logged_short_write = 1;
 			}
+			fastboot_maybe_switch_output_channel_after_write(chn);
 		}
-	} else if (chn == g_fastboot_output_channel && !g_fastboot_logged_open_error) {
+	} else if (active_output && !g_fastboot_logged_open_error) {
 		fprintf(stderr, "fastboot_h264_fifo: fopen output failed errno=%d path=%s\n", errno, OutPath);
 		fflush(stderr);
 		g_fastboot_logged_open_error = 1;
@@ -992,7 +1078,13 @@ static void fastboot_apply_fifo_video_config(struct meta_info *handle) {
 	}
 	fprintf(stderr, "fastboot_h264_fifo: output target_bitrate_bps=%d\n",
 	        g_fastboot_output_bitrate);
-	if (fastboot_bitrate_ramp_enabled()) {
+	if (fastboot_output_switch_enabled()) {
+		fprintf(stderr,
+		        "fastboot_h264_fifo: output startup_channel=%d startup_resolution=%dx%d startup_bitrate_bps=%d switch_frames=%d final_channel=%d\n",
+		        g_fastboot_startup_output_channel, g_fastboot_startup_output_width,
+		        g_fastboot_startup_output_height, g_fastboot_output_start_bitrate,
+		        g_fastboot_output_ramp_frames, g_fastboot_output_channel);
+	} else if (fastboot_bitrate_ramp_enabled()) {
 		fprintf(stderr,
 		        "fastboot_h264_fifo: output startup_bitrate_bps=%d ramp_frames=%d\n",
 		        g_fastboot_output_start_bitrate, g_fastboot_output_ramp_frames);
@@ -1009,8 +1101,10 @@ static void *GetVencStream(void *arg) {
 	int chn = (int)arg;
 	int s32Ret;
 	VENC_STREAM_S stFrame;
-	bool write_output_stream = g_fastboot_out_path && chn == g_fastboot_output_channel;
-	bool wait_output_idr = write_output_stream;
+	bool output_role_stream = fastboot_output_role_channel(chn);
+	bool write_output_stream = fastboot_active_output_channel(chn);
+	bool was_output_stream = write_output_stream;
+	bool wait_output_idr = output_role_stream;
 	unsigned int output_pre_idr_drops = 0;
 	char filename[64];
 	snprintf(filename, sizeof(filename), "/tmp/pts_chn_%d.txt", chn);
@@ -1038,6 +1132,17 @@ static void *GetVencStream(void *arg) {
 	while (!quit) {
 		s32Ret = RK_MPI_VENC_GetStream(chn, &stFrame, 1000);
 		if (s32Ret == RK_SUCCESS) {
+			write_output_stream = fastboot_active_output_channel(chn);
+			if (write_output_stream && !was_output_stream) {
+				wait_output_idr = true;
+				output_pre_idr_drops = 0;
+				(void)RK_MPI_VENC_RequestIDR(chn, RK_TRUE);
+				fprintf(stderr,
+				        "fastboot_h264_fifo: channel became active output channel=%d\n",
+				        chn);
+				fflush(stderr);
+			}
+			was_output_stream = write_output_stream;
 			if (loopCount == (FASTBOOT_RESERVED_FRAME_NUM - 1) && chn == VENC_MAIN_CHANNEL)
 				klog("[thunderboot_time] get venc all reserved frames");
 			if (write_output_stream && wait_output_idr) {
@@ -1281,7 +1386,7 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 	int vi_buf_cnt = 1;
 	int video_width, video_height;
 	uint32_t fps = 0, gop = 0;
-	uint32_t output_bitrate_kbps = fastboot_bitrate_kbps(fastboot_initial_bitrate_bps());
+	uint32_t output_bitrate_kbps = 0;
 
 	/* wrap params init */
 	if (g_bWrap == true) {
@@ -1319,12 +1424,16 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 	ctx->vi.dev.chn[VI_MAIN_CHANNEL].stChnAttr.stFrameRate.s32DstFrameRate = -1;
 
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].chn_id = VI_SUB_CHANNEL;
-	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stSize.u32Width = SUB_CHANNEL_WIDTH;
-	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stSize.u32Height = SUB_CHANNEL_HEIGHT;
+	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stSize.u32Width =
+	    fastboot_sub_channel_width();
+	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stSize.u32Height =
+	    fastboot_sub_channel_height();
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.u32BufCount = vi_buf_cnt;
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.enMemoryType = VI_V4L2_MEMORY_TYPE_DMABUF;
-	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.stMaxSize.u32Width = SUB_CHANNEL_WIDTH;
-	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.stMaxSize.u32Height = SUB_CHANNEL_HEIGHT;
+	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.stMaxSize.u32Width =
+	    fastboot_sub_channel_width();
+	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.stIspOpt.stMaxSize.u32Height =
+	    fastboot_sub_channel_height();
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.enPixelFormat = RK_FMT_YUV420SP;
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.enCompressMode = COMPRESS_MODE_NONE;
 	ctx->vi.dev.chn[VI_SUB_CHANNEL].stChnAttr.u32Depth = 0;
@@ -1354,17 +1463,17 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 		gop = (uint32_t)g_fastboot_output_gop;
 	if (g_fastboot_out_path) {
 		fprintf(stderr, "fastboot_h264_fifo: output fps=%u gop=%u\n", fps, gop);
-		fprintf(stderr, "fastboot_h264_fifo: output initial_bitrate_kbps=%u\n",
-		        output_bitrate_kbps);
 	}
 	for (int i = 0; i != 2; ++i) {
 		if (i == VENC_MAIN_CHANNEL) {
 			video_width = handle->app_params.venc_w;
 			video_height = handle->app_params.venc_h;
 		} else {
-			video_width = SUB_CHANNEL_WIDTH;
-			video_height = SUB_CHANNEL_HEIGHT;
+			video_width = fastboot_sub_channel_width();
+			video_height = fastboot_sub_channel_height();
 		}
+		output_bitrate_kbps =
+		    fastboot_bitrate_kbps(fastboot_channel_initial_bitrate_bps(i));
 		ctx->venc.chn[i].chn_id = i;
 		if (handle->app_params.venc_type == 1)
 			ctx->venc.chn[i].stChnAttr.stVencAttr.enType = RK_VIDEO_ID_AVC;
@@ -1372,7 +1481,7 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 			ctx->venc.chn[i].stChnAttr.stVencAttr.enType = RK_VIDEO_ID_HEVC;
 
 		if (ctx->venc.chn[i].stChnAttr.stVencAttr.enType == RK_VIDEO_ID_AVC) {
-			if (g_fastboot_out_path && i == g_fastboot_output_channel) {
+			if (fastboot_output_role_channel(i)) {
 				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H264CBR;
 				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32BitRate = output_bitrate_kbps;
 				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Cbr.u32Gop = gop;
@@ -1395,7 +1504,7 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 				ctx->venc.chn[i].stChnAttr.stRcAttr.stH264Vbr.fr32DstFrameRateDen = 1;
 			}
 		} else if (ctx->venc.chn[i].stChnAttr.stVencAttr.enType == RK_VIDEO_ID_HEVC) {
-			if (g_fastboot_out_path && i == g_fastboot_output_channel) {
+			if (fastboot_output_role_channel(i)) {
 				ctx->venc.chn[i].stChnAttr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
 				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32BitRate = output_bitrate_kbps;
 				ctx->venc.chn[i].stChnAttr.stRcAttr.stH265Cbr.u32Gop = gop;
@@ -1434,9 +1543,11 @@ static void mpi_params_init(MPI_CTX_S *ctx, struct meta_info *handle) {
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32MaxPicWidth = video_width;
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32MaxPicHeight = video_height;
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32BufSize = video_width * video_height / 3;
-		if (g_fastboot_out_path && i == g_fastboot_output_channel) {
-			fprintf(stderr, "fastboot_h264_fifo: output channel=%d resolution=%dx%d\n", i,
-			        video_width, video_height);
+		if (fastboot_output_role_channel(i)) {
+			fprintf(stderr,
+			        "fastboot_h264_fifo: output role channel=%d active=%d resolution=%dx%d initial_bitrate_kbps=%u\n",
+			        i, fastboot_active_output_channel(i) ? 1 : 0, video_width, video_height,
+			        output_bitrate_kbps);
 		}
 
 		ctx->venc.chn[i].stChnAttr.stVencAttr.u32StreamBufCnt = 4;
@@ -2647,6 +2758,7 @@ int main(int argc, char *argv[]) {
 	meta_size = (uint32_t)get_cmd_val("meta_part_size", 16);
 	{
 		const char *channel_env = getenv("FASTBOOT_VENC_CHANNEL");
+		const char *startup_channel_env = getenv("FASTBOOT_STARTUP_VENC_CHANNEL");
 		const char *h264_path = getenv("FASTBOOT_H264_OUT");
 		const char *venc0_path = getenv("FASTBOOT_VENC0_PATH");
 		const char *venc1_path = getenv("FASTBOOT_VENC1_PATH");
@@ -2654,10 +2766,24 @@ int main(int argc, char *argv[]) {
 			g_fastboot_output_channel = VENC_SUB_CHANNEL;
 		else
 			g_fastboot_output_channel = VENC_MAIN_CHANNEL;
+		if (startup_channel_env && startup_channel_env[0] == '1' &&
+		    startup_channel_env[1] == '\0')
+			g_fastboot_startup_output_channel = VENC_SUB_CHANNEL;
+		else if (startup_channel_env && startup_channel_env[0] == '0' &&
+		         startup_channel_env[1] == '\0')
+			g_fastboot_startup_output_channel = VENC_MAIN_CHANNEL;
+		else
+			g_fastboot_startup_output_channel = -1;
 		g_fastboot_output_width = fastboot_parse_positive_env("FASTBOOT_VIDEO_WIDTH",
 		                                                      FASTBOOT_FIFO_DEFAULT_WIDTH);
 		g_fastboot_output_height = fastboot_parse_positive_env("FASTBOOT_VIDEO_HEIGHT",
 		                                                       FASTBOOT_FIFO_DEFAULT_HEIGHT);
+		g_fastboot_startup_output_width =
+		    fastboot_parse_positive_env("FASTBOOT_STARTUP_VIDEO_WIDTH",
+		                                g_fastboot_output_width / 2);
+		g_fastboot_startup_output_height =
+		    fastboot_parse_positive_env("FASTBOOT_STARTUP_VIDEO_HEIGHT",
+		                                g_fastboot_output_height / 2);
 		g_fastboot_output_fps = fastboot_parse_fps_env("FASTBOOT_VIDEO_FPS",
 		                                               FASTBOOT_FIFO_DEFAULT_FPS);
 		g_fastboot_output_bitrate = fastboot_parse_bitrate_env("FASTBOOT_H264_BITRATE",
@@ -2665,15 +2791,15 @@ int main(int argc, char *argv[]) {
 		g_fastboot_output_start_bitrate =
 		    fastboot_parse_bitrate_env("FASTBOOT_H264_START_BITRATE",
 		                               FASTBOOT_FIFO_DEFAULT_START_BITRATE);
-			g_fastboot_output_ramp_frames =
-			    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
-			                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
-			g_fastboot_output_gop = fastboot_parse_positive_env("FASTBOOT_H264_GOP",
-			                                                    FASTBOOT_FIFO_DEFAULT_GOP);
-			g_fastboot_startup_drain_max_frames =
-			    fastboot_parse_nonnegative_env("FASTBOOT_H264_STARTUP_DRAIN_FRAMES",
-			                                   FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES, 300);
-			g_fastboot_force_day = fastboot_parse_bool_env("FASTBOOT_FORCE_DAY", false) ? 1 : 0;
+		g_fastboot_output_ramp_frames =
+		    fastboot_parse_nonnegative_env("FASTBOOT_H264_RAMP_FRAMES",
+		                                   FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES, 3600);
+		g_fastboot_output_gop = fastboot_parse_positive_env("FASTBOOT_H264_GOP",
+		                                                    FASTBOOT_FIFO_DEFAULT_GOP);
+		g_fastboot_startup_drain_max_frames =
+		    fastboot_parse_nonnegative_env("FASTBOOT_H264_STARTUP_DRAIN_FRAMES",
+		                                   FASTBOOT_VIDEO_STARTUP_DRAIN_MAX_FRAMES, 300);
+		g_fastboot_force_day = fastboot_parse_bool_env("FASTBOOT_FORCE_DAY", false) ? 1 : 0;
 
 		if (g_fastboot_output_channel == VENC_SUB_CHANNEL && venc1_path && venc1_path[0])
 			g_fastboot_out_path = venc1_path;
@@ -2685,10 +2811,23 @@ int main(int argc, char *argv[]) {
 			g_fastboot_out_path = venc0_path;
 		else if (venc1_path && venc1_path[0])
 			g_fastboot_out_path = venc1_path;
+		g_fastboot_active_output_channel = g_fastboot_output_channel;
+		g_fastboot_output_switch_done = 1;
+		if (fastboot_output_switch_enabled()) {
+			g_fastboot_active_output_channel = g_fastboot_startup_output_channel;
+			g_fastboot_output_switch_done = 0;
+		}
 		if (g_fastboot_out_path) {
 			fprintf(stderr, "fastboot_h264_fifo: effective output=%s\n", g_fastboot_out_path);
-			fprintf(stderr, "fastboot_h264_fifo: continuous output-channel FIFO enabled channel=%d\n",
-			        g_fastboot_output_channel);
+			fprintf(stderr,
+			        "fastboot_h264_fifo: continuous output-channel FIFO enabled final_channel=%d active_channel=%d\n",
+			        g_fastboot_output_channel, g_fastboot_active_output_channel);
+			if (fastboot_output_switch_enabled()) {
+				fprintf(stderr,
+				        "fastboot_h264_fifo: startup output enabled channel=%d resolution=%dx%d frames=%d\n",
+				        g_fastboot_startup_output_channel, g_fastboot_startup_output_width,
+				        g_fastboot_startup_output_height, g_fastboot_output_ramp_frames);
+			}
 			fprintf(stderr, "fastboot_h264_fifo: startup drain max frames=%d\n",
 			        g_fastboot_startup_drain_max_frames);
 			fflush(stderr);
