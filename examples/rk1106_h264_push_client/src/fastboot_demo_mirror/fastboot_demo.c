@@ -70,7 +70,7 @@
 #define FASTBOOT_FIFO_DEFAULT_RAMP_FRAMES 60
 #define FASTBOOT_WRAP_MIN_LINE 64
 #define FASTBOOT_FIFO_HEARTBEAT_US 5000000ULL
-#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-force-day-20260609p"
+#define FASTBOOT_H264_FIFO_BUILD_ID "continuous-fifo-720p30-600kbps-start300kbps-ramp60-audio-late-start-20260611a"
 
 #define ENABLE_SMART_IR
 
@@ -407,6 +407,10 @@ static int g_fastboot_audio_codec_id = 0; /* 0=PCMU (u-law), 8=PCMA (a-law) */
 static AUDIO_DEV g_fastboot_audio_ai_dev = 0;
 static AI_CHN g_fastboot_audio_ai_chn = 0;
 static AENC_CHN g_fastboot_audio_aenc_chn = 0;
+static int g_fastboot_audio_ai_enabled = 0;
+static int g_fastboot_audio_ai_chn_enabled = 0;
+static int g_fastboot_audio_aenc_created = 0;
+static int g_fastboot_audio_bound = 0;
 
 static bool fastboot_sub_channel_enabled(void) {
 	return !g_fastboot_out_path || g_fastboot_output_channel == VENC_SUB_CHANNEL;
@@ -1957,6 +1961,7 @@ static int fastboot_audio_capture_init(void) {
 		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_Enable failed rc=0x%08x\n", rc);
 		return -1;
 	}
+	g_fastboot_audio_ai_enabled = 1;
 
 	memset(&ai_params, 0, sizeof(ai_params));
 	ai_params.enLoopbackMode = AUDIO_LOOPBACK_NONE;
@@ -1970,6 +1975,7 @@ static int fastboot_audio_capture_init(void) {
 		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AI_EnableChn failed rc=0x%08x\n", rc);
 		return -1;
 	}
+	g_fastboot_audio_ai_chn_enabled = 1;
 
 	/* AENC channel: G711 PCMU/PCMA */
 	/* FASTBOOT_AUDIO_CODEC env: 0=PCMU (u-law, default), 1=PCMA (a-law) */
@@ -1988,6 +1994,7 @@ static int fastboot_audio_capture_init(void) {
 		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_AENC_CreateChn failed rc=0x%08x\n", rc);
 		return -1;
 	}
+	g_fastboot_audio_aenc_created = 1;
 
 	/* Bind AI -> AENC */
 	memset(&ai_chn, 0, sizeof(ai_chn));
@@ -2003,6 +2010,7 @@ static int fastboot_audio_capture_init(void) {
 		fprintf(stderr, "fastboot_h264_fifo: RK_MPI_SYS_Bind AI->AENC failed rc=0x%08x\n", rc);
 		return -1;
 	}
+	g_fastboot_audio_bound = 1;
 
 	/* Boost mic gain: analog 20dB + digital +15dB */
 	{
@@ -2028,6 +2036,8 @@ static int fastboot_audio_capture_init(void) {
 	fflush(stderr);
 	return 0;
 }
+
+static void fastboot_audio_capture_deinit(void);
 
 static void *GetAencStream(void *arg) {
 	AUDIO_STREAM_S stream;
@@ -2080,6 +2090,17 @@ static void *GetAencStream(void *arg) {
 	}
 	if (!g_fastboot_audio_output_file) {
 		fprintf(stderr, "fastboot_h264_fifo: audio thread exiting (no FIFO)\n");
+		return NULL;
+	}
+
+	/* Start AI/AENC only after the sender has opened the FIFO read end.
+	 * This keeps WebRTC audio close to live time instead of flushing audio
+	 * accumulated while signaling and DTLS were still pending. */
+	s32Ret = fastboot_audio_capture_init();
+	if (s32Ret != 0) {
+		fastboot_demo_err("audio capture init failed ret=%d\n", s32Ret);
+		fprintf(stderr, "fastboot_h264_fifo: audio capture disabled (init failed)\n");
+		fastboot_audio_capture_deinit();
 		return NULL;
 	}
 
@@ -2164,10 +2185,7 @@ static void *GetAencStream(void *arg) {
 		RK_MPI_AENC_ReleaseStream(g_fastboot_audio_aenc_chn, &stream);
 	}
 
-	if (g_fastboot_audio_output_file) {
-		fclose(g_fastboot_audio_output_file);
-		g_fastboot_audio_output_file = NULL;
-	}
+	fastboot_audio_capture_deinit();
 	fprintf(stderr, "fastboot_h264_fifo: audio thread stopped frames=%u\n", frame_count);
 	return NULL;
 }
@@ -2175,8 +2193,14 @@ static void *GetAencStream(void *arg) {
 static void fastboot_audio_capture_deinit(void) {
 	MPP_CHN_S ai_chn;
 	MPP_CHN_S aenc_chn;
+	int did_work = 0;
 
-	if (!g_fastboot_audio_out_path)
+	if (!g_fastboot_audio_out_path &&
+	    !g_fastboot_audio_output_file &&
+	    !g_fastboot_audio_bound &&
+	    !g_fastboot_audio_aenc_created &&
+	    !g_fastboot_audio_ai_chn_enabled &&
+	    !g_fastboot_audio_ai_enabled)
 		return;
 
 	memset(&ai_chn, 0, sizeof(ai_chn));
@@ -2188,15 +2212,33 @@ static void fastboot_audio_capture_deinit(void) {
 	aenc_chn.s32DevId = 0;
 	aenc_chn.s32ChnId = g_fastboot_audio_aenc_chn;
 
-	(void)RK_MPI_SYS_UnBind(&ai_chn, &aenc_chn);
-	(void)RK_MPI_AENC_DestroyChn(g_fastboot_audio_aenc_chn);
-	(void)RK_MPI_AI_DisableChn(g_fastboot_audio_ai_dev, g_fastboot_audio_ai_chn);
-	(void)RK_MPI_AI_Disable(g_fastboot_audio_ai_dev);
+	if (g_fastboot_audio_bound) {
+		(void)RK_MPI_SYS_UnBind(&ai_chn, &aenc_chn);
+		g_fastboot_audio_bound = 0;
+		did_work = 1;
+	}
+	if (g_fastboot_audio_aenc_created) {
+		(void)RK_MPI_AENC_DestroyChn(g_fastboot_audio_aenc_chn);
+		g_fastboot_audio_aenc_created = 0;
+		did_work = 1;
+	}
+	if (g_fastboot_audio_ai_chn_enabled) {
+		(void)RK_MPI_AI_DisableChn(g_fastboot_audio_ai_dev, g_fastboot_audio_ai_chn);
+		g_fastboot_audio_ai_chn_enabled = 0;
+		did_work = 1;
+	}
+	if (g_fastboot_audio_ai_enabled) {
+		(void)RK_MPI_AI_Disable(g_fastboot_audio_ai_dev);
+		g_fastboot_audio_ai_enabled = 0;
+		did_work = 1;
+	}
 	if (g_fastboot_audio_output_file) {
 		fclose(g_fastboot_audio_output_file);
 		g_fastboot_audio_output_file = NULL;
+		did_work = 1;
 	}
-	fprintf(stderr, "fastboot_h264_fifo: audio capture deinitialized\n");
+	if (did_work)
+		fprintf(stderr, "fastboot_h264_fifo: audio capture deinitialized\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -2354,15 +2396,6 @@ int main(int argc, char *argv[]) {
 		rtsp_init();
 	}
 #endif
-
-	if (g_fastboot_audio_out_path) {
-		ret = fastboot_audio_capture_init();
-		if (ret != 0) {
-			fastboot_demo_err("audio capture init failed ret=%d\n", ret);
-			fprintf(stderr, "fastboot_h264_fifo: audio capture disabled (init failed)\n");
-			g_fastboot_audio_out_path = NULL;
-		}
-	}
 
 	pthread_t main_thread0, sub_venc_thread_id, md_nn_thread_id;
 	pthread_t audio_thread_id;
