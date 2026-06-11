@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.2.0 - 2026-06-11
+
+RK1106 H264/G711 板端直推里程碑版本。该版本在 `v0.1.0` 纯 Uya WebRTC transport 基座之上，补齐 RK1106 H264 push-client 的板端打包、浏览器手工预览、G711 音频、低延迟 FIFO catch-up、首屏关键帧处理和 720p 启动策略。
+
+详细版本说明：[docs/release-v0.2.0.md](docs/release-v0.2.0.md)
+
+### 发布能力
+
+- 新增 `examples/rk1106_h264_push_client`，支持 RK1106/RV1103B 板端 H264 Annex-B FIFO -> Uya RTP/SRTP -> Chrome recvonly 预览链路。
+- 浏览器预览页强制优先 `H264/90000` 与 `PCMU/PCMA`，并展示 `connectedToFirstFrame`、`answerToFirstFrame`、丢帧、freeze、jitter target delay 和 codec stats。
+- fastboot helper 支持连续 H264 FIFO 输出、SPS/PPS 缓存、裸 IDR 过滤、G711 helper FIFO 和板端 package 打包。
+- sender 在 DTLS/SRTP ready 后从当前 FIFO 队头向后扫描，丢弃旧 P 帧和旧 IDR，直到找到队列剩余估算低于 500ms 的可解码 IDR，再从该 IDR 开始发送并保留更新的 P 帧。
+- 板端默认恢复音频，helper 写 `/tmp/fastboot.g711`，sender 发送 G711 RTP；`DISABLE_AUDIO=1` 可回退 video-only。
+- 板端默认最终主码流恢复 `1280x720` / `600000` bps，启动阶段使用 `640x360` / `150000` bps，30fps 下约 3 秒后切到 720p 主通道并请求新 IDR。
+- `build/webrtc-uya version` 输出 `webrtc-uya 0.2.0`。
+
+### 已知限制
+
+- RK1106 板端链路依赖 Rockchip SDK、MPI、VENC/AENC、AI 设备和实际网络环境；本地发布验证覆盖交叉编译、打包和 Chrome host 回归，真实板端仍需现场跑 `board_run.sh` 验收。
+- 启动阶段分辨率切换使用 fastboot helper 的主/子通道输出切换，若产品配置改为非默认通道，需要同时检查 `FASTBOOT_VENC_CHANNEL` 与 `FASTBOOT_STARTUP_VENC_CHANNEL`。
+- G711 音频为 8 kHz mono、60ms packet；音视频仍是独立 pacing 路径，复杂现场时钟漂移还需要板端长时间观测。
+- `v0.1.0` 中记录的跨平台 CI、纯 Uya Opus 生产路径、UPM path dependency 等限制仍然适用。
+
+### 发布验证
+
+2026-06-11 本地已通过：
+
+- `bash tests/check_rk1106_h264_first_screen.sh`
+- `git diff --check`
+- `make build`
+- `build/webrtc-uya version`
+- `make test`
+- `make -C examples/rk1106_h264_push_client host`
+- `make -C examples/rk1106_h264_push_client fastboot-fifo`
+- `make -C examples/rk1106_h264_push_client package`
+- `python3 tests/rk1106_h264_chrome_first_screen.py --no-build --duration-us 5000000 --steady-min-frames 1`
+
+Chrome 首屏回归样例统计：`connectedToFirstFrame=22ms`、`answerToFirstFrame=27ms`、`framesDecoded=30`、`framesDropped=0`、`freezeCount=0`、`jitterTargetDelayS=0.011`、`audioRtpPackets=84`、`uyaG711AudioReady=true`。
+
 ## v0.1.0 - 2026-06-04
 
 纯 Uya WebRTC transport 里程碑版本。该版本聚焦 Linux 默认平台、浏览器互通、DataChannel、encoded-frame RTP/SRTP 媒体路径，以及显式 reference codec 测试边界。

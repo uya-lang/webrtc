@@ -1,6 +1,6 @@
 # 纯 Uya WebRTC
 
-本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前发布版本为 `v0.1.0` 里程碑，已经覆盖纯 Uya WebRTC transport、DataChannel、RTP/SRTP、RTCP feedback、Chrome 音视频直推验证、纯 Uya VP8 video-only Chrome gate 和显式 FFmpeg codec 测试边界；详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前发布版本为 `v0.2.0` 里程碑，已经覆盖纯 Uya WebRTC transport、DataChannel、RTP/SRTP、RTCP feedback、Chrome 音视频直推验证、纯 Uya VP8 video-only Chrome gate、显式 FFmpeg codec 测试边界，以及 RK1106 H264/G711 板端直推示例；详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
 
 ## 项目目标
 

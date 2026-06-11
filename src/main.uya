@@ -2,14 +2,14 @@ use libc.printf;
 use libc.strcmp;
 
 fn print_help() void {
-    _ = printf("webrtc-uya 0.1.0 milestone CLI\n");
+    _ = printf("webrtc-uya 0.2.0 milestone CLI\n");
     _ = printf("Usage:\n");
     _ = printf("  webrtc-uya [--help|-h]\n");
     _ = printf("  webrtc-uya version\n");
 }
 
 fn print_version() void {
-    _ = printf("webrtc-uya 0.1.0\n");
+    _ = printf("webrtc-uya 0.2.0\n");
 }
 
 export extern fn main(argc: i32, argv: & &byte) i32 {
