@@ -153,8 +153,38 @@ if (location.protocol === 'http:' || location.protocol === 'https:') {
   signalUrl.value = `${location.origin}/api`;
 }
 
+function timingDelta(name, base) {
+  return timing[name] ? Math.round(timing[name] - base) : null;
+}
+
+function updatePreviewState() {
+  const base = timing.start || timing.offerStart || performance.now();
+  window.__rk1106PreviewState = {
+    status: statusEl.textContent,
+    metrics: metricsEl.textContent,
+    latestStatsText,
+    timing: {
+      offerStart: timingDelta('offerStart', base),
+      offerReady: timingDelta('offerReady', base),
+      offerPublished: timingDelta('offerPublished', base),
+      answerSet: timingDelta('answerSet', base),
+      iceConnected: timingDelta('iceConnected', base),
+      connected: timingDelta('connected', base),
+      track: timingDelta('track', base),
+      firstFrame: timingDelta('firstFrame', base),
+      connectedToFirstFrame: timing.connected && timing.firstFrame
+        ? Math.round(timing.firstFrame - timing.connected)
+        : null,
+      answerToFirstFrame: timing.answerSet && timing.firstFrame
+        ? Math.round(timing.firstFrame - timing.answerSet)
+        : null,
+    },
+  };
+}
+
 function setStatus(text) {
   statusEl.textContent = text;
+  updatePreviewState();
 }
 
 function resetDiagnostics() {
@@ -197,6 +227,7 @@ function renderDiagnostics() {
     parts.push(`answerToFirstFrame=${Math.round(timing.firstFrame - timing.answerSet)}ms`);
   }
   metricsEl.textContent = `${parts.length ? `timing ${parts.join(' | ')}` : 'timing: idle'}\n${latestStatsText}`;
+  updatePreviewState();
 }
 
 function sleep(ms) {
@@ -248,6 +279,21 @@ function applyLowLatencyReceiverHint(receiver) {
   }
 }
 
+function applyH264VideoPreference(transceiver) {
+  if (!transceiver || !('setCodecPreferences' in transceiver)) return;
+  const caps = RTCRtpReceiver.getCapabilities
+    ? RTCRtpReceiver.getCapabilities('video')
+    : null;
+  const codecs = caps && caps.codecs
+    ? caps.codecs.filter((codec) => String(codec.mimeType).toLowerCase() === 'video/h264')
+    : [];
+  if (!codecs.length) return;
+  const packetizationMode1 = codecs.filter((codec) => (
+    String(codec.sdpFmtpLine || '').toLowerCase().includes('packetization-mode=1')
+  ));
+  transceiver.setCodecPreferences(packetizationMode1.length ? packetizationMode1 : codecs);
+}
+
 function closePeer() {
   pollToken++;
   stopStatsPolling();
@@ -292,6 +338,13 @@ function statValue(stat, key, fallback = '-') {
   return stat[key] ?? fallback;
 }
 
+function codecText(report, stat) {
+  if (!stat.codecId) return '-';
+  const codec = report.get(stat.codecId);
+  if (!codec) return '-';
+  return [codec.mimeType, codec.sdpFmtpLine].filter(Boolean).join(' ');
+}
+
 async function pollVideoStats(peer, token) {
   if (!peer || token !== statsPollToken) return;
   try {
@@ -308,11 +361,14 @@ async function pollVideoStats(peer, token) {
         `bytes=${statValue(stat, 'bytesReceived')}`,
         `framesReceived=${statValue(stat, 'framesReceived')}`,
         `framesDecoded=${statValue(stat, 'framesDecoded')}`,
+        `framesDropped=${statValue(stat, 'framesDropped')}`,
         `keyFramesDecoded=${statValue(stat, 'keyFramesDecoded')}`,
         `size=${statValue(stat, 'frameWidth')}x${statValue(stat, 'frameHeight')}`,
         `pli=${statValue(stat, 'pliCount')}`,
         `nack=${statValue(stat, 'nackCount')}`,
+        `freeze=${statValue(stat, 'freezeCount')}`,
         `jitterDelay=${jitterDelay}`,
+        `codec=${codecText(report, stat)}`,
       ].join(' ');
     });
     latestStatsText = videoText;
@@ -353,6 +409,7 @@ async function createOffer() {
     {mimeType: 'audio/PCMA', clockRate: 8000, channels: 1},
   ]);
   const videoTransceiver = pc.addTransceiver('video', {direction: 'recvonly'});
+  applyH264VideoPreference(videoTransceiver);
   applyLowLatencyReceiverHint(audioTransceiver.receiver);
   applyLowLatencyReceiverHint(videoTransceiver.receiver);
   const peer = pc;

@@ -41,7 +41,11 @@ export const DTLS_CIPHER_TLS_EMPTY_RENEGOTIATION_INFO_SCSV: u16 = 0x00ffu16;
 export struct DtlsServerFirstFlightConfig {
     server_random: &[byte] = [],
     ecdhe_private_key: &[byte] = [],
+    ecdhe_public_key: &[byte] = [],
     signature_nonce: &[byte] = [],
+    signature_r: &[byte] = [],
+    signature_k_inv: &[byte] = [],
+    signature_rd: &[byte] = [],
     first_record_sequence: u64 = 0u64,
     first_handshake_sequence: u16 = 1u16,
 }
@@ -299,7 +303,11 @@ fn dtls_server_make_signed_server_key_exchange(
     out: &[byte],
 ) !usize {
     var ecdhe_public: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
-    try crypto_p256_public_from_private(config.ecdhe_private_key, ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES]);
+    if config.ecdhe_public_key.len == CRYPTO_P256_PUBLIC_KEY_BYTES {
+        try dtls_server_copy(ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES], config.ecdhe_public_key);
+    } else {
+        try crypto_p256_public_from_private(config.ecdhe_private_key, ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES]);
+    }
 
     var params: [byte: 68] = [];
     const params_len: usize = try dtls_server_make_ecdhe_params(ecdhe_public[0:CRYPTO_P256_PUBLIC_KEY_BYTES], params[0:68]);
@@ -319,13 +327,26 @@ fn dtls_server_make_signed_server_key_exchange(
 
     var r: [byte: CRYPTO_P256_FIELD_BYTES] = [];
     var s: [byte: CRYPTO_P256_FIELD_BYTES] = [];
-    try crypto_p256_ecdsa_sign_with_k(
-        identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
-        hash[0:CRYPTO_P256_FIELD_BYTES],
-        config.signature_nonce,
-        r[0:CRYPTO_P256_FIELD_BYTES],
-        s[0:CRYPTO_P256_FIELD_BYTES],
-    );
+    if config.signature_r.len == CRYPTO_P256_FIELD_BYTES
+        && config.signature_k_inv.len == CRYPTO_P256_FIELD_BYTES
+        && config.signature_rd.len == CRYPTO_P256_FIELD_BYTES {
+        try crypto_p256_ecdsa_sign_precomputed(
+            hash[0:CRYPTO_P256_FIELD_BYTES],
+            config.signature_r,
+            config.signature_k_inv,
+            config.signature_rd,
+            r[0:CRYPTO_P256_FIELD_BYTES],
+            s[0:CRYPTO_P256_FIELD_BYTES],
+        );
+    } else {
+        try crypto_p256_ecdsa_sign_with_k(
+            identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
+            hash[0:CRYPTO_P256_FIELD_BYTES],
+            config.signature_nonce,
+            r[0:CRYPTO_P256_FIELD_BYTES],
+            s[0:CRYPTO_P256_FIELD_BYTES],
+        );
+    }
 
     var der_signature: [byte: DTLS_SERVER_ECDSA_DER_SIGNATURE_MAX_BYTES] = [];
     const der_len: usize = try dtls_server_encode_ecdsa_der_signature(
@@ -342,6 +363,29 @@ fn dtls_server_make_signed_server_key_exchange(
         signature: der_signature[0:der_len],
     };
     return dtls_server_key_exchange_write(&message, out);
+}
+
+export fn dtls_server_precompute_signature_nonce(
+    signature_nonce: &[byte],
+    r_out: &[byte],
+    kinv_out: &[byte],
+    rd_out: &[byte],
+) !void {
+    if signature_nonce.len != CRYPTO_P256_FIELD_BYTES
+        || r_out.len < CRYPTO_P256_FIELD_BYTES
+        || kinv_out.len < CRYPTO_P256_FIELD_BYTES
+        || rd_out.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    var identity_private: [byte: DTLS_IDENTITY_PRIVATE_KEY_BYTES] = [];
+    try dtls_identity_private_key(identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES]);
+    try crypto_p256_ecdsa_precompute_k(
+        identity_private[0:DTLS_IDENTITY_PRIVATE_KEY_BYTES],
+        signature_nonce,
+        r_out[0:CRYPTO_P256_FIELD_BYTES],
+        kinv_out[0:CRYPTO_P256_FIELD_BYTES],
+        rd_out[0:CRYPTO_P256_FIELD_BYTES],
+    );
 }
 
 fn dtls_server_write_handshake_record(

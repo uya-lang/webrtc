@@ -15,7 +15,7 @@ LOCAL_HOST=${LOCAL_HOST:-192.168.3.166}
 MEDIA_DURATION_US=${MEDIA_DURATION_US:-600000000}
 VIDEO_FRAME_DURATION_US=${VIDEO_FRAME_DURATION_US:-33333}
 H264_BITRATE=${H264_BITRATE:-600000}
-H264_GOP=${H264_GOP:-60}
+H264_GOP=${H264_GOP:-30}
 FASTBOOT_VENC_CHANNEL=${FASTBOOT_VENC_CHANNEL:-0}
 FASTBOOT_AUDIO_CARD=${FASTBOOT_AUDIO_CARD:-hw:0,0}
 FASTBOOT_VIDEO_WIDTH=${FASTBOOT_VIDEO_WIDTH:-1280}
@@ -345,6 +345,9 @@ set -- \
     --video-frame-duration-us "$VIDEO_FRAME_DURATION_US" \
     --h264-bitrate "$H264_BITRATE" \
     --h264-gop "$H264_GOP"
+if [ -z "$MEDIA_PATH" ]; then
+    set -- "$@" --prebuffer-h264
+fi
 
 echo "board_run: sender args: $*" >&2
 echo "board_run: audio_fifo=/tmp/fastboot.g711" >&2

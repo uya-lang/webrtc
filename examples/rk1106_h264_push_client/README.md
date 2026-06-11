@@ -36,6 +36,16 @@ make -C examples/rk1106_h264_push_client host
 
 This requires `ffmpeg` with `libx264` support on `PATH`.
 
+To run the automated host-side Chrome first-screen gate:
+
+```sh
+python3 tests/rk1106_h264_chrome_first_screen.py
+```
+
+This uses the same `host/manual_preview.html` signaling page and the host
+fallback H264 sender, then fails if `answerToFirstFrame` or
+`connectedToFirstFrame` is above 1000 ms.
+
 Copy it to the board:
 
 ```sh
@@ -74,7 +84,7 @@ WIDTH=320
 HEIGHT=180
 FPS=30
 BITRATE=1000000
-GOP=60
+GOP=30
 DURATION_US=60000000
 LOCAL_HOST=192.168.3.165
 SIGNAL_BASE_URL=http://192.168.3.8:8081/api
@@ -87,7 +97,7 @@ FASTBOOT_VIDEO_FPS=30
 FASTBOOT_H264_BITRATE=600000
 FASTBOOT_H264_START_BITRATE=600000
 FASTBOOT_H264_RAMP_FRAMES=60
-FASTBOOT_H264_GOP=60
+FASTBOOT_H264_GOP=30
 ```
 
 You can also run the binary directly:
@@ -104,7 +114,7 @@ You can also run the binary directly:
     --video-height 180 \
     --video-frame-duration-us 33333 \
     --h264-bitrate 1000000 \
-    --h264-gop 60 \
+    --h264-gop 30 \
     --media-duration-us 60000000 \
     --local-host 192.168.3.165 \
     --codec uya
@@ -189,18 +199,22 @@ H264 file -> H264 RTP/SRTP -> Chrome
 
 默认 fastboot helper 使用 720p 主码流，`FASTBOOT_VIDEO_FPS=30`，
 `FASTBOOT_H264_BITRATE=600000`，`FASTBOOT_H264_START_BITRATE` 默认等于目标码率，
-`FASTBOOT_H264_GOP` 默认跟随 `H264_GOP=60`。码率参数使用 bps；
+`FASTBOOT_H264_GOP` 默认跟随 `H264_GOP=30`，也就是 30fps 下约 1 秒一个 IDR。
+码率参数使用 bps；
 helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。如果需要重新启用低码率启动，
 可以把 `FASTBOOT_H264_START_BITRATE` 设成低于目标码率的值；
 `FASTBOOT_H264_RAMP_FRAMES=0` 可以显式关闭启动码率爬升。
-实时 FIFO 模式下 `board_run.sh` 会自动启用 `UYA_RK1106_PREBUFFER_H264=1`：
-sender 在 DTLS/SRTP ready 前预读并缓存最近的完整 H264 IDR 访问单元。
+实时 FIFO 模式下 `board_run.sh` 会自动传 `--prebuffer-h264`，并保留
+`UYA_RK1106_PREBUFFER_H264=1` 作为兼容开关：sender 在 DTLS/SRTP ready 前
+预读并缓存最近的完整 H264 IDR 访问单元。
 首屏关键帧必须本身带 SPS/PPS，或能从缓存 prepend SPS/PPS；helper 和 sender
 都会跳过裸 IDR，避免 Chrome 已 connected 但解码器继续等参数集。连接 ready 后
 先把缓存的可解码关键帧发给 Chrome，减少首屏等待。`MEDIA_PATH` 文件回放模式
 不会自动预读，避免连接前把测试文件消费完。
 sender 正常 live 发送会顺序读取 Annex-B 帧，不再为了追最新帧丢掉 P 帧；Chrome
-统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。
+统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。首屏验证时优先看
+网页上的 `answerToFirstFrame` / `connectedToFirstFrame`，正常目标是低于 1000ms；
+`codec` 应显示 H264，`framesDropped`、`freeze`、`pli`、`nack` 不应持续增长。
 `SUPPRESS_KERNEL_LOGS=1` 默认临时压低内核串口日志，避免 WiFi flow-control
 日志刷屏；调试内核/驱动时可用 `SUPPRESS_KERNEL_LOGS=0 ./board_run.sh`。
 如果 Chrome 统计里 `framesDropped`、`freezeCount`、`pliCount` 或 `nackCount`

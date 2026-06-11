@@ -113,6 +113,62 @@ export fn crypto_p256_ecdsa_sign_with_k(
     }
 }
 
+export fn crypto_p256_ecdsa_precompute_k(
+    private_key: &[byte],
+    nonce_k: &[byte],
+    r_out: &[byte],
+    kinv_out: &[byte],
+    rd_out: &[byte],
+) !void {
+    if private_key.len != CRYPTO_P256_FIELD_BYTES
+        || nonce_k.len != CRYPTO_P256_FIELD_BYTES
+        || r_out.len < CRYPTO_P256_FIELD_BYTES
+        || kinv_out.len < CRYPTO_P256_FIELD_BYTES
+        || rd_out.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    if ec.ecdsa_precompute_p256_k(
+        &r_out[0],
+        &kinv_out[0],
+        &rd_out[0],
+        &private_key[0] as &const byte,
+        &nonce_k[0] as &const byte,
+    ) != 0i32 {
+        return error.InvalidPacket;
+    }
+}
+
+export fn crypto_p256_ecdsa_sign_precomputed(
+    hash: &[byte],
+    r: &[byte],
+    kinv: &[byte],
+    rd: &[byte],
+    r_out: &[byte],
+    s_out: &[byte],
+) !void {
+    if hash.len != CRYPTO_P256_FIELD_BYTES
+        || r.len != CRYPTO_P256_FIELD_BYTES
+        || kinv.len != CRYPTO_P256_FIELD_BYTES
+        || rd.len != CRYPTO_P256_FIELD_BYTES
+        || r_out.len < CRYPTO_P256_FIELD_BYTES
+        || s_out.len < CRYPTO_P256_FIELD_BYTES {
+        return error.InvalidPacket;
+    }
+    var index: usize = 0usize;
+    while index < CRYPTO_P256_FIELD_BYTES {
+        r_out[index] = r[index];
+        index = index + 1usize;
+    }
+    if ec.ecdsa_sign_p256_precomputed(
+        &s_out[0],
+        &hash[0] as &const byte,
+        &kinv[0] as &const byte,
+        &rd[0] as &const byte,
+    ) != 0i32 {
+        return error.InvalidPacket;
+    }
+}
+
 export fn crypto_p256_ecdsa_verify(
     public_key: &[byte],
     hash: &[byte],

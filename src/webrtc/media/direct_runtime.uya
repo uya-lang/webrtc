@@ -64,12 +64,18 @@ export struct DirectRuntime {
     selected_srtp_profile: u16 = 0u16,
     server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [],
     server_ecdhe_private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    server_ecdhe_public_key: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [],
     server_signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    server_signature_r: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    server_signature_k_inv: [byte: CRYPTO_P256_FIELD_BYTES] = [],
+    server_signature_rd: [byte: CRYPTO_P256_FIELD_BYTES] = [],
     client_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [],
     client_hello_reassembly: DtlsHandshakeReassemblyState = DtlsHandshakeReassemblyState{},
     transcript: [byte: DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES] = [],
     transcript_len: usize = 0usize,
     hello_verify_sent: bool = false,
+    server_first_flight: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [],
+    server_first_flight_len: usize = 0usize,
     server_first_flight_record_sequence_start: u64 = 0u64,
     server_first_flight_handshake_sequence_start: u16 = 1u16,
     next_client_handshake_sequence: u16 = 5u16,
@@ -422,8 +428,18 @@ fn direct_runtime_generate_entropy(runtime: &DirectRuntime) !void {
         runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
         share.private_key[0:CRYPTO_P256_FIELD_BYTES],
     );
+    try direct_runtime_copy_bytes(
+        runtime.server_ecdhe_public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+        share.public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+    );
 
     try crypto_csprng_fill(runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES]);
+    try dtls_server_precompute_signature_nonce(
+        runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_r[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_k_inv[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_rd[0:CRYPTO_P256_FIELD_BYTES],
+    );
 }
 
 fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_ssrc: u32) !void {
@@ -434,6 +450,7 @@ fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_s
     runtime.selected_srtp_profile = 0u16;
     runtime.transcript_len = 0usize;
     runtime.hello_verify_sent = false;
+    runtime.server_first_flight_len = 0usize;
     runtime.server_first_flight_record_sequence_start = 0u64;
     runtime.server_first_flight_handshake_sequence_start = 1u16;
     runtime.next_client_handshake_sequence = 5u16;
@@ -453,6 +470,10 @@ fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_s
     runtime.audio_ssrc = audio_ssrc;
     runtime.video_ssrc = video_ssrc;
     direct_runtime_zero_bytes(runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES]);
+    direct_runtime_zero_bytes(runtime.server_ecdhe_public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES]);
+    direct_runtime_zero_bytes(runtime.server_signature_r[0:CRYPTO_P256_FIELD_BYTES]);
+    direct_runtime_zero_bytes(runtime.server_signature_k_inv[0:CRYPTO_P256_FIELD_BYTES]);
+    direct_runtime_zero_bytes(runtime.server_signature_rd[0:CRYPTO_P256_FIELD_BYTES]);
     dtls_handshake_reassembly_init(&runtime.client_hello_reassembly);
     direct_runtime_zero_bytes(runtime.transcript[0:DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES]);
 }
@@ -460,21 +481,32 @@ fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_s
 export fn direct_runtime_make() DirectRuntime {
     var server_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [];
     var server_ecdhe_private_key: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var server_ecdhe_public_key: [byte: CRYPTO_P256_PUBLIC_KEY_BYTES] = [];
     var server_signature_nonce: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var server_signature_r: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var server_signature_k_inv: [byte: CRYPTO_P256_FIELD_BYTES] = [];
+    var server_signature_rd: [byte: CRYPTO_P256_FIELD_BYTES] = [];
     var client_random: [byte: DTLS_HELLO_RANDOM_BYTES] = [];
     var client_hello_reassembly: DtlsHandshakeReassemblyState = dtls_handshake_reassembly_state_make();
     var transcript: [byte: DIRECT_RUNTIME_TRANSCRIPT_MAX_BYTES] = [];
+    var server_first_flight: [byte: DIRECT_RUNTIME_DTLS_OUT_MAX_BYTES] = [];
     return DirectRuntime{
         dtls_state: DIRECT_RUNTIME_DTLS_STATE_NEW,
         selected_srtp_profile: 0u16,
         server_random: server_random,
         server_ecdhe_private_key: server_ecdhe_private_key,
+        server_ecdhe_public_key: server_ecdhe_public_key,
         server_signature_nonce: server_signature_nonce,
+        server_signature_r: server_signature_r,
+        server_signature_k_inv: server_signature_k_inv,
+        server_signature_rd: server_signature_rd,
         client_random: client_random,
         client_hello_reassembly: client_hello_reassembly,
         transcript: transcript,
         transcript_len: 0usize,
         hello_verify_sent: false,
+        server_first_flight: server_first_flight,
+        server_first_flight_len: 0usize,
         server_first_flight_record_sequence_start: 0u64,
         server_first_flight_handshake_sequence_start: 1u16,
         next_client_handshake_sequence: 5u16,
@@ -517,7 +549,17 @@ export fn direct_runtime_init_with_entropy(
     try direct_runtime_reset_common(runtime, audio_ssrc, video_ssrc);
     try direct_runtime_copy_bytes(runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES], server_random);
     try direct_runtime_copy_bytes(runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES], ecdhe_private_key);
+    try crypto_p256_public_from_private(
+        ecdhe_private_key,
+        runtime.server_ecdhe_public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
+    );
     try direct_runtime_copy_bytes(runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES], signature_nonce);
+    try dtls_server_precompute_signature_nonce(
+        runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_r[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_k_inv[0:CRYPTO_P256_FIELD_BYTES],
+        runtime.server_signature_rd[0:CRYPTO_P256_FIELD_BYTES],
+    );
 }
 
 export fn direct_runtime_write_stun_binding_response(
@@ -580,12 +622,18 @@ fn direct_runtime_process_client_hello_body(
     var config: DtlsServerFirstFlightConfig = DtlsServerFirstFlightConfig{
         server_random: runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
         ecdhe_private_key: runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
+        ecdhe_public_key: runtime.server_ecdhe_public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES],
         signature_nonce: runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
+        signature_r: runtime.server_signature_r[0:CRYPTO_P256_FIELD_BYTES],
+        signature_k_inv: runtime.server_signature_k_inv[0:CRYPTO_P256_FIELD_BYTES],
+        signature_rd: runtime.server_signature_rd[0:CRYPTO_P256_FIELD_BYTES],
         first_record_sequence: runtime.server_first_flight_record_sequence_start,
         first_handshake_sequence: runtime.server_first_flight_handshake_sequence_start,
     };
     const flight: DtlsServerFirstFlight = try dtls_server_write_first_flight(&hello, &config, out);
     try direct_runtime_append_server_flight_transcript(runtime, out[0:flight.bytes_written]);
+    try direct_runtime_copy_bytes(runtime.server_first_flight[0:flight.bytes_written], out[0:flight.bytes_written]);
+    runtime.server_first_flight_len = flight.bytes_written;
     runtime.selected_srtp_profile = flight.selected_srtp_profile;
     runtime.next_server_epoch0_record_sequence = flight.next_record_sequence;
     runtime.next_client_handshake_sequence = message_sequence + 1u16;
@@ -657,18 +705,14 @@ fn direct_runtime_retransmit_server_first_flight(
     if runtime.hello_verify_sent && !direct_runtime_cookie_matches(hello.cookie) {
         return error.DirectRuntimeInvalidPacket;
     }
+    if runtime.server_first_flight_len == 0usize || out.len < runtime.server_first_flight_len {
+        return error.DirectRuntimeOutputTooSmall;
+    }
 
-    var config: DtlsServerFirstFlightConfig = DtlsServerFirstFlightConfig{
-        server_random: runtime.server_random[0:DTLS_HELLO_RANDOM_BYTES],
-        ecdhe_private_key: runtime.server_ecdhe_private_key[0:CRYPTO_P256_FIELD_BYTES],
-        signature_nonce: runtime.server_signature_nonce[0:CRYPTO_P256_FIELD_BYTES],
-        first_record_sequence: runtime.server_first_flight_record_sequence_start,
-        first_handshake_sequence: runtime.server_first_flight_handshake_sequence_start,
-    };
-    const flight: DtlsServerFirstFlight = try dtls_server_write_first_flight(&hello, &config, out);
+    try direct_runtime_copy_bytes(out[0:runtime.server_first_flight_len], runtime.server_first_flight[0:runtime.server_first_flight_len]);
     return DirectRuntimeOutput{
         kind: DIRECT_RUNTIME_OUTPUT_KIND_DTLS,
-        bytes_written: flight.bytes_written,
+        bytes_written: runtime.server_first_flight_len,
         dtls_srtp_ready: false,
     };
 }
