@@ -137,6 +137,7 @@ let statsPollToken = 0;
 let statsTimer = null;
 let timing = {};
 let latestStatsText = 'stats video: waiting';
+let latestVideoStats = null;
 let firstFrameWatchArmed = false;
 const ANSWER_WAIT_TIMEOUT_MS = 240000;
 const ANSWER_POLL_INTERVAL_MS = 200;
@@ -163,6 +164,7 @@ function updatePreviewState() {
     status: statusEl.textContent,
     metrics: metricsEl.textContent,
     latestStatsText,
+    videoStats: latestVideoStats,
     timing: {
       offerStart: timingDelta('offerStart', base),
       offerReady: timingDelta('offerReady', base),
@@ -190,6 +192,7 @@ function setStatus(text) {
 function resetDiagnostics() {
   timing = {start: performance.now()};
   latestStatsText = 'stats video: waiting';
+  latestVideoStats = null;
   firstFrameWatchArmed = false;
   renderDiagnostics();
 }
@@ -356,6 +359,25 @@ async function pollVideoStats(peer, token) {
       const jitterDelay = stat.jitterBufferEmittedCount
         ? (stat.jitterBufferDelay / stat.jitterBufferEmittedCount).toFixed(3)
         : '-';
+      const jitterTargetDelay = stat.jitterBufferEmittedCount && stat.jitterBufferTargetDelay !== undefined
+        ? (stat.jitterBufferTargetDelay / stat.jitterBufferEmittedCount).toFixed(3)
+        : '-';
+      const decodedFrames = Number(stat.framesDecoded || stat.framesReceived || 0);
+      const freezeCount = Number(stat.freezeCount || 0);
+      const freezePer1000 = decodedFrames > 0 ? ((freezeCount * 1000) / decodedFrames).toFixed(2) : '-';
+      latestVideoStats = {
+        packetsReceived: Number(stat.packetsReceived || 0),
+        bytesReceived: Number(stat.bytesReceived || 0),
+        framesReceived: Number(stat.framesReceived || 0),
+        framesDecoded: Number(stat.framesDecoded || 0),
+        framesDropped: Number(stat.framesDropped || 0),
+        keyFramesDecoded: Number(stat.keyFramesDecoded || 0),
+        freezeCount,
+        freezePer1000: decodedFrames > 0 ? (freezeCount * 1000) / decodedFrames : null,
+        jitterDelay: jitterDelay === '-' ? null : Number(jitterDelay),
+        jitterTargetDelay: jitterTargetDelay === '-' ? null : Number(jitterTargetDelay),
+        codec: codecText(report, stat),
+      };
       videoText = [
         `stats video packets=${statValue(stat, 'packetsReceived')}`,
         `bytes=${statValue(stat, 'bytesReceived')}`,
@@ -367,7 +389,9 @@ async function pollVideoStats(peer, token) {
         `pli=${statValue(stat, 'pliCount')}`,
         `nack=${statValue(stat, 'nackCount')}`,
         `freeze=${statValue(stat, 'freezeCount')}`,
+        `freezePer1000=${freezePer1000}`,
         `jitterDelay=${jitterDelay}`,
+        `jitterTargetDelay=${jitterTargetDelay}`,
         `codec=${codecText(report, stat)}`,
       ].join(' ');
     });

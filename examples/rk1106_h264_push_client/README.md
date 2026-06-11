@@ -46,6 +46,33 @@ This uses the same `host/manual_preview.html` signaling page and the host
 fallback H264 sender, then fails if `answerToFirstFrame` or
 `connectedToFirstFrame` is above 1000 ms.
 
+For the host fallback long-stream regression gate:
+
+```sh
+python3 tests/rk1106_h264_chrome_first_screen.py \
+    --duration-us 35000000 --steady-min-frames 1000 \
+    --max-freeze-per-1000 1 --max-jitter-target-delay 1
+```
+
+This catches sender/RTP/AU-splitting regressions, but use the real board sender
+for final camera-to-Chrome latency proof.
+
+For the real board sender, let the test own Chrome and signaling on the host:
+
+```sh
+python3 tests/rk1106_h264_chrome_first_screen.py \
+    --external-sender --signal-host 0.0.0.0 --signal-port 8081 \
+    --duration-us 90000000 --steady-observe-us 60000000 \
+    --steady-min-frames 1800 \
+    --max-freeze-per-1000 1 --max-jitter-target-delay 1
+```
+
+Then start the board package against the same host:
+
+```sh
+SIGNAL_BASE_URL=http://HOST_IP:8081/api MEDIA_DURATION_US=90000000 ./board_run.sh
+```
+
 Copy it to the board:
 
 ```sh
@@ -84,7 +111,7 @@ WIDTH=320
 HEIGHT=180
 FPS=30
 BITRATE=1000000
-GOP=30
+GOP=15
 DURATION_US=60000000
 LOCAL_HOST=192.168.3.165
 SIGNAL_BASE_URL=http://192.168.3.8:8081/api
@@ -97,7 +124,7 @@ FASTBOOT_VIDEO_FPS=30
 FASTBOOT_H264_BITRATE=600000
 FASTBOOT_H264_START_BITRATE=600000
 FASTBOOT_H264_RAMP_FRAMES=60
-FASTBOOT_H264_GOP=30
+FASTBOOT_H264_GOP=15
 ```
 
 You can also run the binary directly:
@@ -114,7 +141,7 @@ You can also run the binary directly:
     --video-height 180 \
     --video-frame-duration-us 33333 \
     --h264-bitrate 1000000 \
-    --h264-gop 30 \
+    --h264-gop 15 \
     --media-duration-us 60000000 \
     --local-host 192.168.3.165 \
     --codec uya
@@ -199,8 +226,9 @@ H264 file -> H264 RTP/SRTP -> Chrome
 
 默认 fastboot helper 使用 720p 主码流，`FASTBOOT_VIDEO_FPS=30`，
 `FASTBOOT_H264_BITRATE=600000`，`FASTBOOT_H264_START_BITRATE` 默认等于目标码率，
-`FASTBOOT_H264_GOP` 默认跟随 `H264_GOP=30`，也就是 30fps 下约 1 秒一个 IDR。
-码率参数使用 bps；
+低延时板端默认是 video-only 的 `640x360` / `400000` bps / `H264_GOP=15`，
+也就是 30fps 下约 0.5 秒一个 IDR。`board_run.sh` 不启动 helper 音频 FIFO，
+sender 代码也默认关闭音频 RTP，避免音频采集/编码抢占视频路径。码率参数使用 bps；
 helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。如果需要重新启用低码率启动，
 可以把 `FASTBOOT_H264_START_BITRATE` 设成低于目标码率的值；
 `FASTBOOT_H264_RAMP_FRAMES=0` 可以显式关闭启动码率爬升。
@@ -209,19 +237,26 @@ helper 写入 Rockchip VENC 时会转换为 SDK 要求的 kbps。如果需要重
 预读并缓存最近的完整 H264 IDR 访问单元。
 首屏关键帧必须本身带 SPS/PPS，或能从缓存 prepend SPS/PPS；helper 和 sender
 都会跳过裸 IDR，避免 Chrome 已 connected 但解码器继续等参数集。连接 ready 后
-先把缓存的可解码关键帧发给 Chrome，减少首屏等待。`MEDIA_PATH` 文件回放模式
+只把缓存的可解码关键帧发给 Chrome 一次，减少首屏等待，同时避免后续重复 IDR
+占用 RTP 时间线导致播放端延时累积。`MEDIA_PATH` 文件回放模式
 不会自动预读，避免连接前把测试文件消费完。
 sender 正常 live 发送会顺序读取 Annex-B 帧，不再为了追最新帧丢掉 P 帧；Chrome
-统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。首屏验证时优先看
+统计里 `keyFramesDecoded` 不应该再和 `framesDecoded` 一样增长。Annex-B access
+unit 切分会等到 VCL slice header 足够后再判断新画面，避免把同一画面的多 slice IDR
+拆成多个 RTP 时间戳。首屏验证时优先看
 网页上的 `answerToFirstFrame` / `connectedToFirstFrame`，正常目标是低于 1000ms；
-`codec` 应显示 H264，`framesDropped`、`freeze`、`pli`、`nack` 不应持续增长。
+后续长时间播放重点看 `freezePer1000` 和 `jitterTargetDelay`。实时 FIFO 模式下如果
+sender 发现发送调度已经落后 500ms，会丢到下一个可解码 IDR 并重置发送节拍，避免
+继续按顺序补旧 P 帧把观看延时拖到 1 秒以上；RTP duration 固定使用配置帧间隔，
+避免一次发送卡顿把播放器媒体时间线拉长。`codec` 应显示 H264，
+`framesDropped`、`freeze`、`pli`、`nack` 不应持续增长。
 `SUPPRESS_KERNEL_LOGS=1` 默认临时压低内核串口日志，避免 WiFi flow-control
 日志刷屏；调试内核/驱动时可用 `SUPPRESS_KERNEL_LOGS=0 ./board_run.sh`。
 如果 Chrome 统计里 `framesDropped`、`freezeCount`、`pliCount` 或 `nackCount`
-持续增长，可以先试更低码率：
+持续增长，可以先试更低码率或更低分辨率：
 
 ```sh
-FASTBOOT_H264_BITRATE=400000 ./board_run.sh
+FASTBOOT_VIDEO_WIDTH=320 FASTBOOT_VIDEO_HEIGHT=180 FASTBOOT_H264_BITRATE=250000 ./board_run.sh
 ```
 
 如果要切回 1080p：

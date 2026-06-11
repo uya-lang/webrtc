@@ -111,6 +111,13 @@ def parse_stat_int(text: str, key: str) -> int:
     return int(match.group(1))
 
 
+def parse_stat_float(text: str, key: str) -> float | None:
+    match = re.search(rf"(?:^|\s){re.escape(key)}=([0-9]+(?:\.[0-9]+)?)", text)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
 def launch_chromium(tempdir: Path) -> tuple[subprocess.Popen[str], CDPClient, str]:
     browser_exe = find_browser_executable()
     profile_dir = tempdir / "chrome-profile"
@@ -124,6 +131,10 @@ def launch_chromium(tempdir: Path) -> tuple[subprocess.Popen[str], CDPClient, st
             "--no-sandbox",
             "--disable-gpu",
             "--disable-dev-shm-usage",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=CalculateNativeWinOcclusion",
             "--autoplay-policy=no-user-gesture-required",
             "--user-data-dir=" + str(profile_dir),
         ],
@@ -141,11 +152,11 @@ def launch_chromium(tempdir: Path) -> tuple[subprocess.Popen[str], CDPClient, st
     return proc, client, browser_ws_url
 
 
-def start_signaling_server(port: int, tempdir: Path) -> subprocess.Popen[str]:
+def start_signaling_server(port: int, tempdir: Path, host: str = "127.0.0.1") -> subprocess.Popen[str]:
     log_path = tempdir / "signaling.log"
     log_file = log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
-        [sys.executable, str(SIGNALING_SERVER), "--host", "127.0.0.1", "--port", str(port)],
+        [sys.executable, str(SIGNALING_SERVER), "--host", host, "--port", str(port)],
         cwd=REPO_ROOT,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -203,7 +214,7 @@ def start_host_sender(tempdir: Path, signal_port: int, duration_us: int, width: 
 def wait_for_first_frame(
     client: CDPClient,
     session_id: str,
-    host_proc: subprocess.Popen[str],
+    host_proc: subprocess.Popen[str] | None,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
@@ -220,7 +231,7 @@ def wait_for_first_frame(
             and last_state.get("remoteVideoHeight", 0)
         ):
             return last_state
-        if host_proc.poll() is not None:
+        if host_proc is not None and host_proc.poll() is not None:
             raise RuntimeError(
                 "host sender exited before Chrome first frame; "
                 f"status={host_proc.returncode}; state={last_state}; metrics={metrics}"
@@ -232,7 +243,7 @@ def wait_for_first_frame(
 def wait_for_stats_after_first_frame(
     client: CDPClient,
     session_id: str,
-    host_proc: subprocess.Popen[str],
+    host_proc: subprocess.Popen[str] | None,
     first_frame_state: dict[str, Any],
     timeout_seconds: float = 4.0,
 ) -> dict[str, Any]:
@@ -247,9 +258,38 @@ def wait_for_stats_after_first_frame(
             return best_state
         if "H264" in metrics.upper():
             return best_state
-        if host_proc.poll() is not None:
+        if host_proc is not None and host_proc.poll() is not None:
             return best_state
         time.sleep(0.1)
+    return best_state
+
+
+def wait_for_sustained_playback(
+    client: CDPClient,
+    session_id: str,
+    host_proc: subprocess.Popen[str] | None,
+    first_frame_state: dict[str, Any],
+    min_frames: int,
+    observe_us: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    observe_deadline = time.monotonic() + max(0, observe_us) / 1_000_000.0
+    best_state = first_frame_state
+    while time.monotonic() < deadline:
+        current_state = read_preview_state(client, session_id)
+        if current_state:
+            best_state = current_state
+        preview = best_state.get("state")
+        video_stats = preview.get("videoStats") if isinstance(preview, dict) else None
+        metrics = str(best_state.get("metricsText") or "")
+        if isinstance(video_stats, dict):
+            frames = max(int(video_stats.get("framesDecoded") or 0), int(video_stats.get("framesReceived") or 0))
+        else:
+            frames = max(parse_stat_int(metrics, "framesDecoded"), parse_stat_int(metrics, "framesReceived"))
+        if frames >= min_frames and time.monotonic() >= observe_deadline:
+            return best_state
+        time.sleep(0.2)
     return best_state
 
 
@@ -301,35 +341,93 @@ def validate_first_frame(state: dict[str, Any], threshold_ms: int) -> dict[str, 
     }
 
 
+def validate_sustained_playback(
+    state: dict[str, Any],
+    min_frames: int,
+    max_freeze_per_1000: float,
+    max_jitter_target_delay_s: float,
+) -> dict[str, Any]:
+    metrics = str(state.get("metricsText") or "")
+    require("stats video: waiting" not in metrics, f"Chrome stats never reached steady video: {metrics}")
+    preview = state.get("state")
+    video_stats = preview.get("videoStats") if isinstance(preview, dict) else None
+    frames_decoded = parse_stat_int(metrics, "framesDecoded")
+    frames_received = parse_stat_int(metrics, "framesReceived")
+    freeze_count = parse_stat_int(metrics, "freeze")
+    jitter_target_delay_s = parse_stat_float(metrics, "jitterTargetDelay")
+    if isinstance(video_stats, dict):
+        frames_decoded = int(video_stats.get("framesDecoded") or 0)
+        frames_received = int(video_stats.get("framesReceived") or 0)
+        freeze_count = int(video_stats.get("freezeCount") or 0)
+        raw_jitter_target = video_stats.get("jitterTargetDelay")
+        if isinstance(raw_jitter_target, (int, float)):
+            jitter_target_delay_s = float(raw_jitter_target)
+    frames = max(frames_decoded, frames_received)
+    require(frames >= min_frames, f"steady playback decoded too few frames: {frames} < {min_frames}; metrics={metrics}")
+    require(
+        freeze_count * 1000.0 <= frames * max_freeze_per_1000,
+        f"freezeCount ratio too high: freeze={freeze_count}, frames={frames}, "
+        f"maxPer1000={max_freeze_per_1000}; metrics={metrics}",
+    )
+    require(
+        jitter_target_delay_s is not None,
+        f"Chrome stats did not expose jitterTargetDelay for latency budget: {metrics}",
+    )
+    require(
+        jitter_target_delay_s <= max_jitter_target_delay_s,
+        f"Chrome receiver target delay too high: {jitter_target_delay_s:.3f}s > "
+        f"{max_jitter_target_delay_s:.3f}s; metrics={metrics}",
+    )
+    return {
+        "steadyFrames": frames,
+        "steadyFramesDecoded": frames_decoded,
+        "steadyFramesReceived": frames_received,
+        "freezeCount": freeze_count,
+        "freezePer1000": (freeze_count * 1000.0 / frames) if frames else 0.0,
+        "jitterTargetDelayS": jitter_target_delay_s,
+        "steadyMetrics": metrics,
+    }
+
+
 def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
-    if args.build:
+    if args.build and not args.external_sender:
         run_checked(["make", "-C", str(EXAMPLE_DIR), "host"])
 
     with tempfile.TemporaryDirectory(prefix="rk1106-h264-first-screen-") as temp:
         tempdir = Path(temp)
-        signal_port = find_free_port()
+        signal_port = args.signal_port if args.signal_port else find_free_port()
         signaling_proc: subprocess.Popen[str] | None = None
         browser_proc: subprocess.Popen[str] | None = None
         host_proc: subprocess.Popen[str] | None = None
         client: CDPClient | None = None
         try:
-            signaling_proc = start_signaling_server(signal_port, tempdir)
-            host_proc = start_host_sender(
-                tempdir,
-                signal_port,
-                duration_us=args.duration_us,
-                width=args.width,
-                height=args.height,
-                fps=args.fps,
-            )
+            signaling_proc = start_signaling_server(signal_port, tempdir, host=args.signal_host)
+            if args.external_sender:
+                print(
+                    f"external sender signal URL: http://<host-ip>:{signal_port}/api "
+                    f"(bind={args.signal_host})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                host_proc = start_host_sender(
+                    tempdir,
+                    signal_port,
+                    duration_us=args.duration_us,
+                    width=args.width,
+                    height=args.height,
+                    fps=args.fps,
+                )
             browser_proc, client, _ = launch_chromium(tempdir)
 
             target = client.command("Target.createTarget", {"url": "about:blank"})
             target_id = str(target["targetId"])
+            client.command("Target.activateTarget", {"targetId": target_id})
             attached = client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})
             session_id = str(attached["sessionId"])
             client.command("Runtime.enable", session_id=session_id)
             client.command("Page.enable", session_id=session_id)
+            client.command("Page.bringToFront", session_id=session_id)
             client.command(
                 "Page.navigate",
                 {"url": f"http://127.0.0.1:{signal_port}{PREVIEW_URL_PATH}"},
@@ -339,15 +437,33 @@ def run_e2e(args: argparse.Namespace) -> dict[str, Any]:
             first_frame_state = wait_for_first_frame(client, session_id, host_proc, args.timeout_seconds)
             first_frame_state = wait_for_stats_after_first_frame(client, session_id, host_proc, first_frame_state)
             summary = validate_first_frame(first_frame_state, args.threshold_ms)
-            sender_status = wait_for_sender_exit(host_proc, timeout_seconds=max(15.0, args.duration_us / 1_000_000 + 10.0))
-            if sender_status != 0:
-                raise RuntimeError(
-                    f"host sender failed after first frame status={sender_status}\n"
-                    f"---- host_run.log ----\n{read_tail(tempdir / 'host_run.log')}"
+            sustained_state = wait_for_sustained_playback(
+                client,
+                session_id,
+                host_proc,
+                first_frame_state,
+                min_frames=args.steady_min_frames,
+                observe_us=args.steady_observe_us,
+                timeout_seconds=max(4.0, args.duration_us / 1_000_000 + 2.0),
+            )
+            summary.update(
+                validate_sustained_playback(
+                    sustained_state,
+                    min_frames=args.steady_min_frames,
+                    max_freeze_per_1000=args.max_freeze_per_1000,
+                    max_jitter_target_delay_s=args.max_jitter_target_delay,
                 )
-            diagnostics_path = tempdir / "host-work" / "diagnostics.json"
-            if diagnostics_path.exists():
-                summary["senderDiagnostics"] = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+            )
+            if host_proc is not None:
+                sender_status = wait_for_sender_exit(host_proc, timeout_seconds=max(15.0, args.duration_us / 1_000_000 + 10.0))
+                if sender_status != 0:
+                    raise RuntimeError(
+                        f"host sender failed after first frame status={sender_status}\n"
+                        f"---- host_run.log ----\n{read_tail(tempdir / 'host_run.log')}"
+                    )
+                diagnostics_path = tempdir / "host-work" / "diagnostics.json"
+                if diagnostics_path.exists():
+                    summary["senderDiagnostics"] = json.loads(diagnostics_path.read_text(encoding="utf-8"))
             return summary
         finally:
             if client is not None:
@@ -379,6 +495,18 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=180)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--steady-min-frames", type=int, default=1)
+    parser.add_argument(
+        "--steady-observe-us",
+        type=int,
+        default=0,
+        help="after the first frame, keep sampling at least this long before validating sustained stats",
+    )
+    parser.add_argument("--max-freeze-per-1000", type=float, default=1.0)
+    parser.add_argument("--max-jitter-target-delay", type=float, default=1.0)
+    parser.add_argument("--external-sender", action="store_true", help="wait for a board/external sender instead of starting host_run.sh")
+    parser.add_argument("--signal-host", default="127.0.0.1", help="signaling server bind host; use 0.0.0.0 for board validation")
+    parser.add_argument("--signal-port", type=int, default=0, help="signaling server port; 0 chooses a free local port")
     parser.add_argument("--keep-temp", action="store_true")
     parser.set_defaults(build=True)
     args = parser.parse_args()

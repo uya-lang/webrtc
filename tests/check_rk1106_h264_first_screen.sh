@@ -19,17 +19,40 @@ rg -Fq "answerToFirstFrame" "$preview"
 rg -Fq "connectedToFirstFrame" "$preview"
 rg -Fq "framesDropped=" "$preview"
 rg -Fq "freeze=" "$preview"
+rg -Fq "freezePer1000=" "$preview"
+rg -Fq "videoStats: latestVideoStats" "$preview"
 rg -Fq "codec=\${codecText(report, stat)}" "$preview"
 
-rg -Fq 'H264_GOP=${H264_GOP:-30}' "$board_run"
+rg -Fq 'H264_GOP=${H264_GOP:-15}' "$board_run"
+rg -Fq 'H264_BITRATE=${H264_BITRATE:-400000}' "$board_run"
+rg -Fq 'FASTBOOT_VIDEO_WIDTH=${FASTBOOT_VIDEO_WIDTH:-640}' "$board_run"
+rg -Fq 'FASTBOOT_VIDEO_HEIGHT=${FASTBOOT_VIDEO_HEIGHT:-360}' "$board_run"
+rg -Fq 'DISABLE_AUDIO=1' "$board_run"
+rg -Fq 'HELPER_STDERR_LOG=${HELPER_STDERR_LOG:-/dev/null}' "$board_run"
 rg -Fq 'set -- "$@" --prebuffer-h264' "$board_run"
 rg -Fq 'export UYA_RK1106_PREBUFFER_H264=1' "$board_run"
+rg -Fq 'const CLI_H264_STARTUP_KEYFRAME_BURST_COUNT: u32 = 1u32;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'const CLI_H264_LIVE_LAG_DROP_THRESHOLD_US: u64 = 500_000u64;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'const CLI_H264_VCL_PARSE_WAIT_BYTES: usize = 16usize;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'var disable_audio: bool = true;' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'audio RTP disabled for low-latency video mode' src/webrtc_rk1106_h264_sender_main.uya
+rg -Fq 'H264 live lag drop event=' src/webrtc_rk1106_h264_sender_main.uya
+! rg -Fq 'adaptive H264 frame_duration_us' src/webrtc_rk1106_h264_sender_main.uya
 
-rg -Fq 'H264_GOP=30' "$readme"
-rg -Fq 'FASTBOOT_H264_GOP=30' "$readme"
+rg -Fq 'H264_GOP=15' "$readme"
+rg -Fq 'FASTBOOT_H264_GOP=15' "$readme"
+rg -Fq 'const CLI_DEFAULT_H264_GOP: u32 = 15u32;' src/webrtc_rk1106_h264_sender_main.uya
 rg -Fq 'connectedToFirstFrame' "$readme"
+rg -Fq '避免后续重复 IDR' "$readme"
+rg -Fq 'RTP duration 固定使用配置帧间隔' "$readme"
 
 rg -Fq "find_browser_executable" tests/rk1106_h264_chrome_first_screen.py
 rg -Fq "start_host_sender" tests/rk1106_h264_chrome_first_screen.py
 rg -Fq "answerToFirstFrame too slow" tests/rk1106_h264_chrome_first_screen.py
 rg -Fq "Uya answer did not negotiate H264" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq "freezeCount ratio too high" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq "Chrome receiver target delay too high" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq -- "--steady-min-frames" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq -- "--steady-observe-us" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq -- "--external-sender" tests/rk1106_h264_chrome_first_screen.py
+rg -Fq -- "--max-jitter-target-delay" tests/rk1106_h264_chrome_first_screen.py
