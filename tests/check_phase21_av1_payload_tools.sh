@@ -17,5 +17,5 @@ if rg -n "av1_.*(encode|decode)|AV1.*(Encoder|Decoder)|libaom|dav1d|rav1e|SVT-AV
     exit 1
 fi
 
-../uya/bin/uya run src/webrtc_media_av1_rtp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_av1_rtp_test_main.uya
 bash tests/check_phase11_media.sh

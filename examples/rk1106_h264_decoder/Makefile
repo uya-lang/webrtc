@@ -9,8 +9,8 @@ CROSS_PREFIX ?= $(CROSS_BIN)/arm-rockchip831-linux-uclibcgnueabihf-
 CROSS_CC ?= $(CROSS_PREFIX)gcc
 STRIP ?= $(CROSS_PREFIX)strip
 
-UYA ?= $(REPO_ROOT)/../uya/bin/uya
-UYA_LIB ?= $(REPO_ROOT)/../uya/lib
+UYA ?= $(REPO_ROOT)/uya/bin/uya
+UYA_LIB ?= $(REPO_ROOT)/uya/lib
 MEDIA_OUT ?= $(SDK)/media/out
 MPP_INC ?= $(MEDIA_OUT)/include/rockchip
 MPP_LIB ?= $(MEDIA_OUT)/lib

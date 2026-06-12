@@ -16,5 +16,5 @@ rg -Fq "SCTP fuzz corpus smoke passed" src/webrtc_sctp_fuzz_test_main.uya
 rg -Fq "sctp_packet_parse" src/webrtc_sctp_fuzz_test_main.uya
 rg -Fq "sctp_cookie_ack_chunk_parse" src/webrtc_sctp_fuzz_test_main.uya
 
-../uya/bin/uya run src/webrtc_sctp_fuzz_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_fuzz_test_main.uya
 bash tests/check_phase13_sctp.sh

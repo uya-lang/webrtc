@@ -43,7 +43,7 @@ if rg -n "@c_import|extern fn|extern \"|export extern" src/webrtc/media/direct_r
 	exit 1
 fi
 
-../uya/bin/uya run src/webrtc_ffmpeg_direct_sender_test_main.uya
-../uya/bin/uya run src/webrtc_ffmpeg_direct_runtime_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_sender_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_runtime_test_main.uya
 
 echo "Phase 21 Uya FFmpeg direct sender RTP/SRTP packetizer checks passed"

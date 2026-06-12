@@ -73,4 +73,4 @@ rg -Fq "export fn crypto_random_test_set_fail_open" src/webrtc/crypto/random.uya
 rg -Fq "export fn crypto_random_test_set_fail_read" src/webrtc/crypto/random.uya
 
 python3 tests/crypto_vectors.py
-../uya/bin/uya run src/webrtc_crypto_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_crypto_test_main.uya

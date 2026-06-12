@@ -23,5 +23,5 @@ if [[ -n "$transport_imports" ]]; then
     exit 1
 fi
 
-../uya/bin/uya run src/webrtc_media_codec_bridge_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_codec_bridge_test_main.uya
 bash tests/check_phase11_media.sh

@@ -23,5 +23,5 @@ rg -Fq "codec_bridge_opus_packet_to_encoded_frame" src/webrtc_media_codec_bridge
 rg -Fq "codec_bridge_opus_encoded_frame_to_packet" src/webrtc_media_codec_bridge_test_main.uya
 rg -Fq "codec_bridge_opus_pcm_view_make" src/webrtc_media_codec_bridge_test_main.uya
 
-../uya/bin/uya run src/webrtc_media_codec_bridge_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_codec_bridge_test_main.uya
 bash tests/check_phase21_codec_bridge_feature_gate.sh

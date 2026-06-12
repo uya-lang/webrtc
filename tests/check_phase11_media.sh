@@ -75,13 +75,13 @@ rg -q "export fn codec_default_clock_rate_hz" src/webrtc/media/model.uya
 rg -q "export fn codec_default_payload_type" src/webrtc/media/model.uya
 rg -q "export fn codec_id_from_default_payload_type" src/webrtc/media/model.uya
 
-../uya/bin/uya run src/webrtc_media_model_test_main.uya
-../uya/bin/uya run src/webrtc_media_codec_test_main.uya
-../uya/bin/uya run src/webrtc_media_codec_bridge_test_main.uya
-../uya/bin/uya run src/webrtc_media_opus_rtp_test_main.uya
-../uya/bin/uya run src/webrtc_media_opus_rtp_golden_test_main.uya
-../uya/bin/uya run src/webrtc_media_vp8_rtp_test_main.uya
-../uya/bin/uya run src/webrtc_media_av1_rtp_test_main.uya
-../uya/bin/uya run src/webrtc_media_h264_rtp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_model_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_codec_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_codec_bridge_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_opus_rtp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_opus_rtp_golden_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_vp8_rtp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_av1_rtp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_media_h264_rtp_test_main.uya
 
 echo "Phase 11 media model checks passed"

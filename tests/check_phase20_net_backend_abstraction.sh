@@ -17,5 +17,5 @@ rg -Fq "export fn net_backend_select" src/webrtc/net/backend.uya
 rg -Fq "backend_kind" src/webrtc/net/udp.uya
 rg -Fq "export fn udp_socket_config_backend" src/webrtc/net/udp.uya
 
-../uya/bin/uya test src/webrtc_net_backend_test.uya
+"${UYA:-./uya/bin/uya}" test src/webrtc_net_backend_test.uya
 bash tests/check_phase2_udp.sh

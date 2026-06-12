@@ -31,15 +31,15 @@ test -f src/webrtc_srtp_demux_test_main.uya
 python3 tests/srtp_vectors.py
 python3 tests/srtp_sequence_replay_tests.py
 python3 tests/srtp_bench_baseline.py
-../uya/bin/uya check src/webrtc_srtp_model_check.uya
-../uya/bin/uya run src/webrtc_srtp_kdf_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_index_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_replay_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_profile80_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_profile32_test_main.uya
-../uya/bin/uya run src/webrtc_srtcp_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_dtls_exporter_test_main.uya
-../uya/bin/uya run src/webrtc_srtp_demux_test_main.uya
+"${UYA:-./uya/bin/uya}" check src/webrtc_srtp_model_check.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_kdf_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_index_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_replay_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_profile80_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_profile32_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtcp_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_dtls_exporter_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_srtp_demux_test_main.uya
 
 # Check key exports
 rg -q "export struct SrtpContext" src/webrtc/srtp/model.uya

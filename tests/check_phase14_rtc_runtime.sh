@@ -17,6 +17,6 @@ rg -q "export fn rtc_runtime_register_peer_connection" src/webrtc/runtime.uya
 rg -q "export fn rtc_runtime_unregister_peer_connection" src/webrtc/runtime.uya
 rg -q -F "fn main() i32" src/webrtc_rtc_runtime_test_main.uya
 
-../uya/bin/uya run src/webrtc_rtc_runtime_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtc_runtime_test_main.uya
 
 echo "Phase 14 RtcRuntime checks passed"

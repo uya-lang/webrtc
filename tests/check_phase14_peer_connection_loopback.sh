@@ -12,6 +12,6 @@ rg -q "export fn sender_send_encoded_frame" src/webrtc/sender.uya
 rg -q "export fn receiver_deliver_encoded_frame" src/webrtc/receiver.uya
 rg -q -F "fn main() i32" src/webrtc_peer_connection_loopback_main.uya
 
-/media/winger/_dde_home/winger/uya/uya/bin/uya run src/webrtc_peer_connection_loopback_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_peer_connection_loopback_main.uya
 
 echo "Phase 14 peer connection loopback checks passed"

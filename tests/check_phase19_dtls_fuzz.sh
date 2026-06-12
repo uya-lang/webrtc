@@ -16,6 +16,6 @@ rg -Fq "DTLS fuzz corpus smoke passed" src/webrtc_dtls_fuzz_test_main.uya
 rg -Fq "dtls_record_parse" src/webrtc_dtls_fuzz_test_main.uya
 rg -Fq "dtls_handshake_fragment_parse" src/webrtc_dtls_fuzz_test_main.uya
 
-../uya/bin/uya run src/webrtc_dtls_fuzz_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_dtls_fuzz_test_main.uya
 python3 tests/dtls_vectors.py
 bash tests/check_phase8_dtls.sh

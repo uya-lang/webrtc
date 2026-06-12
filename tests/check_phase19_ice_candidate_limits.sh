@@ -12,5 +12,5 @@ rg -Fq "ICE candidate upper limit tests passed" src/webrtc_ice_candidate_limits_
 rg -Fq "ICE_MAX_REMOTE_CANDIDATES" src/webrtc_ice_candidate_limits_test_main.uya
 rg -Fq "ICE_MAX_CANDIDATE_PAIRS" src/webrtc_ice_candidate_limits_test_main.uya
 
-../uya/bin/uya run src/webrtc_ice_candidate_limits_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ice_candidate_limits_test_main.uya
 bash tests/check_phase5_ice.sh

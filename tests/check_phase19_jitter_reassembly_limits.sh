@@ -15,5 +15,5 @@ rg -Fq "RTP_JITTER_MAX_MISSING" src/webrtc_jitter_reassembly_limits_test_main.uy
 rg -Fq "RTP_FRAME_OUTPUT_QUEUE_MAX_FRAMES" src/webrtc_jitter_reassembly_limits_test_main.uya
 rg -Fq "RECEIVER_MAX_PENDING_FRAMES" src/webrtc_jitter_reassembly_limits_test_main.uya
 
-../uya/bin/uya run src/webrtc_jitter_reassembly_limits_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_jitter_reassembly_limits_test_main.uya
 bash tests/check_phase12_rtp.sh

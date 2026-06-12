@@ -21,6 +21,6 @@ rg -Fq "RTP/RTCP fuzz corpus smoke passed" src/webrtc_rtp_rtcp_fuzz_test_main.uy
 rg -Fq "rtp_packet_parse" src/webrtc_rtp_rtcp_fuzz_test_main.uya
 rg -Fq "rtcp_sender_report_parse" src/webrtc_rtp_rtcp_fuzz_test_main.uya
 
-../uya/bin/uya run src/webrtc_rtp_rtcp_fuzz_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_rtcp_fuzz_test_main.uya
 python3 tests/test_rtp_parser.py
 bash tests/check_phase10_rtp.sh

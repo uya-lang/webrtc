@@ -98,10 +98,10 @@ if rg -n "@c_import|extern fn|extern \"|export extern" src/webrtc/media/direct_s
 	exit 1
 fi
 
-../uya/bin/uya run src/webrtc_dtls_identity_test_main.uya
-../uya/bin/uya run src/webrtc_dtls_server_test_main.uya
-../uya/bin/uya run src/webrtc_ffmpeg_direct_sender_session_test_main.uya
-../uya/bin/uya run src/webrtc_ffmpeg_direct_runtime_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_dtls_identity_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_dtls_server_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_sender_session_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_runtime_test_main.uya
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -114,7 +114,7 @@ cat >"$tmpdir/offer.json" <<'JSON'
 JSON
 printf '%s\n' 'ffmpeg encoded media placeholder' >"$tmpdir/media.webm"
 
-../uya/bin/uya run src/webrtc_ffmpeg_direct_sender_main.uya -- \
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_sender_main.uya -- \
 	--offer-json "$tmpdir/offer.json" \
 	--media "$tmpdir/media.webm" \
 	--answer-json "$tmpdir/answer.json" \
@@ -162,7 +162,7 @@ rg -Fq 'a=ice-lite' "$tmpdir/answer.json"
 rg -Fq 'a=setup:passive' "$tmpdir/answer.json"
 rg -Fq 'a=fingerprint:sha-256 31:48:5F:0F:03:87:1A:59:FA:D4:1E:90:E6:47:E4:30:88:68:E8:38:F6:7C:15:9F:3D:61:01:A1:51:8D:BE:29' "$tmpdir/answer.json"
 
-../uya/bin/uya run src/webrtc_ffmpeg_direct_sender_main.uya -- \
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_direct_sender_main.uya -- \
 	--offer-json "$tmpdir/offer.json" \
 	--media "$tmpdir/media.webm" \
 	--answer-json "$tmpdir/uya_answer.json" \

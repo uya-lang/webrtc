@@ -89,11 +89,11 @@ rg -q '"bench_rtcp_parse"' benchmarks/baselines/bench_rtp_rtcp_parse.jsonl
 
 python3 tests/test_rtp_parser.py
 python3 tests/rtp_bench_baseline.py
-../uya/bin/uya run src/webrtc_rtp_packet_test_main.uya
-../uya/bin/uya run src/webrtc_rtp_extension_test_main.uya
-../uya/bin/uya run src/webrtc_rtp_common_extensions_test_main.uya
-../uya/bin/uya run src/webrtc_rtp_sender_test_main.uya
-../uya/bin/uya run src/webrtc_rtp_receiver_route_test_main.uya
-../uya/bin/uya run src/webrtc_rtcp_packet_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_packet_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_extension_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_common_extensions_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_sender_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_receiver_route_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtcp_packet_test_main.uya
 
 echo "Phase 10 RTP/RTCP parser fixture checks passed"

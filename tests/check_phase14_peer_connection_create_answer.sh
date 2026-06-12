@@ -10,6 +10,6 @@ test -f src/webrtc_peer_connection_create_answer_test_main.uya
 rg -q "export fn peer_connection_create_answer" src/webrtc/peer_connection.uya
 rg -q -F "fn main() i32" src/webrtc_peer_connection_create_answer_test_main.uya
 
-../uya/bin/uya run src/webrtc_peer_connection_create_answer_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_peer_connection_create_answer_test_main.uya
 
 echo "Phase 14 PeerConnection create_answer checks passed"

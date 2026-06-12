@@ -35,7 +35,7 @@ rg -q "export fn rtp_frame_output_queue_push" src/webrtc/rtp/frame_queue.uya
 rg -q "export fn rtp_frame_output_queue_pop" src/webrtc/rtp/frame_queue.uya
 
 python3 tests/jitter_bench_baseline.py
-../uya/bin/uya run src/webrtc_rtp_jitter_test_main.uya
-../uya/bin/uya run src/webrtc_rtp_frame_queue_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_jitter_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_rtp_frame_queue_test_main.uya
 
 echo "Phase 12 jitter/NACK/PLI/RTX checks passed"

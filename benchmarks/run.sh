@@ -11,7 +11,7 @@ run_bench() {
     local source_file="$1"
     (
         cd "$repo_root"
-        ../uya/bin/uya run "$source_file"
+        "${UYA:-./uya/bin/uya}" run "$source_file"
     ) | rg '^\{' >> "$out_file"
 }
 

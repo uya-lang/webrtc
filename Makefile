@@ -6,7 +6,8 @@ BENCH_DIR := $(BUILD_DIR)/benchmarks
 BENCH_FILE := $(BENCH_DIR)/baseline.jsonl
 BENCH_RUNNER := benchmarks/run.sh
 VERSION := $(shell cat VERSION)
-UYA ?= $(abspath ../uya/bin/uya)
+UYA ?= ./uya/bin/uya
+UYA_ABS := $(abspath $(UYA))
 UYA_VP8_PREVIEW_MAX_WIDTH ?= 160
 UYA_VP8_PREVIEW_MAX_DURATION ?= 2
 UYA_VP8_PREVIEW_FPS ?= 0
@@ -51,7 +52,7 @@ $(BIN): Makefile VERSION src/main.uya src/webrtc/time.uya
 		printf '%s\n' '    printf "%s\n" "webrtc-uya $(VERSION)"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  dump-stats)'; \
-		printf '%s\n' '    exec "$${repo_root}/../uya/bin/uya" run "$${repo_root}/src/webrtc_dump_stats_main.uya"'; \
+		printf '%s\n' '    exec "$${repo_root}/uya/bin/uya" run "$${repo_root}/src/webrtc_dump_stats_main.uya"'; \
 		printf '%s\n' '    ;;'; \
 		printf '%s\n' '  *)'; \
 		printf '%s\n' '    printf "unknown command: %s\n" "$${1:-}" >&2'; \
@@ -240,8 +241,8 @@ test-codec-bridge:
 		printf '%s\n' "codec bridge tests skipped: sibling ../opus or ../vp8 repository missing"; \
 		exit 0; \
 	fi
-	env UYA="$(UYA)" $(MAKE) -C ../opus smoke
-	env UYA="$(UYA)" $(MAKE) -C ../vp8 build check-toolchain
+	env UYA="$(UYA_ABS)" $(MAKE) -C ../opus smoke
+	env UYA="$(UYA_ABS)" $(MAKE) -C ../vp8 build check-toolchain
 	bash tests/check_phase21_fixture_manifest.sh
 	bash tests/check_phase21_opus_bridge_api.sh
 	bash tests/check_phase21_vp8_bridge_api.sh

@@ -90,6 +90,6 @@ if [ -n "$non_codec_externs" ]; then
 	exit 1
 fi
 
-../uya/bin/uya run src/webrtc_ffmpeg_codec_boundary_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_ffmpeg_codec_boundary_test_main.uya
 
 echo "Phase 21 FFmpeg codec extern boundary checks passed"

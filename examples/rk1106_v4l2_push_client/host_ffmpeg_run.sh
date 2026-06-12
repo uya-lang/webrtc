@@ -4,7 +4,7 @@ set -eu
 EXAMPLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$EXAMPLE_DIR/../.." && pwd)
 
-UYA=${UYA:-"$REPO_ROOT/../uya/bin/uya"}
+UYA=${UYA:-"$REPO_ROOT/uya/bin/uya"}
 SENDER_MAIN=${SENDER_MAIN:-"$REPO_ROOT/src/webrtc_ffmpeg_direct_sender_main.uya"}
 VIDEO_DEV=${VIDEO_DEV:-/dev/video0}
 WIDTH=${WIDTH:-320}

@@ -39,6 +39,6 @@ rg -q "export fn pacer_bitrate_allocator_allocate" src/webrtc/congestion/pacer.u
 rg -q "audio_priority_weight" src/webrtc/congestion/pacer.uya
 rg -q "video_priority_weight" src/webrtc/congestion/pacer.uya
 
-../uya/bin/uya run src/webrtc_congestion_pacer_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_congestion_pacer_test_main.uya
 
 echo "Phase 15 pacer queue checks passed"

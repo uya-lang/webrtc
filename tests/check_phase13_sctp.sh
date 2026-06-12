@@ -142,14 +142,14 @@ assert fixture["valid_packets"][0]["name"] == "minimal_cookie_ack"
 assert fixture["invalid_packets"][0]["error"] == "SctpPacketTooSmall"
 PY
 
-../uya/bin/uya run src/webrtc_sctp_retransmit_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_packet_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_dcep_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_model_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_tsn_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_stream_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_api_test_main.uya
-../uya/bin/uya run src/webrtc_sctp_loopback_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_retransmit_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_packet_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_dcep_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_model_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_tsn_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_stream_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_api_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_sctp_loopback_test_main.uya
 python3 tests/datachannel_bench_baseline.py
 
 echo "Phase 13 SCTP parser checks passed"

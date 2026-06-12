@@ -16,6 +16,6 @@ rg -Fq "run_fuzz_corpus_smoke" tests/stun_vectors.py
 rg -Fq "STUN fuzz corpus smoke passed" src/webrtc_stun_fuzz_test_main.uya
 rg -Fq "stun_binding_request_validate_attribute" src/webrtc_stun_fuzz_test_main.uya
 
-../uya/bin/uya run src/webrtc_stun_fuzz_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_stun_fuzz_test_main.uya
 python3 tests/stun_vectors.py
 bash tests/check_phase4_stun.sh

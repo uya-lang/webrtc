@@ -12,6 +12,6 @@ rg -q "export fn rtc_peer_connection_stats_make" src/webrtc/stats/types.uya
 rg -q "export struct RtcTransportStats" src/webrtc/stats/types.uya
 rg -q "export struct RtcDataChannelStats" src/webrtc/stats/types.uya
 
-../uya/bin/uya run src/webrtc_stats_types_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_stats_types_test_main.uya
 
 echo "Phase 16 stats type checks passed"

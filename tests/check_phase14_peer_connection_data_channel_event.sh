@@ -14,6 +14,6 @@ rg -q "export fn peer_connection_data_channel_event_count" src/webrtc/peer_conne
 rg -q "export fn peer_connection_pop_data_channel_event" src/webrtc/peer_connection.uya
 rg -q -F "fn main() i32" src/webrtc_peer_connection_data_channel_event_test_main.uya
 
-../uya/bin/uya run src/webrtc_peer_connection_data_channel_event_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_peer_connection_data_channel_event_test_main.uya
 
 echo "Phase 14 DataChannel event checks passed"

@@ -117,7 +117,7 @@ start_turnserver() {
 bootstrap_coturn
 start_turnserver
 
-if ! timeout 20s ../uya/bin/uya run src/webrtc_turn_coturn_test_main.uya; then
+if ! timeout 20s "${UYA:-./uya/bin/uya}" run src/webrtc_turn_coturn_test_main.uya; then
     cat "$log_file" >&2
     exit 1
 fi

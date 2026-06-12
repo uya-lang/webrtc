@@ -11,6 +11,6 @@ rg -q "export fn rtc_ice_candidate_pair_stats_collect" src/webrtc/stats/collect.
 rg -q "export fn rtc_transport_stats_collect" src/webrtc/stats/collect.uya
 rg -q "export fn rtc_inbound_rtp_stream_stats_collect" src/webrtc/stats/collect.uya
 rg -q "export fn rtc_outbound_rtp_stream_stats_collect" src/webrtc/stats/collect.uya
-../uya/bin/uya run src/webrtc_stats_collect_test_main.uya
+"${UYA:-./uya/bin/uya}" run src/webrtc_stats_collect_test_main.uya
 
 echo "Phase 16 stats collect checks passed"

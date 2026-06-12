@@ -7,7 +7,7 @@ cd "$repo_root"
 run_turn_main_with_codegen_fallback() {
     local run_log
     run_log="$(mktemp)"
-    if ../uya/bin/uya run src/webrtc_turn_test_main.uya >"$run_log" 2>&1; then
+    if "${UYA:-./uya/bin/uya}" run src/webrtc_turn_test_main.uya >"$run_log" 2>&1; then
         rm -f "$run_log"
         return 0
     fi
@@ -23,7 +23,7 @@ run_turn_main_with_codegen_fallback() {
     tmp_bin="$(mktemp /tmp/webrtc-turn-test-bin-XXXXXX)"
     trap 'rm -f "$run_log" "$tmp_c" "$tmp_bin"' RETURN
 
-    if ! ../uya/bin/uya build src/webrtc_turn_test_main.uya --c99 -o "$tmp_c" >/dev/null 2>&1; then
+    if ! "${UYA:-./uya/bin/uya}" build src/webrtc_turn_test_main.uya --c99 -o "$tmp_c" >/dev/null 2>&1; then
         cat "$run_log" >&2
         return 1
     fi

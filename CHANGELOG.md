@@ -39,12 +39,13 @@ host FFmpeg Chrome call 的快速手工入口。
 
 2026-06-12 本地发布验证已通过：
 
+- `./uya/bin/uya --version` 输出 `v0.10.0`
 - `git diff --check`
 - `make build`
 - `build/webrtc-uya version`
-- `make test`
-- `make test-ffmpeg-chrome-call`
-- `timeout 15s make host-ffmpeg-chrome-call HOST_CALL_DURATION_US=3000000 HOST_CALL_PORT=0`
+- `UYA=./uya/bin/uya make test`
+- `UYA=./uya/bin/uya make test-ffmpeg-chrome-call`
+- `timeout 15s make host-ffmpeg-chrome-call UYA=./uya/bin/uya HOST_CALL_DURATION_US=3000000 HOST_CALL_PORT=0`
   启动 smoke，确认输出 `host ffmpeg chrome call serving: http://127.0.0.1:.../`
 
 ## v0.2.0 - 2026-06-11
