@@ -1,0 +1,22 @@
+use std.async;
+use std.http.websocket_async;
+use std.http.websocket_types;
+use std.testing.assert_eq_i32;
+
+fn ready_websocket_conn() Future<!WebSocketConn> {
+    return future_ready_ok<WebSocketConn>(websocket_conn_empty());
+}
+
+@async_fn
+fn await_ready_websocket_conn() Future<!i32> {
+    const conn: WebSocketConn = try @await ready_websocket_conn();
+    if !conn.closed {
+        return 1;
+    }
+    return 0;
+}
+
+test "async_future_websocket_conn_codegen_smoke" {
+    const out: !i32 = block_on<i32>(await_ready_websocket_conn());
+    try assert_eq_i32(0, try out);
+}

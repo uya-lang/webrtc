@@ -1,0 +1,40 @@
+use std.runtime.entry;
+use std.fmt.ast.FmtFile;
+use std.fmt.ast.Expr;
+use std.fmt.ast.ExprKind;
+use std.fmt.ast.Stmt;
+use std.fmt.ast.StmtKind;
+
+fn simplify_expr_ast(expr: &Expr) &Expr {
+    if expr.kind == ExprKind.EXPR_UNARY {
+        expr.unary.value = simplify_expr_ast(expr.unary.value);
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_BINARY {
+        expr.binary.left = simplify_expr_ast(expr.binary.left);
+        expr.binary.right = simplify_expr_ast(expr.binary.right);
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_CALL {
+        expr.call.callee = simplify_expr_ast(expr.call.callee);
+        return expr;
+    }
+    return expr;
+}
+
+export fn simplify_file(file: &FmtFile) void {
+    var di: usize = 0;
+    while di < file.decl_count {
+        var si: usize = 0;
+        while si < file.decls[di].fn_decl.body.stmt_count {
+            const stmt: &Stmt = &file.decls[di].fn_decl.body.stmts[si];
+            if stmt.kind == StmtKind.STMT_RETURN {
+                stmt.return_stmt.value = simplify_expr_ast(stmt.return_stmt.value);
+            }
+            si = si + 1;
+        }
+        di = di + 1;
+    }
+}
+
+fn main() i32 { return 0; }

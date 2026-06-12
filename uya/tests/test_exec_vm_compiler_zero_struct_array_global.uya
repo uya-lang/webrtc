@@ -1,0 +1,27 @@
+use std.runtime.entry;
+
+struct DirStateLike {
+    fd: i64,
+    dir_pos: i64,
+    buf: [byte: 8192],
+    buf_pos: usize,
+    buf_len: isize,
+}
+
+var zero_dir_states: [DirStateLike: 4] = [];
+
+export fn main() i32 {
+    if zero_dir_states[0].fd != 0 {
+        return 1;
+    }
+    if zero_dir_states[0].buf[0] != 0 as byte {
+        return 2;
+    }
+    if zero_dir_states[3].buf[8191] != 0 as byte {
+        return 3;
+    }
+    if zero_dir_states[3].buf_pos != 0 as usize {
+        return 4;
+    }
+    return 0;
+}

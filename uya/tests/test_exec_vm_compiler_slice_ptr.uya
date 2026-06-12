@@ -1,0 +1,43 @@
+use std.runtime.entry;
+use libc.strcmp;
+
+fn patch_middle(buf: &[byte]) void {
+    buf.ptr[1] = 111 as byte;
+}
+
+export fn main() i32 {
+    var raw: [byte: 4] = [];
+    raw[0] = 104 as byte;
+    raw[1] = 105 as byte;
+    raw[2] = 0;
+
+    const view: &[byte] = raw[0: 3];
+    patch_middle(view);
+
+    if raw[1] != 111 as byte {
+        return 1;
+    }
+    if view.ptr == null {
+        return 2;
+    }
+    if strcmp(view.ptr as *const byte, "ho" as *const byte) != 0 {
+        return 3;
+    }
+    if view.ptr[0] != 104 as byte || view.ptr[1] != 111 as byte {
+        return 4;
+    }
+
+    const tail: &[byte] = view[1: 2];
+    if tail.ptr == null {
+        return 5;
+    }
+    if strcmp(tail.ptr as *const byte, "o" as *const byte) != 0 {
+        return 6;
+    }
+    tail.ptr[0] = 97 as byte;
+    if raw[1] != 97 as byte {
+        return 7;
+    }
+
+    return 0;
+}

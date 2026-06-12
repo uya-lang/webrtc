@@ -1,0 +1,25 @@
+use std.runtime.entry;
+
+union Data {
+    number: i32,
+    flag: bool,
+}
+
+struct Boxed {
+    data: Data,
+}
+
+fn read_value(boxed: Boxed) i32 {
+    return match boxed.data {
+        .number(n) => n,
+        else => 0i32,
+    };
+}
+
+export fn main() i32 {
+    const boxed: Boxed = Boxed{ data: Data.number(9) };
+    if read_value(boxed) != 9 {
+        return 1;
+    }
+    return 0;
+}

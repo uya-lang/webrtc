@@ -1,0 +1,32 @@
+use std.runtime.entry;
+use std.async.Future;
+use std.http.types.Status;
+use std.http.uyagin.AsyncHandler;
+use std.http.uyagin.Engine;
+use std.http.uyagin.GinContext;
+use std.http.uyagin.uyagin_new;
+use std.string.strlen;
+
+fn literal_bytes(text: &const byte) &[byte] {
+    return (text as &byte)[0: strlen(text)];
+}
+
+struct TypedHandler : AsyncHandler {
+    @async_fn
+    fn handle(self: &Self, ctx: &GinContext) Future<!i32> {
+        return try @await ctx.string(Status.OK, "ok\n");
+    }
+}
+
+fn register_route(engine: &Engine, handler: &TypedHandler) !void {
+    try engine.GET_T<TypedHandler>(literal_bytes("/ok"), handler);
+}
+
+export fn main() i32 {
+    var engine: Engine = uyagin_new();
+    const handler: TypedHandler = TypedHandler{};
+    register_route(&engine, &handler) catch {
+        return 1;
+    };
+    return 0;
+}

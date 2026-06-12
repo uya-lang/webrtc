@@ -1,0 +1,107 @@
+use std.http.http2_frame;
+use std.http.http2_types;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+
+fn bytes_eq(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+    var i: usize = 0;
+    while i < a.len {
+        if a.ptr[i] != b.ptr[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+test "http2_frame_encode_parse_data" {
+    var payload: [byte: 6] = "hello";
+    var out: [byte: 64] = [];
+    const n: usize = try http2_encode_data_frame(1u32, true, payload[0: 5], &out[0], 64);
+    const view: Http2FrameView = try http2_parse_frame_from_buffer(&out[0], n);
+    try assert_eq_i32(Http2FrameType.Data as i32, view.frame_type as i32);
+    try assert_eq_i32(1, view.stream_id as i32);
+    try assert_true((view.flags & HTTP2_FLAG_END_STREAM) != 0);
+    if !bytes_eq(view.payload_ptr[0: view.payload_len], payload[0: 5]) {
+        try assert_eq_i32(0, 1);
+    }
+}
+
+test "http2_frame_parse_settings_and_window_update" {
+    var settings: [Http2Setting: 2] = [
+        Http2Setting{ id: HTTP2_SETTINGS_HEADER_TABLE_SIZE, value: 4096u32 },
+        Http2Setting{ id: HTTP2_SETTINGS_INITIAL_WINDOW_SIZE, value: 65535u32 },
+    ];
+    var out: [byte: 64] = [];
+    const n: usize = try http2_encode_settings_frame(settings[0: 2], false, &out[0], 64);
+    const view: Http2FrameView = try http2_parse_frame_from_buffer(&out[0], n);
+    try assert_eq_i32(Http2FrameType.Settings as i32, view.frame_type as i32);
+    try assert_eq_i32(0, view.stream_id as i32);
+    var parsed: [Http2Setting: 4] = [Http2Setting{}: 4];
+    const count: i32 = try http2_parse_settings_frame(&view, &parsed[0], 4);
+    try assert_eq_i32(2, count);
+    try assert_eq_i32(HTTP2_SETTINGS_HEADER_TABLE_SIZE as i32, parsed[0].id as i32);
+    try assert_eq_i32(4096, parsed[0].value as i32);
+    try assert_eq_i32(HTTP2_SETTINGS_INITIAL_WINDOW_SIZE as i32, parsed[1].id as i32);
+    try assert_eq_i32(65535, parsed[1].value as i32);
+
+    var win_out: [byte: 16] = [];
+    const win_n: usize = try http2_encode_window_update_frame(3u32, 1024u32, &win_out[0], 16);
+    const win_view: Http2FrameView = try http2_parse_frame_from_buffer(&win_out[0], win_n);
+    const increment: u32 = try http2_parse_window_update_frame(&win_view);
+    try assert_eq_i32(Http2FrameType.WindowUpdate as i32, win_view.frame_type as i32);
+    try assert_eq_i32(3, win_view.stream_id as i32);
+    try assert_eq_i32(1024, increment as i32);
+}
+
+test "http2_frame_parse_headers_priority_and_padding" {
+    var raw: [byte: 64] = [];
+    const flags: byte = HTTP2_FLAG_END_STREAM | HTTP2_FLAG_END_HEADERS | HTTP2_FLAG_PADDED | HTTP2_FLAG_PRIORITY;
+    const header_len: usize = try http2_encode_frame_header(10, Http2FrameType.Headers, flags, 1u32, &raw[0], 64);
+    raw[header_len] = 2 as byte;
+    raw[header_len + 1] = 0x80 as byte;
+    raw[header_len + 2] = 0 as byte;
+    raw[header_len + 3] = 0 as byte;
+    raw[header_len + 4] = 3 as byte;
+    raw[header_len + 5] = 15 as byte;
+    raw[header_len + 6] = 0x82 as byte;
+    raw[header_len + 7] = 0x84 as byte;
+    raw[header_len + 8] = 0 as byte;
+    raw[header_len + 9] = 0 as byte;
+    const total: usize = header_len + 10;
+    const view: Http2FrameView = try http2_parse_frame_from_buffer(&raw[0], total);
+    const headers: Http2HeadersFrameView = try http2_parse_headers_frame(&view);
+    var expected: [byte: 2] = [0x82, 0x84];
+    try assert_true(headers.end_stream);
+    try assert_true(headers.end_headers);
+    try assert_true(headers.priority_present);
+    try assert_true(headers.exclusive);
+    try assert_eq_i32(3, headers.stream_dependency as i32);
+    try assert_eq_i32(15, headers.weight as i32);
+    try assert_eq_i32(2, headers.pad_len as i32);
+    try assert_eq_i32(2, headers.header_block_len as i32);
+    if !bytes_eq(headers.header_block_ptr[0: headers.header_block_len], expected[0: 2]) {
+        try assert_eq_i32(0, 1);
+    }
+}
+
+test "http2_frame_rejects_bad_settings_ack_payload" {
+    var raw: [byte: 32] = [];
+    const header_len: usize = try http2_encode_frame_header(6, Http2FrameType.Settings, HTTP2_FLAG_ACK, 0u32, &raw[0], 32);
+    raw[header_len] = 0 as byte;
+    raw[header_len + 1] = 1 as byte;
+    raw[header_len + 2] = 0 as byte;
+    raw[header_len + 3] = 0 as byte;
+    raw[header_len + 4] = 0 as byte;
+    raw[header_len + 5] = 1 as byte;
+    const view: Http2FrameView = try http2_parse_frame_from_buffer(&raw[0], header_len + 6);
+    var parsed: [Http2Setting: 1] = [Http2Setting{}];
+    const result: !i32 = http2_parse_settings_frame(&view, &parsed[0], 1);
+    match result {
+        error.Http2InvalidFrameSize => {}
+        else => { try assert_eq_i32(0, 1); }
+    }
+}

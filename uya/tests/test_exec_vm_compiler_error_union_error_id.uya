@@ -1,0 +1,15 @@
+use std.runtime.entry;
+use libc.sys_rename;
+
+/// 测试 error union `.error_id` 成员读取可直接走 exec lowering。
+/// 参数：无。
+/// 返回值：0 表示成功，非 0 表示失败。
+export fn main() i32 {
+    const old_path: *byte = "/tmp/uya_exec_vm_error_id_missing_old";
+    const new_path: *byte = "/tmp/uya_exec_vm_error_id_missing_new";
+    const result: !i32 = sys_rename(old_path, new_path);
+    if result.error_id == 0u32 {
+        return 1;
+    }
+    return 0;
+}

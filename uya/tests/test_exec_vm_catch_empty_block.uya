@@ -1,0 +1,16 @@
+use std.runtime.entry;
+
+error CatchEmptyBlockError;
+
+fn maybe_empty_catch(flag: bool) !i32 {
+    if flag {
+        return error.CatchEmptyBlockError;
+    }
+    return 17;
+}
+
+export fn main() i32 {
+    _ = maybe_empty_catch(false) catch {};
+    _ = maybe_empty_catch(true) catch {};
+    return 0;
+}

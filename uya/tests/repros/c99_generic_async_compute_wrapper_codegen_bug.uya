@@ -1,0 +1,29 @@
+use std.async.Future;
+use std.thread.ThreadPool;
+use std.thread.async_compute;
+use std.thread.thread_pool_new;
+
+export struct WorkerPool {
+    inner: ThreadPool
+}
+
+export fn worker_pool_new(worker_count: i32) WorkerPool {
+    return WorkerPool{
+        inner: thread_pool_new(worker_count),
+    };
+}
+
+export fn worker_pool_async_compute<T>(pool: &WorkerPool, compute_fn: &void, arg: T) Future<!T> {
+    return async_compute<T>(&pool.inner, compute_fn, arg);
+}
+
+fn double_i32(value: i32) i32 {
+    return value * 2;
+}
+
+export fn main() i32 {
+    var pool: WorkerPool = worker_pool_new(2);
+    const future: Future<!i32> = worker_pool_async_compute<i32>(&pool, &double_i32 as &void, 21);
+    _ = future;
+    return 0;
+}

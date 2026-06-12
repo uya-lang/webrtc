@@ -1,0 +1,4 @@
+export fn main() i32 {
+    const n: usize = @size_of(u64);
+    return n as i32;
+}

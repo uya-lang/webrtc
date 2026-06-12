@@ -1,0 +1,19 @@
+use std.runtime.entry;
+use std.exec_test.runtime_atomic_global.set_flag;
+use std.exec_test.runtime_atomic_global.flag_equals;
+use std.exec_test.runtime_atomic_global.touch_flag_ptr;
+
+export fn main() i32 {
+    set_flag(5);
+    if !flag_equals(5) {
+        return 1;
+    }
+    if touch_flag_ptr() != 0 {
+        return 2;
+    }
+    set_flag(0);
+    if !flag_equals(0) {
+        return 3;
+    }
+    return 0;
+}

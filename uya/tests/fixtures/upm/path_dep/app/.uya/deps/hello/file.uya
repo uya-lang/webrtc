@@ -1,0 +1,3 @@
+export fn message_text() &byte {
+    return "path-dep-ok" as &byte;
+}

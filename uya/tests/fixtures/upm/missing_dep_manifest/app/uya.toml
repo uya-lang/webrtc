@@ -1,0 +1,7 @@
+[package]
+name = "missing_dep_manifest_app"
+version = "0.1.0"
+source-dir = "src"
+
+[dependencies]
+broken = { path = "../broken_pkg" }

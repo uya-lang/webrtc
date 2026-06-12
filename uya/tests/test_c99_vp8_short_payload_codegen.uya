@@ -1,0 +1,55 @@
+use std.testing.assert_eq_i32;
+
+error LocalVp8DescriptorTooShort;
+error LocalVp8FrameStartRequired;
+error LocalVp8PayloadTooShort;
+
+struct LocalVp8Descriptor {
+    start_of_partition: bool = false,
+    payload: &[byte] = [],
+}
+
+fn local_vp8_descriptor_parse(packet: &[byte]) !LocalVp8Descriptor {
+    if packet.len < 1usize {
+        return error.LocalVp8DescriptorTooShort;
+    }
+
+    var descriptor: LocalVp8Descriptor = LocalVp8Descriptor{};
+    const first: u8 = packet[0] as u8;
+    descriptor.start_of_partition = (first & 0x10u8) != 0u8;
+    descriptor.payload = packet[1:packet.len - 1usize];
+    return descriptor;
+}
+
+fn local_vp8_payload_is_keyframe(payload: &[byte]) !bool {
+    if payload.len < 1usize {
+        return error.LocalVp8PayloadTooShort;
+    }
+    return ((payload[0] as u8) & 0x01u8) == 0u8;
+}
+
+fn local_vp8_packet_is_keyframe(packet: &[byte]) !bool {
+    const descriptor: LocalVp8Descriptor = try local_vp8_descriptor_parse(packet);
+    if !descriptor.start_of_partition {
+        return error.LocalVp8FrameStartRequired;
+    }
+    const is_keyframe: bool = try local_vp8_payload_is_keyframe(descriptor.payload);
+    return is_keyframe;
+}
+
+test "vp8 style short payload error union bool codegen" {
+    var short_packet: [byte: 1] = [0x10 as byte];
+    const short_check: !bool = local_vp8_packet_is_keyframe(short_packet[0:1]);
+    var matched: i32 = 0;
+    if short_check.error_id == @error_id(error.LocalVp8PayloadTooShort) {
+        matched = 1;
+    }
+    try assert_eq_i32(matched, 1);
+
+    var keyframe_packet: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const keyframe_check: !bool = local_vp8_packet_is_keyframe(keyframe_packet[0:2]);
+    if keyframe_check.error_id == 0 && keyframe_check.value {
+        matched = 2;
+    }
+    try assert_eq_i32(matched, 2);
+}

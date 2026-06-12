@@ -1,0 +1,24 @@
+use std.runtime.entry;
+
+struct Pair {
+    left: i32,
+    right: i32,
+}
+
+export fn main() i32 {
+    var pairs: [Pair: 3] = [Pair { left: 1, right: 2 }: 3];
+    if pairs[0].left != 1 || pairs[2].right != 2 {
+        return 1;
+    }
+    pairs[1].left = 9;
+    if pairs[0].left != 1 {
+        return 2;
+    }
+    if pairs[1].left != 9 {
+        return 3;
+    }
+    if pairs[2].left != 1 {
+        return 4;
+    }
+    return 0;
+}

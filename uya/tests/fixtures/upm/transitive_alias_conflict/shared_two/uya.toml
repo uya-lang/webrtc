@@ -1,0 +1,4 @@
+[package]
+name = "shared_two"
+version = "0.1.0"
+source-dir = "src"

@@ -1,0 +1,104 @@
+// test_crypto_blake3.uya — BLAKE3 官方 reference vectors
+
+use std.crypto.blake3;
+use std.testing.assert_eq_i32;
+
+fn hex_eq(digest: &[byte], expect_ascii: &[byte]) bool {
+    const hex: &[byte] = &"0123456789abcdef"[0: 16];
+    if expect_ascii.len != digest.len * 2 {
+        return false;
+    }
+    var i: usize = 0;
+    while i < digest.len {
+        const hi: usize = (digest.ptr[i] >> 4) as usize;
+        const lo: usize = (digest.ptr[i] & 15) as usize;
+        if expect_ascii.ptr[i * 2] != hex.ptr[hi] {
+            return false;
+        }
+        if expect_ascii.ptr[i * 2 + 1] != hex.ptr[lo] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn fill_vector_input(out: &[byte]) void {
+    var current: byte = 0 as byte;
+    var i: usize = 0;
+    while i < out.len {
+        out.ptr[i] = current;
+        current = current + 1;
+        if current == 251 as byte {
+            current = 0 as byte;
+        }
+        i = i + 1;
+    }
+}
+
+fn assert_vector(len: usize, expect_ascii: &[byte]) !void {
+    var data: [byte: 2048] = [];
+    fill_vector_input(data[0: 2048]);
+    var digest: [byte: 32] = [];
+    blake3_digest(data[0: len], digest[0: 32]);
+    if !hex_eq(digest[0: 32], expect_ascii) {
+        try assert_eq_i32(0, 1);
+    }
+}
+
+test "blake3_empty" {
+    const exp: &[byte] = &"af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"[0: 64];
+    try assert_vector(0usize, exp);
+}
+
+test "blake3_one_byte" {
+    const exp: &[byte] = &"2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"[0: 64];
+    try assert_vector(1usize, exp);
+}
+
+test "blake3_63_bytes" {
+    const exp: &[byte] = &"e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b"[0: 64];
+    try assert_vector(63usize, exp);
+}
+
+test "blake3_64_bytes" {
+    const exp: &[byte] = &"4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98"[0: 64];
+    try assert_vector(64usize, exp);
+}
+
+test "blake3_1023_bytes" {
+    const exp: &[byte] = &"10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11"[0: 64];
+    try assert_vector(1023usize, exp);
+}
+
+test "blake3_1024_bytes" {
+    const exp: &[byte] = &"42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7"[0: 64];
+    try assert_vector(1024usize, exp);
+}
+
+test "blake3_1025_bytes" {
+    const exp: &[byte] = &"d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"[0: 64];
+    try assert_vector(1025usize, exp);
+}
+
+test "blake3_2048_bytes" {
+    const exp: &[byte] = &"e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a"[0: 64];
+    try assert_vector(2048usize, exp);
+}
+
+test "blake3_short_buffer_no_write" {
+    var buf: [byte: 48] = [];
+    var i: usize = 0;
+    while i < 48usize {
+        buf[i] = 0xab as byte;
+        i = i + 1;
+    }
+    blake3_digest(&"abc"[0: 3], buf[0: 31]);
+    var j: usize = 0;
+    while j < 48usize {
+        if buf[j] != (0xab as byte) {
+            try assert_eq_i32(0, 1);
+        }
+        j = j + 1;
+    }
+}

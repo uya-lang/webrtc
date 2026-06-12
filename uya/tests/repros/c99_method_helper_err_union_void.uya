@@ -1,0 +1,21 @@
+fn helper_ok() !void {
+    return;
+}
+
+export struct Runner {}
+
+Runner {
+    fn run(self: &Self) !void {
+        _ = self;
+        try helper_ok();
+        return;
+    }
+}
+
+export fn main() i32 {
+    var runner: Runner = Runner{};
+    runner.run() catch {
+        return 1;
+    };
+    return 0;
+}

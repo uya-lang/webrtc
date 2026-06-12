@@ -1,0 +1,42 @@
+use std.runtime.entry;
+
+error ConvertFailed;
+
+fn pass_u32() !u32 {
+    return 5u32;
+}
+
+fn fail_u32() !u32 {
+    return error.ConvertFailed;
+}
+
+fn convert_ok() !u32 {
+    const out: !u32 = pass_u32();
+    return out catch {
+        return 7u32;
+    };
+}
+
+fn convert_fail() !u32 {
+    const out: !u32 = fail_u32();
+    return out catch {
+        return 7u32;
+    };
+}
+
+export fn main() i32 {
+    const ok: u32 = convert_ok() catch {
+        return 1;
+    };
+    if ok != 5u32 {
+        return 2;
+    }
+
+    const fallback: u32 = convert_fail() catch {
+        return 3;
+    };
+    if fallback != 7u32 {
+        return 4;
+    }
+    return 0;
+}

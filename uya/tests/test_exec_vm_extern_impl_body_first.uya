@@ -1,0 +1,23 @@
+use std.runtime.entry;
+use libc.puts;
+use libc.atoll;
+use libc.llabs;
+
+export fn main() i32 {
+    const puts_rc: i32 = puts("test_exec_vm_extern_impl_body_first.uya" as &const byte);
+    if puts_rc < 0 {
+        return 1;
+    }
+
+    const parsed_i64: i64 = atoll("5000000000");
+    if parsed_i64 != 5000000000i64 {
+        return 2;
+    }
+
+    const abs_val: i64 = llabs(-987654321i64);
+    if abs_val != 987654321i64 {
+        return 3;
+    }
+
+    return 0;
+}

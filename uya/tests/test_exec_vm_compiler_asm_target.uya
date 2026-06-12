@@ -1,0 +1,12 @@
+use std.runtime.entry;
+
+export fn main() i32 {
+    const platform_tmp: !i32 = @asm_target() as! i32;
+    const platform: i32 = platform_tmp catch {
+        return 1;
+    };
+    if platform < 0 || platform > 6 {
+        return 2;
+    }
+    return 0;
+}

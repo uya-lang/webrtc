@@ -1,0 +1,43 @@
+use std.runtime.entry;
+use libc.getpid;
+use libc.getppid;
+use libc.getcwd;
+use libc.access;
+use libc.mkdir;
+use libc.rmdir;
+use libc.PATH_MAX;
+use libc.F_OK;
+
+export fn main() i32 {
+    if getpid() <= 0 {
+        return 1;
+    }
+    if getppid() <= 0 {
+        return 2;
+    }
+
+    var cwd_buf: [byte: 4096] = [];
+    const cwd: &byte = getcwd(&cwd_buf[0] as &byte, PATH_MAX);
+    if cwd == null as &byte {
+        return 3;
+    }
+    if cwd[0] != ('/' as byte) {
+        return 4;
+    }
+
+    const path: &const byte = "/tmp/uya_exec_vm_stdlib_unistd" as &const byte;
+    _ = rmdir(path);
+
+    if mkdir(path, 0o755) != 0 {
+        return 5;
+    }
+    if access(path, F_OK) != 0 {
+        _ = rmdir(path);
+        return 6;
+    }
+    if rmdir(path) != 0 {
+        return 7;
+    }
+
+    return 0;
+}

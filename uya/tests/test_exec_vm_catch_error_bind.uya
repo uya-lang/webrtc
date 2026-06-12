@@ -1,0 +1,24 @@
+use std.runtime.entry;
+
+error Boom;
+
+fn fail_value() !i32 {
+    return error.Boom;
+}
+
+fn recover() i32 {
+    const value: i32 = fail_value() catch |err| {
+        if @error_id(err) <= 0 {
+            return 11;
+        }
+        return 7;
+    };
+    return value;
+}
+
+export fn main() i32 {
+    if recover() != 7 {
+        return 1;
+    }
+    return 0;
+}

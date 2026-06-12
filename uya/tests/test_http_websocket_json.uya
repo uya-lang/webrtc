@@ -1,0 +1,162 @@
+use std.async;
+use std.http.server;
+use std.http.websocket_async;
+use std.http.websocket_json;
+use std.http.websocket_types;
+use std.json.value.JsonStrView;
+use std.json.value.JsonValue;
+use std.json.encoder.json_expect_i64;
+use std.json.encoder.json_expect_str;
+use std.json.encoder.json_object_find_index;
+use std.mem.arena.Arena;
+use std.mem.arena.arena_init;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+
+struct JsonUser {
+    id: i64,
+    name: JsonStrView,
+}
+
+fn bytes_eq_raw(a: &byte, b: &byte, n: usize) bool {
+    var i: usize = 0;
+    while i < n {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn new_opts() WebSocketAcceptOptions {
+    return websocket_accept_options_default();
+}
+
+fn make_pair(client_out: &WebSocketConn, server_out: &WebSocketConn) !void {
+    const cfg: ServerConfig = ServerConfig{
+        mode: ServerMode.Blocking,
+        max_connections: 128,
+        port: 0,
+        host: [],
+    };
+    var srv: HttpServer = try http_server_listen(&cfg);
+    errdefer { http_server_close(&srv); }
+    const client_fd: i32 = try http_tcp_connect_loopback(srv.port);
+    var accepted: Conn = try http_server_accept(&srv);
+    http_server_close(&srv);
+    const server_fd: i32 = accepted.fd;
+    accepted.fd = -1;
+
+    var client_io: WebSocketFdTransport = websocket_fd_transport_owned(client_fd);
+    var server_io: WebSocketFdTransport = websocket_fd_transport_owned(server_fd);
+    const opts: WebSocketAcceptOptions = new_opts();
+    client_out[0] = websocket_conn_new(&client_io, WebSocketRole.Client, &opts);
+    server_out[0] = websocket_conn_new(&server_io, WebSocketRole.Server, &opts);
+}
+
+fn run_with_loop_usize(f: Future<!usize>) !usize {
+    const result: !usize = block_on<usize>(f);
+    return try result;
+}
+
+test "websocket_json_struct_roundtrip_as_text_message" {
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair(&client, &server);
+
+    var arena_buf: [byte: 262144] = [];
+    var arena: Arena = Arena{ buffer: null, size: 0, used: 0 };
+    arena_init(&arena, &arena_buf[0], 262144);
+
+    var name_buf: [byte: 3] = [97, 98, 99];
+    const user: JsonUser = JsonUser{
+        id: 42,
+        name: JsonStrView{ ptr: &name_buf[0], len: 3 },
+    };
+    var tx: [byte: 256] = [];
+    var rx: [byte: 256] = [];
+    var msg: [byte: 256] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+
+    _ = try run_with_loop_usize(websocket_conn_write_json<JsonUser>(&client, &arena, user, &tx[0], 256));
+    const msg_len: usize = try run_with_loop_usize(websocket_conn_read_message(&server, &rx[0], 256, &msg[0], 256, &opcode));
+    const decoded_result: !JsonValue = websocket_json_decode_value(&arena, opcode, &msg[0], msg_len);
+    if decoded_result.error_id != 0u32 {
+        try assert_eq_i32(903, 0);
+        return;
+    }
+    const decoded: JsonValue = decoded_result.value;
+    match decoded {
+        .obj(o) => {
+            var id_key: [byte: 2] = [105, 100];
+            var name_key: [byte: 4] = [110, 97, 109, 101];
+            const id_idx: usize = json_object_find_index(&o, &id_key[0], 2) catch {
+                try assert_eq_i32(904, 0);
+                return;
+            };
+            const name_idx: usize = json_object_find_index(&o, &name_key[0], 4) catch {
+                try assert_eq_i32(905, 0);
+                return;
+            };
+            const id_val: i64 = json_expect_i64(&o.pairs[id_idx].value) catch {
+                try assert_eq_i32(906, 0);
+                return;
+            };
+            const name_val: JsonStrView = json_expect_str(&o.pairs[name_idx].value) catch {
+                try assert_eq_i32(907, 0);
+                return;
+            };
+            try assert_eq_i32(42, id_val as i32);
+            try assert_eq_i32(3, name_val.len as i32);
+            try assert_true(bytes_eq_raw(name_val.ptr, &name_buf[0], 3));
+        },
+        else => { try assert_eq_i32(908, 0); },
+    }
+}
+
+test "websocket_json_decode_requires_text_opcode" {
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair(&client, &server);
+
+    var arena_buf: [byte: 131072] = [];
+    var arena: Arena = Arena{ buffer: null, size: 0, used: 0 };
+    arena_init(&arena, &arena_buf[0], 131072);
+
+    var payload: [byte: 2] = [123, 125];
+    var tx: [byte: 128] = [];
+    var rx: [byte: 128] = [];
+    var msg: [byte: 128] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+
+    _ = try run_with_loop_usize(websocket_conn_write_message(&client, WebSocketOpcode.Binary, &payload[0], 2, &tx[0], 128));
+    const msg_len: usize = try run_with_loop_usize(websocket_conn_read_message(&server, &rx[0], 128, &msg[0], 128, &opcode));
+    const result: !JsonValue = websocket_json_decode_value(&arena, opcode, &msg[0], msg_len);
+    if result.error_id == 0u32 {
+        try assert_eq_i32(901, 0);
+    }
+}
+
+test "websocket_json_decode_invalid_json_returns_error" {
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair(&client, &server);
+
+    var arena_buf: [byte: 131072] = [];
+    var arena: Arena = Arena{ buffer: null, size: 0, used: 0 };
+    arena_init(&arena, &arena_buf[0], 131072);
+
+    var invalid_json: [byte: 10] = [123, 34, 105, 100, 34, 58, 52, 50, 44, 125];
+    var tx: [byte: 128] = [];
+    var rx: [byte: 128] = [];
+    var msg: [byte: 128] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+
+    _ = try run_with_loop_usize(websocket_conn_write_message(&client, WebSocketOpcode.Text, &invalid_json[0], 10, &tx[0], 128));
+    const msg_len: usize = try run_with_loop_usize(websocket_conn_read_message(&server, &rx[0], 128, &msg[0], 128, &opcode));
+    const result: !JsonValue = websocket_json_decode_value(&arena, opcode, &msg[0], msg_len);
+    if result.error_id == 0u32 {
+        try assert_eq_i32(902, 0);
+    }
+}

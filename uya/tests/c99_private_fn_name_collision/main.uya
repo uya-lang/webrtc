@@ -1,0 +1,8 @@
+use std.testing.assert_eq_i32;
+use moda;
+use modb;
+
+test "private functions are scoped by source file in C99" {
+    try assert_eq_i32(moda_value(), 1);
+    try assert_eq_i32(modb_value(), 2);
+}

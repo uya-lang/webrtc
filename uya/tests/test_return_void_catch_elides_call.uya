@@ -1,0 +1,26 @@
+use std.runtime.entry;
+
+export var CALLED: bool = false;
+
+error WrapperFailed;
+
+fn mark_called() !void {
+    CALLED = true;
+    return;
+}
+
+fn wrapper() !void {
+    return mark_called() catch {
+        return error.WrapperFailed;
+    };
+}
+
+export fn main() i32 {
+    wrapper() catch {
+        return 1;
+    };
+    if !CALLED {
+        return 2;
+    }
+    return 0;
+}

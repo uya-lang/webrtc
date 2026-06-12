@@ -1,0 +1,102 @@
+use std.http.hpack;
+use std.testing.assert_eq_i32;
+
+fn bytes_eq(a: &[byte], b: &[byte]) bool {
+    if a.len != b.len {
+        return false;
+    }
+    var i: usize = 0;
+    while i < a.len {
+        if a.ptr[i] != b.ptr[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn field_eq(field: &HpackHeaderField, name: &[byte], value: &[byte]) bool {
+    if !bytes_eq(field.name[0: field.name_len], name) {
+        return false;
+    }
+    if !bytes_eq(field.value[0: field.value_len], value) {
+        return false;
+    }
+    return true;
+}
+
+test "hpack_integer_and_string_roundtrip" {
+    var int_buf: [byte: 16] = [];
+    const n: usize = try hpack_encode_integer(5, 0x20 as byte, 1337usize, &int_buf[0], 16);
+    var decoded: usize = 0;
+    const consumed: usize = try hpack_decode_integer(5, &int_buf[0], n, &decoded);
+    try assert_eq_i32(n as i32, consumed as i32);
+    try assert_eq_i32(1337, decoded as i32);
+
+    var encoded: [byte: 32] = [];
+    const str_n: usize = try hpack_encode_string(&"custom"[0: 6], false, &encoded[0], 32);
+    var decoded_buf: [byte: 32] = [];
+    var decoded_len: usize = 0;
+    const str_consumed: usize = try hpack_decode_string(&encoded[0], str_n, &decoded_buf[0], 32, &decoded_len);
+    try assert_eq_i32(str_n as i32, str_consumed as i32);
+    try assert_eq_i32(6, decoded_len as i32);
+    if !bytes_eq(decoded_buf[0: decoded_len], &"custom"[0: 6]) {
+        try assert_eq_i32(0, 1);
+    }
+}
+
+test "hpack_decode_static_indexed_and_literal_without_indexing" {
+    var table: HpackDynamicTable = HpackDynamicTable{};
+    hpack_dynamic_table_init(&table, 4096);
+    var block: [byte: 128] = [];
+    var pos: usize = 0;
+    pos = pos + (try hpack_encode_indexed_field(2usize, &block[pos], 128 - pos));
+    pos = pos + (try hpack_encode_literal_header_without_indexing_indexed_name(31usize, &"text/plain"[0: 10], &block[pos], 128 - pos));
+    var fields: [HpackHeaderField: 4] = [HpackHeaderField{}: 4];
+    const count: i32 = try hpack_decode_block(&table, &block[0], pos, &fields[0], 4);
+    try assert_eq_i32(2, count);
+    if !field_eq(&fields[0], &":method"[0: 7], &"GET"[0: 3]) {
+        try assert_eq_i32(0, 1);
+    }
+    if !field_eq(&fields[1], &"content-type"[0: 12], &"text/plain"[0: 10]) {
+        try assert_eq_i32(0, 1);
+    }
+    try assert_eq_i32(0, table.entry_count);
+}
+
+test "hpack_incremental_indexing_populates_dynamic_table" {
+    var table: HpackDynamicTable = HpackDynamicTable{};
+    hpack_dynamic_table_init(&table, 4096);
+    var block: [byte: 128] = [];
+    const block_len: usize = try hpack_encode_literal_header_incremental(&"custom-key"[0: 10], &"custom-value"[0: 12], &block[0], 128);
+    var fields: [HpackHeaderField: 2] = [HpackHeaderField{}: 2];
+    const count: i32 = try hpack_decode_block(&table, &block[0], block_len, &fields[0], 2);
+    try assert_eq_i32(1, count);
+    try assert_eq_i32(1, table.entry_count);
+    if !field_eq(&fields[0], &"custom-key"[0: 10], &"custom-value"[0: 12]) {
+        try assert_eq_i32(0, 1);
+    }
+
+    var block2: [byte: 8] = [];
+    const block2_len: usize = try hpack_encode_indexed_field(62usize, &block2[0], 8);
+    var fields2: [HpackHeaderField: 2] = [HpackHeaderField{}: 2];
+    const count2: i32 = try hpack_decode_block(&table, &block2[0], block2_len, &fields2[0], 2);
+    try assert_eq_i32(1, count2);
+    if !field_eq(&fields2[0], &"custom-key"[0: 10], &"custom-value"[0: 12]) {
+        try assert_eq_i32(0, 1);
+    }
+}
+
+test "hpack_dynamic_table_size_update_evicts_large_entries" {
+    var table: HpackDynamicTable = HpackDynamicTable{};
+    hpack_dynamic_table_init(&table, 4096);
+    var block: [byte: 128] = [];
+    var pos: usize = 0;
+    pos = pos + (try hpack_encode_dynamic_table_size_update(48usize, &block[pos], 128 - pos));
+    pos = pos + (try hpack_encode_literal_header_incremental(&"custom-key"[0: 10], &"custom-value"[0: 12], &block[pos], 128 - pos));
+    var fields: [HpackHeaderField: 2] = [HpackHeaderField{}: 2];
+    const count: i32 = try hpack_decode_block(&table, &block[0], pos, &fields[0], 2);
+    try assert_eq_i32(1, count);
+    try assert_eq_i32(48, table.max_size as i32);
+    try assert_eq_i32(0, table.entry_count);
+}

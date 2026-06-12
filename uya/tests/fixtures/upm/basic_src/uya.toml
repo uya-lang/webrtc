@@ -1,0 +1,4 @@
+[package]
+name = "basic_src"
+version = "0.1.0"
+source-dir = "src"

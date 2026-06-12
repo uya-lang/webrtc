@@ -1,0 +1,31 @@
+use std.async;
+use std.testing.assert_eq_i32;
+
+fn descriptor_ready(v: i32) Future<!i32> {
+    const p: Poll<!i32> = Poll<!i32>.Ready(ok<i32>(v));
+    return Future<!i32>{ state: p };
+}
+
+@async_fn
+fn descriptor_child() Future<!i32> {
+    return 4;
+}
+
+@async_fn
+fn descriptor_parent() Future<!i32> {
+    const a: i32 = try @await descriptor_ready(3);
+    const b: i32 = try @await descriptor_child();
+    return a + b;
+}
+
+test "c99 async frame descriptors compile and poll" {
+    const f: Future<!i32> = descriptor_parent();
+    const w: Waker = Waker{};
+    const p: Poll<!i32> = f.poll(&w);
+    var result: i32 = 0 - 1;
+    match p {
+        .Ready(ok_val) => { result = ok_val catch { 0 - 2; }; },
+        .Pending(_) => { result = 0 - 3; },
+    };
+    try assert_eq_i32(result, 7);
+}

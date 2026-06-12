@@ -1,0 +1,23 @@
+use std.testing.assert_eq_i32;
+
+error ExternBareCatchFailed;
+
+fn extern_bare_catch_value(flag: bool) !i32 {
+    if flag {
+        return error.ExternBareCatchFailed;
+    }
+    return 7;
+}
+
+export extern "libc" fn extern_bare_catch_statement_result(flag: bool) i32 {
+    const result: !i32 = extern_bare_catch_value(flag);
+    result catch {
+        return 1;
+    };
+    return 0;
+}
+
+test "extern function body accepts bare catch statement" {
+    const value: i32 = extern_bare_catch_statement_result(true);
+    try assert_eq_i32(value, 1);
+}

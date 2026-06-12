@@ -1,0 +1,32 @@
+use std.runtime.entry;
+
+struct FileLike {
+    fd: i64,
+    buffer: [byte: 65536],
+    buf_pos: usize,
+    buf_len: usize,
+    buf_mode: i32,
+}
+
+var stdout_like: FileLike = FileLike {
+    fd: 1,
+    buf_pos: 0,
+    buf_len: 0,
+    buf_mode: 1,
+};
+
+export fn main() i32 {
+    if stdout_like.fd != 1 {
+        return 1;
+    }
+    if stdout_like.buf_mode != 1 {
+        return 2;
+    }
+    if stdout_like.buffer[0] != 0 as byte {
+        return 3;
+    }
+    if stdout_like.buffer[65535] != 0 as byte {
+        return 4;
+    }
+    return 0;
+}

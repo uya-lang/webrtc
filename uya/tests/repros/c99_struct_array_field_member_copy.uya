@@ -1,0 +1,30 @@
+use std.runtime.entry;
+
+struct Hash32 {
+    bytes: [byte: 32] = []
+}
+
+struct Unit {
+    id: Hash32
+}
+
+fn make_unit(source: &Hash32) Unit {
+    return Unit{
+        id: Hash32{ bytes: source.bytes },
+    };
+}
+
+export fn main() i32 {
+    var hash: Hash32 = Hash32{ bytes: [] };
+    hash.bytes[0] = 7 as byte;
+    hash.bytes[1] = 11 as byte;
+
+    const unit: Unit = make_unit(&hash);
+    if unit.id.bytes[0] != 7 as byte {
+        return 1;
+    }
+    if unit.id.bytes[1] != 11 as byte {
+        return 2;
+    }
+    return 0;
+}

@@ -1,0 +1,6 @@
+use broken.message_text;
+
+export fn main() i32 {
+    @println("${message_text()}");
+    return 0;
+}

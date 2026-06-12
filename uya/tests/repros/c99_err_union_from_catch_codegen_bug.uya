@@ -1,0 +1,29 @@
+use std.async;
+
+struct F : Future<!i32> {
+    fn poll(self: &Self, waker: &Waker) Poll<!i32> {
+        _ = self;
+        _ = waker;
+        const x: !i32 = fail() catch |err| {
+            const y: !i32 = err;
+            return Poll<!i32>.Ready(y);
+        };
+        return Poll<!i32>.Ready(x);
+    }
+
+    fn release(self: &Self) void {
+        _ = self;
+    }
+}
+
+fn fail() !i32 {
+    return error.Bad;
+}
+
+export fn main() i32 {
+    const f: F = F{};
+    const w: Waker = Waker{};
+    const p: Poll<!i32> = f.poll(&w);
+    _ = p;
+    return 0;
+}

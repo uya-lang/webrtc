@@ -1,0 +1,19 @@
+use std.runtime.entry;
+use std.exec_test.runtime_global_index_addr.seed_slots;
+use std.exec_test.runtime_global_index_addr.read_slot_at;
+use std.exec_test.runtime_global_index_addr.write_slot_at;
+
+export fn main() i32 {
+    seed_slots();
+    if read_slot_at(1) != 11 {
+        return 1;
+    }
+    write_slot_at(1, 13);
+    if read_slot_at(1) != 13 {
+        return 2;
+    }
+    if read_slot_at(0) != 7 {
+        return 3;
+    }
+    return 0;
+}

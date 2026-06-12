@@ -1,0 +1,17 @@
+use std.testing.assert_eq_i32;
+
+struct Holder {
+    bytes: &[byte] = [],
+    payload: [byte: 4] = [],
+}
+
+test "empty array literal zero init in assignments" {
+    var holder: Holder = Holder{};
+    try assert_eq_i32(holder.bytes.len as i32, 0);
+    try assert_eq_i32(holder.payload[0] as i32, 0);
+
+    holder.bytes = [];
+    holder.payload = [];
+    try assert_eq_i32(holder.bytes.len as i32, 0);
+    try assert_eq_i32(holder.payload[0] as i32, 0);
+}

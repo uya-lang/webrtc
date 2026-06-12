@@ -1,0 +1,32 @@
+use std.runtime.entry;
+
+struct Payload {
+    name: &byte,
+}
+
+union Data {
+    named: &byte,
+    payload: Payload,
+}
+
+fn read_name(data: Data) &byte {
+    match data {
+        .named(name) => { return name; },
+        .payload(payload) => { return payload.name; },
+        else => { return null as &byte; },
+    };
+}
+
+export fn main() i32 {
+    const value: &byte = read_name(Data.payload(Payload{ name: "ok" as &byte }));
+    if value == null {
+        return 1;
+    }
+    if value[0] != ('o' as byte) {
+        return 2;
+    }
+    if value[1] != ('k' as byte) {
+        return 3;
+    }
+    return 0;
+}

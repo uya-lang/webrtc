@@ -1,0 +1,64 @@
+use std.thread;
+use std.async;
+use std.async_event;
+use std.async_scheduler;
+use std.testing.assert_eq_i32;
+use libc.syscall;
+
+export struct WorkerPool {
+    inner: ThreadPool
+}
+
+export fn worker_pool_new(worker_count: i32) WorkerPool {
+    return WorkerPool{
+        inner: thread_pool_new(worker_count),
+    };
+}
+
+export fn worker_pool_async_compute<T>(pool: &WorkerPool, compute_fn: &void, arg: T) Future<!T> {
+    return async_compute<T>(&pool.inner, compute_fn, arg);
+}
+
+export fn worker_pool_async_compute_module<T>(pool: &WorkerPool, compute_fn: &void, arg: T) Future<!T> {
+    return thread.async_compute<T>(&pool.inner, compute_fn, arg);
+}
+
+fn double_i32(value: i32) i32 {
+    return value * 2;
+}
+
+fn thread_test_epoll() !LinuxEpoll {
+    return linux_epoll_create(0);
+}
+
+test "generic wrapper forwards async_compute_i32" {
+    var pool: WorkerPool = worker_pool_new(2);
+    defer {
+        thread_pool_shutdown(&pool.inner);
+    }
+    var s: Scheduler = scheduler_new();
+    var loop_impl: LinuxEpoll = try thread_test_epoll();
+    defer {
+        _ = sys_close(loop_impl.epfd);
+    }
+    const loop: EventLoop = loop_impl;
+    const boxed: Future<!i32> = worker_pool_async_compute<i32>(&pool, &double_i32 as &void, 21);
+    const result: i32 = try scheduler_run_with_event_loop<i32>(&s, loop, boxed, 200);
+    try assert_eq_i32(result, 42);
+}
+
+test "generic wrapper forwards thread.async_compute_i32" {
+    var pool: WorkerPool = worker_pool_new(2);
+    defer {
+        thread_pool_shutdown(&pool.inner);
+    }
+    var s: Scheduler = scheduler_new();
+    var loop_impl: LinuxEpoll = try thread_test_epoll();
+    defer {
+        _ = sys_close(loop_impl.epfd);
+    }
+    const loop: EventLoop = loop_impl;
+    const boxed: Future<!i32> = worker_pool_async_compute_module<i32>(&pool, &double_i32 as &void, 21);
+    const result: i32 = try scheduler_run_with_event_loop<i32>(&s, loop, boxed, 200);
+    try assert_eq_i32(result, 42);
+}

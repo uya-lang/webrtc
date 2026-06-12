@@ -1,0 +1,26 @@
+use std.runtime.entry;
+use std.fmt.ast.Expr;
+use std.fmt.ast.ExprKind;
+
+fn walk(expr: &Expr) &Expr {
+    if expr.kind == ExprKind.EXPR_CALL {
+        var i: usize = 0;
+        while i < expr.call.arg_count {
+            expr.call.args[i] = *walk(&expr.call.args[i]);
+            i = i + 1;
+        }
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_BINARY {
+        expr.binary.left = walk(expr.binary.left);
+        expr.binary.right = walk(expr.binary.right);
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_UNARY {
+        expr.unary.value = walk(expr.unary.value);
+        return expr;
+    }
+    return expr;
+}
+
+fn main() i32 { return 0; }

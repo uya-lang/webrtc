@@ -1,0 +1,70 @@
+use std.runtime.entry;
+use std.fmt.ast.FmtFile;
+use std.fmt.ast.Expr;
+use std.fmt.ast.ExprKind;
+use std.fmt.ast.Stmt;
+use std.fmt.ast.StmtKind;
+
+export struct RewriteRule {
+    from: &[byte],
+    to: &[byte],
+}
+
+fn expr_matches_rule(expr: &Expr, from: &[byte]) bool {
+    if expr.kind == ExprKind.EXPR_IDENT {
+        if expr.ident.len != from.len {
+            return false;
+        }
+        var i: usize = 0;
+        while i < from.len {
+            if expr.ident.ptr[i] != from.ptr[i] {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn rewrite_expr_ast(expr: &Expr, from: &[byte], to: &[byte]) &Expr {
+    if expr.kind == ExprKind.EXPR_IDENT {
+        if expr_matches_rule(expr, from) {
+            expr.ident = to;
+        }
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_UNARY {
+        expr.unary.value = rewrite_expr_ast(expr.unary.value, from, to);
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_BINARY {
+        expr.binary.left = rewrite_expr_ast(expr.binary.left, from, to);
+        expr.binary.right = rewrite_expr_ast(expr.binary.right, from, to);
+        return expr;
+    }
+    if expr.kind == ExprKind.EXPR_CALL {
+        expr.call.callee = rewrite_expr_ast(expr.call.callee, from, to);
+        return expr;
+    }
+    return expr;
+}
+
+export fn rewrite_file(file: &FmtFile, rule: RewriteRule) void {
+    const from: &[byte] = rule.from;
+    const to: &[byte] = rule.to;
+    var di: usize = 0;
+    while di < file.decl_count {
+        var si: usize = 0;
+        while si < file.decls[di].fn_decl.body.stmt_count {
+            const stmt: &Stmt = &file.decls[di].fn_decl.body.stmts[si];
+            if stmt.kind == StmtKind.STMT_RETURN {
+                stmt.return_stmt.value = rewrite_expr_ast(stmt.return_stmt.value, from, to);
+            }
+            si = si + 1;
+        }
+        di = di + 1;
+    }
+}
+
+fn main() i32 { return 0; }

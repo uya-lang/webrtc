@@ -1,0 +1,23 @@
+fn pair_copy(src: &Pair) Pair {
+    return Pair{
+        value: src.value,
+    };
+}
+
+export struct Pair {
+    value: i32,
+}
+
+Pair {
+    fn copied(self: &Self) Pair {
+        return pair_copy(self);
+    }
+}
+
+export fn main() i32 {
+    var pair: Pair = Pair{
+        value: 7,
+    };
+    const copied: Pair = pair.copied();
+    return copied.value;
+}

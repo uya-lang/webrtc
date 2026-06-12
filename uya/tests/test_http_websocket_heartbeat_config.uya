@@ -1,0 +1,30 @@
+use std.http.websocket_types;
+use std.http.websocket_async;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+
+test "websocket_accept_options_default_heartbeat_values" {
+    const opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    try assert_eq_i32(0, opts.heartbeat.ping_interval_ms as i32);
+    try assert_eq_i32(0, opts.heartbeat.pong_timeout_ms as i32);
+    try assert_eq_i32(0, opts.heartbeat.idle_timeout_ms as i32);
+    try assert_true(opts.auto_pong);
+}
+
+test "websocket_conn_new_copies_heartbeat_config" {
+    var opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    opts.heartbeat = WebSocketHeartbeatConfig{
+        ping_interval_ms: 1500u32,
+        pong_timeout_ms: 3200u32,
+        idle_timeout_ms: 6400u32,
+    };
+    var io: WebSocketFdTransport = websocket_fd_transport_borrowed(-1);
+    const conn: WebSocketConn = websocket_conn_new(&io, WebSocketRole.Client, &opts);
+    try assert_eq_i32(1500, conn.heartbeat.ping_interval_ms as i32);
+    try assert_eq_i32(3200, conn.heartbeat.pong_timeout_ms as i32);
+    try assert_eq_i32(6400, conn.heartbeat.idle_timeout_ms as i32);
+    try assert_eq_i32(0, conn.last_ping_ms as i32);
+    try assert_eq_i32(0, conn.last_pong_ms as i32);
+    try assert_eq_i32(0, conn.waiting_pong as i32);
+    try assert_eq_i32(1, conn.role as i32);
+}

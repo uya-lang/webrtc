@@ -1,0 +1,20 @@
+use std.runtime.entry;
+
+extern fn mkdir(pathname: *byte, mode: i32) i32;
+extern fn rmdir(pathname: *byte) i32;
+
+export fn main() i32 {
+    const path: *byte = "/tmp/uya_exec_vm_extern_mkdir_bridge" as *byte;
+
+    _ = rmdir(path);
+
+    if mkdir(path, 0o755) != 0 {
+        return 1;
+    }
+
+    if rmdir(path) != 0 {
+        return 2;
+    }
+
+    return 0;
+}

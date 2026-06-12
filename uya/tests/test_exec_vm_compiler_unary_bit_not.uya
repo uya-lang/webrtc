@@ -1,0 +1,22 @@
+use std.runtime.entry;
+
+fn align_up_u32(value: u32, align: u32) u32 {
+    if align <= 1u32 {
+        return value;
+    }
+    return (value + align - 1u32) & ~(align - 1u32);
+}
+
+export fn main() i32 {
+    if align_up_u32(17u32, 8u32) != 24u32 {
+        return 1;
+    }
+    if align_up_u32(16u32, 8u32) != 16u32 {
+        return 2;
+    }
+    const mask: u32 = ~(3u32);
+    if (15u32 & mask) != 12u32 {
+        return 3;
+    }
+    return 0;
+}

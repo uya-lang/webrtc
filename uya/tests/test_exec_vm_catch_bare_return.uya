@@ -1,0 +1,32 @@
+use std.runtime.entry;
+
+error CatchBareReturnError;
+
+var g_catch_bare_return: i32 = 0;
+
+fn maybe_index(flag: bool) !usize {
+    if flag {
+        return error.CatchBareReturnError;
+    }
+    return 7usize;
+}
+
+fn record_after_catch(flag: bool) void {
+    const idx: usize = maybe_index(flag) catch {
+        return;
+    };
+    g_catch_bare_return = idx as i32;
+}
+
+export fn main() i32 {
+    record_after_catch(false);
+    if g_catch_bare_return != 7 {
+        return 1;
+    }
+
+    record_after_catch(true);
+    if g_catch_bare_return != 7 {
+        return 2;
+    }
+    return 0;
+}

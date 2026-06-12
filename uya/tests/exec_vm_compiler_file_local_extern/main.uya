@@ -1,0 +1,10 @@
+use std.runtime.entry;
+
+extern fn helper_add(a: i32, b: i32) i32;
+
+export fn main() i32 {
+    if helper_add(19, 23) != 42 {
+        return 1;
+    }
+    return 0;
+}

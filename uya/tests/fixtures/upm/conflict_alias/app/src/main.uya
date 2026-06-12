@@ -1,0 +1,6 @@
+use http.local_message;
+
+export fn main() i32 {
+    @println(local_message());
+    return 0;
+}

@@ -1,0 +1,21 @@
+use std.http.websocket_http2_h3_route;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+
+test "websocket_http2_route_plan_defaults" {
+    const plan: WebSocketHttp2RoutePlan = websocket_http2_route_plan_default();
+    try assert_true(plan.reuse_frame_layer);
+    try assert_true(plan.reuse_message_layer);
+    try assert_true(plan.reuse_session_layer);
+    try assert_eq_i32(101, plan.connect_method[0] as i32);
+    try assert_eq_i32(119, plan.connect_protocol[0] as i32);
+}
+
+test "websocket_http3_route_plan_defaults" {
+    const plan: WebSocketHttp3RoutePlan = websocket_http3_route_plan_default();
+    try assert_true(plan.quic_transport_adapter_required);
+    try assert_true(plan.async_reader_writer_sufficient == false);
+    try assert_true(plan.reuse_frame_layer);
+    try assert_true(plan.reuse_message_layer);
+    try assert_true(plan.reuse_session_layer);
+}

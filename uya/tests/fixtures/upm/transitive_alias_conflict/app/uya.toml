@@ -1,0 +1,8 @@
+[package]
+name = "transitive_alias_app"
+version = "0.1.0"
+source-dir = "src"
+
+[dependencies]
+dep_a = { path = "../dep_a" }
+dep_b = { path = "../dep_b" }

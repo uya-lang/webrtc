@@ -1,0 +1,2 @@
+use libc;
+use libc.fprintf;

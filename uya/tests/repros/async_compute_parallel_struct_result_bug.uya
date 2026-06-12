@@ -1,0 +1,233 @@
+use std.async.Future;
+use std.async.block_on;
+use std.crypto.blake3.blake3_digest;
+use std.mem.arena.Arena;
+use std.mem.arena.arena_init;
+use std.mem.allocator.arena_alloc;
+use std.thread.ThreadPool;
+use std.thread.async_compute;
+use std.thread.thread_pool_new;
+use std.thread.thread_pool_shutdown;
+
+use libc.free;
+use libc.malloc;
+
+struct Hash32 {
+    bytes: [byte: 32]
+}
+
+struct WorkItem {
+    bytes: &byte,
+    len: usize,
+    seed: byte
+}
+
+struct PairHash {
+    logical: Hash32,
+    stored: Hash32
+}
+
+struct WorkerTask {
+    items: &WorkItem,
+    start: usize,
+    len: usize
+}
+
+struct WorkerResult {
+    pairs: &PairHash,
+    len: usize
+}
+
+fn make_hash(bytes: &byte, len: usize, seed: byte) Hash32 {
+    const scratch_len: usize = len + 1 as usize + 128 as usize;
+    const scratch: &byte = malloc(scratch_len) as &byte;
+    if scratch == null {
+        return Hash32{ bytes: [] };
+    }
+    defer {
+        free(scratch as &void);
+    }
+    var arena: Arena = Arena{ buffer: scratch, size: 0, used: 0 };
+    arena_init(&arena, scratch, scratch_len);
+    const combined: &byte = arena_alloc(&arena, len + 1 as usize);
+    if combined == null {
+        return Hash32{ bytes: [] };
+    }
+    combined[0] = seed;
+    var i: usize = 0 as usize;
+    while i < len {
+        combined[1 as usize + i] = bytes[i];
+        i = i + 1 as usize;
+    }
+    var out: Hash32 = Hash32{ bytes: [] };
+    blake3_digest(combined[0: len + 1 as usize], out.bytes[0: 32]);
+    return out;
+}
+
+fn pair_hash_equal(left: &PairHash, right: &PairHash) bool {
+    var i: usize = 0 as usize;
+    while i < 32 as usize {
+        if left.logical.bytes[i] != right.logical.bytes[i] {
+            return false;
+        }
+        if left.stored.bytes[i] != right.stored.bytes[i] {
+            return false;
+        }
+        i = i + 1 as usize;
+    }
+    return true;
+}
+
+fn pair_hash_from_item(item: &WorkItem) PairHash {
+    return PairHash{
+        logical: make_hash(item.bytes, item.len, item.seed),
+        stored: make_hash(item.bytes, item.len, item.seed + 17 as byte),
+    };
+}
+
+fn worker_result_alloc(count: usize) &WorkerResult {
+    const result: &WorkerResult = malloc(@size_of(WorkerResult) as usize) as &WorkerResult;
+    if result == null {
+        return null;
+    }
+    result.pairs = null;
+    result.len = count;
+    if count == 0 as usize {
+        return result;
+    }
+    const raw: &PairHash = malloc(@size_of(PairHash) as usize * count) as &PairHash;
+    if raw == null {
+        free(result as &void);
+        return null;
+    }
+    result.pairs = raw;
+    return result;
+}
+
+fn worker_result_free(result: &WorkerResult) void {
+    if result == null {
+        return;
+    }
+    if result.pairs != null {
+        free(result.pairs as &void);
+    }
+    free(result as &void);
+}
+
+fn run_worker(task_bits: usize) usize {
+    const task: &WorkerTask = @ptr_from_usize(task_bits) as &WorkerTask;
+    const result: &WorkerResult = worker_result_alloc(task.len);
+    if result == null {
+        return 0 as usize;
+    }
+
+    var i: usize = 0 as usize;
+    while i < task.len {
+        const item: &WorkItem = &task.items[task.start + i as usize];
+        const pair: PairHash = pair_hash_from_item(item);
+        result.pairs[i] = PairHash{
+            logical: pair.logical,
+            stored: pair.stored,
+        };
+        i = i + 1 as usize;
+    }
+    return @usize_from_ptr(result as &void);
+}
+
+fn payload_fill(buf: &byte, len: usize) void {
+    var i: usize = 0 as usize;
+    while i < len {
+        buf[i] = ((i * 17 as usize + 23 as usize) % 251 as usize) as byte;
+        i = i + 1 as usize;
+    }
+}
+
+/// Reproduce a crash when async worker threads return heap-backed struct results through `usize`.
+///
+/// Params:
+/// - none
+///
+/// Returns:
+/// - `0` on success, non-zero when the repro detects mismatch or setup failure.
+export fn main() i32 {
+    const payload_len: usize = 10 as usize * 1024 as usize * 1024 as usize;
+    const chunk_bytes: usize = 512 as usize * 1024 as usize;
+    const item_count: usize = payload_len / chunk_bytes;
+
+    const payload: &byte = malloc(payload_len) as &byte;
+    if payload == null {
+        return 91;
+    }
+    defer {
+        free(payload as &void);
+    }
+    payload_fill(payload, payload_len);
+
+    const items: &WorkItem = malloc(@size_of(WorkItem) as usize * item_count) as &WorkItem;
+    if items == null {
+        return 92;
+    }
+    defer {
+        free(items as &void);
+    }
+
+    const expected: &PairHash = malloc(@size_of(PairHash) as usize * item_count) as &PairHash;
+    if expected == null {
+        return 93;
+    }
+    defer {
+        free(expected as &void);
+    }
+
+    var i: usize = 0 as usize;
+    while i < item_count {
+        items[i] = WorkItem{
+            bytes: &payload[i * chunk_bytes],
+            len: chunk_bytes,
+            seed: (i % 29 as usize) as byte,
+        };
+        expected[i] = pair_hash_from_item(&items[i]);
+        i = i + 1 as usize;
+    }
+
+    var tasks: [WorkerTask: 4] = [];
+    tasks[0] = WorkerTask{ items: items, start: 0 as usize, len: 5 as usize };
+    tasks[1] = WorkerTask{ items: items, start: 5 as usize, len: 5 as usize };
+    tasks[2] = WorkerTask{ items: items, start: 10 as usize, len: 5 as usize };
+    tasks[3] = WorkerTask{ items: items, start: 15 as usize, len: 5 as usize };
+
+    var pool: ThreadPool = thread_pool_new(4);
+    defer {
+        thread_pool_shutdown(&pool);
+    }
+
+    var futures: [Future<!usize>: 4] = [
+        async_compute<usize>(&pool, &run_worker as &void, @usize_from_ptr((&tasks[0]) as &void)),
+        async_compute<usize>(&pool, &run_worker as &void, @usize_from_ptr((&tasks[1]) as &void)),
+        async_compute<usize>(&pool, &run_worker as &void, @usize_from_ptr((&tasks[2]) as &void)),
+        async_compute<usize>(&pool, &run_worker as &void, @usize_from_ptr((&tasks[3]) as &void)),
+    ];
+
+    i = 0 as usize;
+    while i < 4 as usize {
+        const result_bits: usize = block_on<usize>(futures[i]) catch {
+            return 101;
+        };
+        if result_bits == 0 as usize {
+            return 102;
+        }
+        const result: &WorkerResult = @ptr_from_usize(result_bits) as &WorkerResult;
+        var local: usize = 0 as usize;
+        while local < result.len {
+            const global_index: usize = tasks[i].start + local;
+            if !pair_hash_equal(&result.pairs[local], &expected[global_index]) {
+                worker_result_free(result);
+                return 103;
+            }
+            local = local + 1 as usize;
+        }
+        worker_result_free(result);
+        i = i + 1 as usize;
+    }
+    return 0;
+}

@@ -1,0 +1,38 @@
+use std.runtime.entry;
+
+struct Node {
+    value: i32,
+}
+
+fn read_first(nodes: [&Node: 2]) i32 {
+    return nodes[0].value;
+}
+
+fn read_second(nodes: [&Node: 2]) i32 {
+    return nodes[1].value;
+}
+
+export fn main() i32 {
+    var node0: Node = Node{ value: 7 };
+    var node1: Node = Node{ value: 9 };
+    var nodes: [&Node: 2] = [];
+    nodes[0] = &node0;
+    nodes[1] = &node1;
+
+    if read_first(nodes) != 7 {
+        return 1;
+    }
+    if read_second(nodes) != 9 {
+        return 2;
+    }
+
+    nodes[1].value = 11;
+    if node1.value != 11 {
+        return 3;
+    }
+    if nodes[1].value != 11 {
+        return 4;
+    }
+
+    return 0;
+}

@@ -1,0 +1,25 @@
+use std.testing.assert_eq_i32;
+
+error IfBlockBareCatchFailed;
+
+fn if_block_bare_catch_value(flag: bool) !i32 {
+    if flag {
+        return error.IfBlockBareCatchFailed;
+    }
+    return 7;
+}
+
+fn if_block_bare_catch_statement_result(flag: bool) i32 {
+    if flag {
+        const result: !i32 = if_block_bare_catch_value(true);
+        result catch {
+            return 1;
+        };
+    }
+    return 0;
+}
+
+test "if block accepts bare catch statement" {
+    const value: i32 = if_block_bare_catch_statement_result(true);
+    try assert_eq_i32(value, 1);
+}

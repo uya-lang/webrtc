@@ -1,0 +1,6 @@
+// 预期编译失败：if 表达式的分支必须与上下文期望类型兼容。
+
+fn main() i32 {
+    const value: i32 = if false { 1 } else { "bad" };
+    return value;
+}

@@ -1,0 +1,7 @@
+[package]
+name = "conflict_alias_app"
+version = "0.1.0"
+source-dir = "src"
+
+[dependencies]
+http = { path = "../http_pkg" }

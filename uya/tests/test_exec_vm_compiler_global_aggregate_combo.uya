@@ -1,0 +1,47 @@
+use std.runtime.entry;
+
+struct DirentLike {
+    d_ino: i64,
+    d_off: i64,
+    d_reclen: i16,
+    d_type: i8,
+    d_name: [byte: 256],
+}
+
+const LIBC_SOURCE_NAMES_LIKE: [&byte: 8] = [
+    "libc/syscall.uya" as *byte,
+    "libc/errno.uya" as *byte,
+    "libc/ctype.uya" as *byte,
+    "libc/string.uya" as *byte,
+    "libc/mem.uya" as *byte,
+    "libc/stdio.uya" as *byte,
+    "libc/stdlib.uya" as *byte,
+    "libc/unistd.uya" as *byte,
+];
+
+var readdir_like: DirentLike = DirentLike {
+    d_ino: 0,
+    d_off: 0,
+    d_reclen: 0,
+    d_type: 0,
+    d_name: [],
+};
+
+export fn main() i32 {
+    if LIBC_SOURCE_NAMES_LIKE[0][0] != 'l' {
+        return 1;
+    }
+    if LIBC_SOURCE_NAMES_LIKE[0][5] != 's' {
+        return 2;
+    }
+    if LIBC_SOURCE_NAMES_LIKE[6][5] != 's' {
+        return 3;
+    }
+    if readdir_like.d_name[0] != 0 as byte {
+        return 4;
+    }
+    if readdir_like.d_name[255] != 0 as byte {
+        return 5;
+    }
+    return 0;
+}

@@ -1,0 +1,53 @@
+use std.runtime.entry;
+
+struct Payload {
+    name: &byte,
+}
+
+union Data {
+    named: &byte,
+    payload: Payload,
+    other: bool,
+}
+
+struct Holder {
+    data: Data,
+    fallback: &byte,
+}
+
+fn read_name(value: Holder) &byte {
+    match value.data {
+        .named(name) => { return name; },
+        .payload(payload) => { return payload.name; },
+        else => {
+            if value.fallback != null {
+                return value.fallback;
+            }
+            return null as &byte;
+        },
+    };
+}
+
+export fn main() i32 {
+    const direct: Holder = Holder{
+        data: Data.payload(Payload{ name: "payload" as &byte }),
+        fallback: null as &byte,
+    };
+    const from_payload: &byte = read_name(direct);
+    if from_payload == null || from_payload[0] != ('p' as byte) {
+        return 1;
+    }
+
+    const fallback_value: Holder = Holder{
+        data: Data.other(true),
+        fallback: "fallback" as &byte,
+    };
+    const from_fallback: &byte = read_name(fallback_value);
+    if from_fallback == null || from_fallback[0] != ('f' as byte) {
+        return 2;
+    }
+    if from_fallback[1] != ('a' as byte) {
+        return 3;
+    }
+    return 0;
+}

@@ -1,0 +1,8 @@
+use std.http.websocket_tls;
+use std.http.websocket_client;
+use std.http.websocket_json;
+use std.testing.assert_true;
+
+test "websocket_module_files_compile_smoke" {
+    try assert_true(true);
+}

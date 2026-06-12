@@ -1,0 +1,25 @@
+// 复现：数组索引边界证明器不跨 `as usize` 传递范围事实
+//
+// 期望：编译通过。守卫 `if i < 0 || i >= N { return }` 已在 i32 上
+//       证明 `0 <= i < N`，其中 N == @len(g_arr)。
+// 实际：`数组索引安全证明失败, 变量: i, 数组大小: 8`
+//       —— 范围事实在 `i as usize` 处丢失，未传递到下标表达式。
+//
+// 复现命令：
+//   ./bin/uya build tests/repros/bounds_prover_as_usize_cast.uya -o /tmp/bounds_prover_as_usize_cast
+
+const N: i32 = 8;
+var g_arr: [i32: 8] = [];
+
+fn main() i32 {
+    return pick(3);
+}
+
+export fn pick(i: i32) i32 {
+    // 在 i32 上完整证明了下界与上界
+    if i < 0 || i >= N {
+        return -1;
+    }
+    // 该范围事实不跨 `as usize` 传递 → 此处证明失败
+    return g_arr[i as usize];
+}

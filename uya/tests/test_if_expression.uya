@@ -1,0 +1,9 @@
+use std.testing.assert_eq_i32;
+
+test "if expression" {
+    const one: i32 = if true { 1 } else { 2 };
+    const two: i32 = if false { 1 } else { 2 };
+
+    try assert_eq_i32(one, 1);
+    try assert_eq_i32(two, 2);
+}

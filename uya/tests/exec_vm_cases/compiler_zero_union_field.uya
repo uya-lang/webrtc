@@ -1,0 +1,19 @@
+use std.runtime.entry;
+
+union NameOrSize {
+    named: &byte,
+    size: i32,
+}
+
+struct Holder {
+    data: NameOrSize,
+    count: i32,
+}
+
+export fn main() i32 {
+    const holder: Holder = Holder{};
+    if holder.count != 0 {
+        return 1;
+    }
+    return 0;
+}

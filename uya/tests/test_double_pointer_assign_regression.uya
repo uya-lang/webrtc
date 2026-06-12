@@ -1,0 +1,25 @@
+use std.runtime.entry;
+
+use std.testing.assert_eq_i32;
+use std.testing.test_suite_begin;
+use std.testing.test_suite_end;
+use std.testing.run_test;
+
+fn assign_via_double_pointer(pp: &&i32, value: i32) void {
+    **pp = value;
+}
+
+fn test_double_pointer_assign() !void {
+    var x: i32 = 7;
+    var p: &i32 = &x;
+    var pp: &&i32 = &p;
+
+    assign_via_double_pointer(pp, 99);
+    try assert_eq_i32(x, 99);
+}
+
+export fn main() i32 {
+    test_suite_begin("double pointer assign regression");
+    run_test("double pointer assign", test_double_pointer_assign);
+    return test_suite_end();
+}

@@ -1,0 +1,12 @@
+use std.runtime.entry;
+
+/// 测试跨文件共享 libc whole-module import 下的 stderr 全局访问。
+/// 参数：无。
+/// 返回值：0 表示成功，非 0 表示失败。
+export fn main() i32 {
+    const rc: i32 = fprintf(libc.stderr, "shared libc import stderr\n" as *byte);
+    if rc <= 0 {
+        return 1;
+    }
+    return 0;
+}

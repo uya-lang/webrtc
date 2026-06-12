@@ -1,0 +1,8 @@
+use std.testing.assert_eq_i32;
+use c99_private_fn_name_collision.moda;
+use c99_private_fn_name_collision.modb;
+
+test "private functions are scoped by imported source file in C99" {
+    try assert_eq_i32(moda_value(), 1);
+    try assert_eq_i32(modb_value(), 2);
+}

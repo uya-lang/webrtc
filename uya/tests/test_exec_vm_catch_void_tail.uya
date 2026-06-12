@@ -1,0 +1,36 @@
+use std.runtime.entry;
+
+error CatchVoidTailError;
+
+var g_catch_void_count: i32 = 0;
+var g_catch_void_flag: bool = false;
+
+fn mark_void_tail() void {
+    g_catch_void_count = g_catch_void_count + 1;
+}
+
+fn fail_void_tail(flag: bool) !void {
+    if flag {
+        return error.CatchVoidTailError;
+    }
+    return;
+}
+
+export fn main() i32 {
+    fail_void_tail(false) catch {
+        mark_void_tail();
+        g_catch_void_flag = true;
+    };
+    if g_catch_void_count != 0 || g_catch_void_flag {
+        return 1;
+    }
+
+    fail_void_tail(true) catch {
+        mark_void_tail();
+        g_catch_void_flag = true;
+    };
+    if g_catch_void_count != 1 || !g_catch_void_flag {
+        return 2;
+    }
+    return 0;
+}

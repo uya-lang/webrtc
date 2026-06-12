@@ -1,0 +1,12 @@
+use std.async_frame.AsyncFramePool;
+use std.async_frame.async_frame_pool_init;
+use std.async_frame.async_frame_pool_alloc;
+use std.testing.expect;
+
+test "async frame pool has empty descriptor table without async functions" {
+    var pool: AsyncFramePool = AsyncFramePool{};
+    async_frame_pool_init(&pool, 0, 65536);
+
+    const ptr: &byte = async_frame_pool_alloc(&pool, 0);
+    expect(ptr == null);
+}

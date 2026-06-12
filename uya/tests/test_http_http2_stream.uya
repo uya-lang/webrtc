@@ -1,0 +1,43 @@
+use std.http.http2_stream;
+use std.http.http2_types;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+
+test "http2_stream_local_lifecycle_and_windows" {
+    var stream: Http2Stream = Http2Stream{};
+    http2_stream_init(&stream, 1u32);
+    try http2_stream_send_headers(&stream, false);
+    try assert_eq_i32(Http2StreamState.Open as i32, stream.state as i32);
+    try http2_stream_consume_send_window(&stream, 128usize);
+    try assert_eq_i32((HTTP2_INITIAL_WINDOW_SIZE as i32) - 128, stream.send_window);
+    try http2_stream_send_data(&stream, true, 128usize);
+    try assert_eq_i32(Http2StreamState.HalfClosedLocal as i32, stream.state as i32);
+    try assert_true(stream.local_closed);
+    try http2_stream_add_send_window(&stream, 512u32);
+    try assert_eq_i32((HTTP2_INITIAL_WINDOW_SIZE as i32) + 256, stream.send_window);
+    try http2_stream_recv_data(&stream, true, 32usize);
+    try assert_eq_i32(Http2StreamState.Closed as i32, stream.state as i32);
+    try assert_true(stream.remote_closed);
+}
+
+test "http2_stream_remote_open_and_reset" {
+    var stream: Http2Stream = Http2Stream{};
+    http2_stream_init(&stream, 3u32);
+    try http2_stream_recv_headers(&stream, false);
+    try assert_eq_i32(Http2StreamState.Open as i32, stream.state as i32);
+    try http2_stream_consume_recv_window(&stream, 64usize);
+    try assert_eq_i32((HTTP2_INITIAL_WINDOW_SIZE as i32) - 64, stream.recv_window);
+    try http2_stream_send_rst_stream(&stream, HTTP2_ERR_CANCEL);
+    try assert_eq_i32(Http2StreamState.Closed as i32, stream.state as i32);
+    try assert_eq_i32(HTTP2_ERR_CANCEL as i32, stream.reset_error_code as i32);
+}
+
+test "http2_stream_rejects_data_before_headers" {
+    var stream: Http2Stream = Http2Stream{};
+    http2_stream_init(&stream, 5u32);
+    const result: !void = http2_stream_send_data(&stream, false, 1usize);
+    match result {
+        error.Http2ProtocolError => {}
+        else => { try assert_eq_i32(0, 1); }
+    }
+}

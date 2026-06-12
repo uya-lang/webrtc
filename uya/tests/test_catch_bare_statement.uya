@@ -1,0 +1,23 @@
+use std.testing.assert_eq_i32;
+
+error BareCatchFailed;
+
+fn bare_catch_value(flag: bool) !i32 {
+    if flag {
+        return error.BareCatchFailed;
+    }
+    return 7;
+}
+
+fn bare_catch_statement_result() i32 {
+    const result: !i32 = bare_catch_value(true);
+    result catch {
+        return 1;
+    };
+    return 0;
+}
+
+test "bare catch statement keeps local error-union type" {
+    const value: i32 = bare_catch_statement_result();
+    try assert_eq_i32(value, 1);
+}

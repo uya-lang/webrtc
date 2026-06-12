@@ -1,0 +1,8 @@
+use std.runtime.entry;
+use std.testing.assert_eq_i32;
+
+use dep.exported_sum;
+
+test "use item call resolves exported function symbol consistently" {
+    try assert_eq_i32(exported_sum(20, 22), 42);
+}

@@ -1,0 +1,30 @@
+use std.runtime.entry;
+
+use std.testing.expect;
+use std.testing.run_test;
+use std.testing.test_suite_begin;
+use std.testing.test_suite_end;
+
+struct CertLike {
+    payload: [byte: 512],
+}
+
+struct SlotStore {
+    certs: [CertLike: 128],
+    der_storage: [byte: 128 * 4096],
+}
+
+fn slot_size(ts: &SlotStore) usize {
+    return @len(ts.der_storage) / @len(ts.certs);
+}
+
+fn test_struct_field_array_len_division() !void {
+    var ts: SlotStore = SlotStore{};
+    try expect(slot_size(&ts) == 4096usize);
+}
+
+export fn main() i32 {
+    test_suite_begin("Struct Array Len Division Codegen Tests");
+    run_test("struct field array len division", test_struct_field_array_len_division);
+    return test_suite_end();
+}

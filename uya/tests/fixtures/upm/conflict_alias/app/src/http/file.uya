@@ -1,0 +1,3 @@
+export fn local_message() &byte {
+    return "local-http" as &byte;
+}

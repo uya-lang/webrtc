@@ -1,0 +1,164 @@
+use std.async;
+use std.http.server;
+use std.http.websocket_async;
+use std.http.websocket_types;
+use std.testing.assert_eq_i32;
+use std.testing.assert_true;
+use std.time.now_ms;
+
+fn bytes_eq_raw(a: &byte, b: &byte, n: usize) bool {
+    var i: usize = 0;
+    while i < n {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn make_pair_with_opts(client_out: &WebSocketConn, server_out: &WebSocketConn, client_opts: &WebSocketAcceptOptions, server_opts: &WebSocketAcceptOptions) !void {
+    const cfg: ServerConfig = ServerConfig{
+        mode: ServerMode.Blocking,
+        max_connections: 128,
+        port: 0,
+        host: [],
+    };
+    var srv: HttpServer = try http_server_listen(&cfg);
+    errdefer { http_server_close(&srv); }
+    const client_fd: i32 = try http_tcp_connect_loopback(srv.port);
+    var accepted: Conn = try http_server_accept(&srv);
+    http_server_close(&srv);
+    const server_fd: i32 = accepted.fd;
+    accepted.fd = -1;
+
+    var client_io: WebSocketFdTransport = websocket_fd_transport_owned(client_fd);
+    var server_io: WebSocketFdTransport = websocket_fd_transport_owned(server_fd);
+    client_out[0] = websocket_conn_new(&client_io, WebSocketRole.Client, client_opts);
+    server_out[0] = websocket_conn_new(&server_io, WebSocketRole.Server, server_opts);
+}
+
+fn run_with_loop_usize(f: Future<!usize>) !usize {
+    const result: !usize = block_on<usize>(f);
+    return try result;
+}
+
+test "websocket_heartbeat_auto_ping_and_track_pong" {
+    var client_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    var server_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    server_opts.heartbeat.ping_interval_ms = 50u32;
+    server_opts.heartbeat.pong_timeout_ms = 200u32;
+
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair_with_opts(&client, &server, &client_opts, &server_opts);
+
+    const base: u64 = try now_ms();
+    server.last_activity_ms = base - 100u64;
+
+    var tx_server: [byte: 128] = [];
+    var tx_client: [byte: 128] = [];
+    var rx_client: [byte: 128] = [];
+    var rx_server: [byte: 128] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+    var fin: bool = false;
+    var payload_len: usize = 0;
+
+    const ping_wire: usize = try run_with_loop_usize(websocket_conn_heartbeat_tick(&server, base, &tx_server[0], 128));
+    try assert_true(ping_wire > 0);
+    try assert_true(server.waiting_pong);
+    try assert_true(server.last_ping_ms > 0u64);
+
+    _ = try run_with_loop_usize(websocket_conn_read_frame(&client, &rx_client[0], 128, &opcode, &fin, &payload_len));
+    try assert_true(fin);
+    try assert_eq_i32(9, opcode as i32);
+    try assert_eq_i32(0, payload_len as i32);
+
+    _ = try run_with_loop_usize(websocket_conn_write_frame(&client, WebSocketOpcode.Pong, &rx_client[0] as &const byte, payload_len, &tx_client[0], 128));
+    _ = try run_with_loop_usize(websocket_conn_read_frame(&server, &rx_server[0], 128, &opcode, &fin, &payload_len));
+    try assert_eq_i32(10, opcode as i32);
+    try assert_true(server.waiting_pong == false);
+    try assert_true(server.last_pong_ms >= server.last_ping_ms);
+}
+
+test "websocket_heartbeat_pong_timeout_enters_close_flow" {
+    var client_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    var server_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    server_opts.heartbeat.ping_interval_ms = 50u32;
+    server_opts.heartbeat.pong_timeout_ms = 50u32;
+
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair_with_opts(&client, &server, &client_opts, &server_opts);
+
+    const base: u64 = try now_ms();
+    server.last_activity_ms = base - 100u64;
+
+    var tx_server: [byte: 128] = [];
+    var rx_client: [byte: 128] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+    var fin: bool = false;
+    var payload_len: usize = 0;
+
+    _ = try run_with_loop_usize(websocket_conn_heartbeat_tick(&server, base, &tx_server[0], 128));
+    _ = try run_with_loop_usize(websocket_conn_read_frame(&client, &rx_client[0], 128, &opcode, &fin, &payload_len));
+    try assert_eq_i32(9, opcode as i32);
+    const timeout_at: u64 = server.last_ping_ms + 60u64;
+    const timeout_res: !usize = run_with_loop_usize(websocket_conn_heartbeat_tick(&server, timeout_at, &tx_server[0], 128));
+    if timeout_res.error_id == 0u32 {
+        try assert_eq_i32(timeout_res.value as i32, -901);
+    }
+    try assert_true(server.close_sent);
+
+    _ = try run_with_loop_usize(websocket_conn_read_frame(&client, &rx_client[0], 128, &opcode, &fin, &payload_len));
+    try assert_eq_i32(8, opcode as i32);
+    try assert_true(fin);
+}
+
+test "websocket_heartbeat_skips_ping_when_recent_activity_exists" {
+    var client_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    var server_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    server_opts.heartbeat.ping_interval_ms = 200u32;
+
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair_with_opts(&client, &server, &client_opts, &server_opts);
+
+    var payload: [byte: 6] = "hello";
+    var tx_client: [byte: 64] = [];
+    var rx_server: [byte: 128] = [];
+    var msg_buf: [byte: 128] = [];
+    var opcode: WebSocketOpcode = WebSocketOpcode.Binary;
+
+    _ = try run_with_loop_usize(websocket_conn_write_message(&client, WebSocketOpcode.Text, &payload[0], 5, &tx_client[0], 64));
+    const got: usize = try run_with_loop_usize(websocket_conn_read_message(&server, &rx_server[0], 128, &msg_buf[0], 128, &opcode));
+    try assert_eq_i32(5, got as i32);
+    try assert_eq_i32(1, opcode as i32);
+    try assert_true(bytes_eq_raw(&msg_buf[0], &payload[0], 5));
+
+    var tx_server: [byte: 64] = [];
+    const tick_at: u64 = server.last_activity_ms + 50u64;
+    const heartbeat_res: usize = try run_with_loop_usize(websocket_conn_heartbeat_tick(&server, tick_at, &tx_server[0], 64));
+    try assert_eq_i32(0, heartbeat_res as i32);
+    try assert_true(server.waiting_pong == false);
+}
+
+test "websocket_heartbeat_idle_timeout_enters_close_flow" {
+    var client_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    var server_opts: WebSocketAcceptOptions = websocket_accept_options_default();
+    server_opts.heartbeat.idle_timeout_ms = 40u32;
+
+    var client: WebSocketConn = websocket_conn_empty();
+    var server: WebSocketConn = websocket_conn_empty();
+    try make_pair_with_opts(&client, &server, &client_opts, &server_opts);
+
+    const base: u64 = try now_ms();
+    server.last_activity_ms = base - 100u64;
+
+    var tx_server: [byte: 128] = [];
+    const timeout_res: !usize = run_with_loop_usize(websocket_conn_heartbeat_tick(&server, base, &tx_server[0], 128));
+    if timeout_res.error_id == 0u32 {
+        try assert_eq_i32(timeout_res.value as i32, -902);
+    }
+    try assert_true(server.close_sent);
+}

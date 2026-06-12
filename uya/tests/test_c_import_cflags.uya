@@ -1,0 +1,19 @@
+@c_import("fixtures/c_import/flag_impl.c", "-DC_IMPORT_MAGIC=7");
+
+use std.runtime.entry;
+use std.testing.assert_eq_i32;
+use std.testing.run_test;
+use std.testing.test_suite_begin;
+use std.testing.test_suite_end;
+
+extern fn add_magic_i32(x: i32) i32;
+
+fn test_c_import_cflags_basic() !void {
+    try assert_eq_i32(add_magic_i32(5), 12);
+}
+
+export fn main() i32 {
+    test_suite_begin("c_import cflags");
+    run_test("cflags", test_c_import_cflags_basic);
+    return test_suite_end();
+}

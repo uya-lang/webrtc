@@ -1,0 +1,8 @@
+[package]
+name = "git_ref_conflict_app"
+version = "0.1.0"
+source-dir = "src"
+
+[dependencies]
+hello_old = { git = "__GIT_URL__", tag = "v1.0.0" }
+hello_new = { git = "__GIT_URL__", commit = "__COMMIT_V2__" }

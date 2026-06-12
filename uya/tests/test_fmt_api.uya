@@ -1,0 +1,181 @@
+use std.runtime.entry;
+use std.mem.arena.Arena;
+use std.mem.arena.arena_init;
+use std.mem.arena.arena_alloc;
+use std.testing.assert_eq_i32;
+use std.testing.test_suite_begin;
+use std.testing.test_suite_end;
+use std.testing.run_test;
+use std.fmt.fmt.format;
+use std.fmt.fmt.format_result;
+use std.fmt.fmt.format_result_with_options;
+use std.fmt.fmt.is_formatted;
+use std.fmt.fmt.FormatOptions;
+use std.fmt.fmt.FormatResult;
+use std.fmt.rewrite.RewriteRule;
+
+fn byte_at(s: &[byte], i: usize) i32 {
+    return s.ptr[i] as i32;
+}
+
+fn slice_contains(haystack: &[byte], needle: &[byte]) bool {
+    if needle.len == 0 {
+        return true;
+    }
+    if haystack.len < needle.len {
+        return false;
+    }
+    var i: usize = 0;
+    while i + needle.len <= haystack.len {
+        var j: usize = 0;
+        var ok: bool = true;
+        while j < needle.len {
+            if haystack.ptr[i + j] != needle.ptr[j] {
+                ok = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if ok {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn default_options(arena: &Arena) FormatOptions {
+    const empty_rule: RewriteRule = RewriteRule {
+        from: (arena_alloc(arena, 1))[0:0],
+        to: (arena_alloc(arena, 1))[0:0],
+    };
+    return FormatOptions {
+        sort_imports: false,
+        simplify: false,
+        rewrite_rule: empty_rule,
+        has_rewrite_rule: false,
+    };
+}
+
+fn test_format_returns_expected_prefix() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "fn add(a,b){return a+b;}" as &[byte];
+    const out: &[byte] = try format(&a, src);
+
+    try assert_eq_i32(byte_at(out, 0), 'f' as i32);
+    try assert_eq_i32(byte_at(out, 1), 'n' as i32);
+    try assert_eq_i32(byte_at(out, 2), ' ' as i32);
+    try assert_eq_i32(byte_at(out, 8), ',' as i32);
+    try assert_eq_i32(byte_at(out, 9), ' ' as i32);
+}
+
+fn test_is_formatted_false_for_unformatted_input() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "fn add(a,b){return a+b;}" as &[byte];
+    const ok: bool = try is_formatted(&a, src);
+    try assert_eq_i32(ok as i32, false as i32);
+}
+
+fn test_is_formatted_true_for_formatted_input() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "fn add(a, b) {\n\treturn a + b;\n}" as &[byte];
+    const ok: bool = try is_formatted(&a, src);
+    try assert_eq_i32(ok as i32, true as i32);
+}
+
+fn test_format_result_changed_false_for_formatted_input() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "fn add(a, b) {\n\treturn a + b;\n}" as &[byte];
+    const result: FormatResult = try format_result(&a, src);
+    try assert_eq_i32(result.changed as i32, false as i32);
+}
+
+fn test_format_result_changed_true_for_unformatted_input() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "fn add(a,b){return a+b;}" as &[byte];
+    const result: FormatResult = try format_result(&a, src);
+    try assert_eq_i32(result.changed as i32, true as i32);
+}
+
+fn test_format_result_with_simplify() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    var opts: FormatOptions = default_options(&a);
+    opts.simplify = true;
+    const src: &[byte] = "fn sum(){return (value);}" as &[byte];
+    const result: FormatResult = try format_result_with_options(&a, src, opts);
+    try assert_eq_i32(result.changed as i32, true as i32);
+    try assert_eq_i32(slice_contains(result.output, "return value;" as &[byte]) as i32, true as i32);
+}
+
+fn test_format_result_with_rewrite() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    var opts: FormatOptions = default_options(&a);
+    opts.rewrite_rule = RewriteRule {
+        from: "foo.bar" as &[byte],
+        to: "bar" as &[byte],
+    };
+    opts.has_rewrite_rule = true;
+    const src: &[byte] = "fn sample(){foo.bar();}" as &[byte];
+    const result: FormatResult = try format_result_with_options(&a, src, opts);
+    try assert_eq_i32(result.changed as i32, true as i32);
+    try assert_eq_i32(slice_contains(result.output, "bar();" as &[byte]) as i32, true as i32);
+}
+
+fn test_format_result_with_noop_options_not_changed() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    const src: &[byte] = "const answer = 42;" as &[byte];
+    const result: FormatResult = try format_result_with_options(&a, src, default_options(&a));
+    try assert_eq_i32(result.changed as i32, false as i32);
+}
+
+fn test_format_with_imports_parses_and_sorts() !void {
+    var arena_buf: [byte: 65536] = [];
+    var a: Arena = undefined;
+    arena_init(&a, &arena_buf[0], 65536);
+
+    var opts: FormatOptions = default_options(&a);
+    opts.sort_imports = true;
+    const src: &[byte] = "use tls.https;\nuse std.runtime.entry;\nfn main(){return 1;}" as &[byte];
+    const result: FormatResult = try format_result_with_options(&a, src, opts);
+
+    try assert_eq_i32(result.changed as i32, true as i32);
+    try assert_eq_i32(slice_contains(result.output, "use std.runtime.entry;\nuse tls.https;\n\nfn main()" as &[byte]) as i32, true as i32);
+}
+
+export fn main() i32 {
+    test_suite_begin("fmt api tests");
+    run_test("format expected prefix", test_format_returns_expected_prefix);
+    run_test("is formatted false", test_is_formatted_false_for_unformatted_input);
+    run_test("is formatted true", test_is_formatted_true_for_formatted_input);
+    run_test("format result changed false", test_format_result_changed_false_for_formatted_input);
+    run_test("format result changed true", test_format_result_changed_true_for_unformatted_input);
+    run_test("format result simplify", test_format_result_with_simplify);
+    run_test("format result rewrite", test_format_result_with_rewrite);
+    run_test("format result noop", test_format_result_with_noop_options_not_changed);
+    run_test("format with imports parses and sorts", test_format_with_imports_parses_and_sorts);
+    return test_suite_end();
+}

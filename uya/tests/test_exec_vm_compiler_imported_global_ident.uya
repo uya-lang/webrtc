@@ -1,0 +1,15 @@
+use std.runtime.entry;
+use libc.errno;
+use libc.ENOENT;
+
+export fn main() i32 {
+    errno = ENOENT;
+    if errno != ENOENT {
+        return 1;
+    }
+    errno = 0;
+    if errno != 0 {
+        return 2;
+    }
+    return 0;
+}

@@ -1,0 +1,17 @@
+use std.runtime.entry;
+
+struct Payload {
+    count: i32,
+    ready: bool,
+}
+
+export fn main() i32 {
+    const payload: Payload = Payload{};
+    if payload.count != 0 {
+        return 1;
+    }
+    if payload.ready {
+        return 2;
+    }
+    return 0;
+}
