@@ -41,4 +41,10 @@ make bench
 - `make host-ffmpeg-chrome-call`：启动 host 侧摄像头/麦克风到 Chrome 的手工互通入口，默认预构建 sender executable，减少浏览器 Start 到首帧等待。
 - `make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4`：显式将 MP4 转成 raw I420 源，再由 Uya VP8 live sender 调用 `../vp8` 纯 Uya bridge 实时编码并推给浏览器预览；默认预览会缩到 160px 宽、截取 2s，并按宽度自动选择 FPS（640px 走 10fps，320px 走 15fps，小尺寸走 30fps），可用 `UYA_VP8_PREVIEW_MAX_WIDTH=320 UYA_VP8_PREVIEW_MAX_DURATION=3 UYA_VP8_PREVIEW_FPS=15` 调整；preview server 会先用 `UYA_VP8_PREVIEW_CFLAGS`（默认 `-std=c99 -O3 -g -fno-builtin`）构建 sender，点击 Start 时直接运行该 executable；默认保留 VP8 SIMD/asm dispatch，必要时可用 `UYA_VP8_FORCE_SCALAR=1` 复现 scalar 路径；该路径 video-only，不启用 Opus。
 
+## Host FFmpeg Chrome Call
+
+`make host-ffmpeg-chrome-call` 提供本机摄像头/麦克风到 Chrome 的手工互通入口：Chrome 本地采集音视频，Uya 侧 direct sender 完成 SDP answer、ICE/STUN、DTLS/SRTP、RTP/RTCP 和媒体收发统计，页面同时展示 Chrome local、Uya remote synthetic video、首帧 timing 与 RTP 计数。
+
+![Host FFmpeg Chrome Call](asserts/img/ffmpeg_chrom_live_call.png)
+
 发布记录见 [CHANGELOG.md](CHANGELOG.md)。
