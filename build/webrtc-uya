@@ -4,10 +4,10 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"; repo_root="$(cd "$script_dir/.." && pwd)"
 case "${1:-}" in
   ""|--help|-h)
-    printf "%s\n" "webrtc-uya 0.2.0 milestone CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"
+    printf "%s\n" "webrtc-uya 0.3.0 milestone CLI" "Usage:" "  webrtc-uya [--help|-h]" "  webrtc-uya version" "  webrtc-uya dump-stats"
     ;;
   version)
-    printf "%s\n" "webrtc-uya 0.2.0"
+    printf "%s\n" "webrtc-uya 0.3.0"
     ;;
   dump-stats)
     exec "${repo_root}/../uya/bin/uya" run "${repo_root}/src/webrtc_dump_stats_main.uya"

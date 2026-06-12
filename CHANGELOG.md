@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.3.0 - 2026-06-12
+
+Chrome direct media PeerConnection 里程碑版本。该版本在 `v0.2.0` RK1106
+板端直推基础上，把通用 PeerConnection 从 DataChannel-only 推进到可生成
+Chrome video SDP、接收 SRTP/VP8 RTP 并路由到 receiver 的验证闭环，同时补齐
+host FFmpeg Chrome call 的快速手工入口。
+
+详细版本说明：[docs/release-v0.3.0.md](docs/release-v0.3.0.md)
+
+### 发布能力
+
+- PeerConnection 增加 `addTransceiver`、`addTrack`、音视频 SDP writer 和
+  Chrome video 收包路径，`make test` 已纳入 Phase 14 Chrome video gate。
+- 新增 VP8 RTP payload descriptor / packetizer / reassembly 模块与 Uya 侧测试，
+  供 PeerConnection video 接收和 direct sender 共享。
+- direct runtime 和 direct sender 补齐控制包处理、RTCP 反馈接收统计与
+  receiver-facing 计数，Chrome call 统计能看到 inbound/outbound 两侧状态。
+- 新增 `make host-ffmpeg-chrome-call` / `host-ffmpeg-chrome-call-playback`，
+  使用预构建 sender executable，支持本机设备、自动选择局域网地址、可选本地播放
+  和手工浏览器互通。
+- FFmpeg Chrome call harness 增加 contract、playback smoke、manual preview E2E、
+  MP4 全尺寸预览和 sender executable 复用验证。
+- `build/webrtc-uya version` 输出 `webrtc-uya 0.3.0`。
+
+### 已知限制
+
+- PeerConnection 的 Chrome video gate 已覆盖 SDP 和 SRTP/VP8 接收路由，但通用
+  PeerConnection 仍不是完整浏览器 P2P 音视频产品 API；真实采集、渲染和生产级
+  transceiver 生命周期仍由 direct sender / 示例入口承接。
+- host FFmpeg Chrome call 仍是显式 reference codec / 手工验证入口，不进入默认
+  runtime，也不改变默认纯 Uya transport 边界。
+- 纯 Uya Opus codec bridge、`../vp8` UPM path dependency、跨平台 CI matrix 等
+  限制仍沿用 `v0.1.0` / `v0.2.0` 的记录。
+- RK1106 板端真实链路仍需要现场设备和网络环境验收。
+
+### 发布验证
+
+2026-06-12 本地发布验证已通过：
+
+- `git diff --check`
+- `make build`
+- `build/webrtc-uya version`
+- `make test`
+- `make test-ffmpeg-chrome-call`
+- `timeout 15s make host-ffmpeg-chrome-call HOST_CALL_DURATION_US=3000000 HOST_CALL_PORT=0`
+  启动 smoke，确认输出 `host ffmpeg chrome call serving: http://127.0.0.1:.../`
+
 ## v0.2.0 - 2026-06-11
 
 RK1106 H264/G711 板端直推里程碑版本。该版本在 `v0.1.0` 纯 Uya WebRTC transport 基座之上，补齐 RK1106 H264 push-client 的板端打包、浏览器手工预览、G711 音频、低延迟 FIFO catch-up、首屏关键帧处理和 720p 启动策略。

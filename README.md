@@ -1,6 +1,6 @@
 # 纯 Uya WebRTC
 
-本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前发布版本为 `v0.2.0` 里程碑，已经覆盖纯 Uya WebRTC transport、DataChannel、RTP/SRTP、RTCP feedback、Chrome 音视频直推验证、纯 Uya VP8 video-only Chrome gate、显式 FFmpeg codec 测试边界，以及 RK1106 H264/G711 板端直推示例；详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
+本项目目标是用纯 Uya 语言重构一个可与浏览器和主流 WebRTC 端互通的 Native WebRTC 栈。当前发布版本为 `v0.3.0` 里程碑，已经覆盖纯 Uya WebRTC transport、DataChannel、RTP/SRTP、RTCP feedback、Chrome 音视频直推验证、PeerConnection Chrome video SDP/接收路径、纯 Uya VP8 video-only Chrome gate、显式 FFmpeg codec 测试边界，以及 RK1106 H264/G711 板端直推示例；详细设计见 [docs/design.md](docs/design.md)，任务拆解见 [docs/todo.md](docs/todo.md)。
 
 ## 项目目标
 
@@ -38,6 +38,7 @@ make bench
 - `make test-codec-bridge`：显式运行 codec bridge gate；当前会 legacy-staging `../vp8` 纯 Uya sibling，验证 I420 -> VP8 `EncodedFrame` -> I420 以及 RTP VP8 descriptor/reassembly 语义。
 - `make test-ffmpeg-chrome-call`：显式启用 FFmpeg reference codec，Uya direct sender 在发送循环中将 raw PCM/I420 实时编码成 Opus/VP8 后推给 Chrome recvonly peer。
 - `make test-uya-vp8-chrome-call`：显式 legacy-staging `../vp8` 纯 Uya sibling，Uya sender 在发送循环中将 raw I420 实时编码为 VP8 `EncodedFrame`，再通过 RTP/SRTP/UDP 推给 Chrome recvonly peer；当前验证 video-only，Opus 音频 bridge 仍未接入。
+- `make host-ffmpeg-chrome-call`：启动 host 侧摄像头/麦克风到 Chrome 的手工互通入口，默认预构建 sender executable，减少浏览器 Start 到首帧等待。
 - `make preview-uya-vp8-chrome-call MP4=/absolute/path/to/source.mp4`：显式将 MP4 转成 raw I420 源，再由 Uya VP8 live sender 调用 `../vp8` 纯 Uya bridge 实时编码并推给浏览器预览；默认预览会缩到 160px 宽、截取 2s，并按宽度自动选择 FPS（640px 走 10fps，320px 走 15fps，小尺寸走 30fps），可用 `UYA_VP8_PREVIEW_MAX_WIDTH=320 UYA_VP8_PREVIEW_MAX_DURATION=3 UYA_VP8_PREVIEW_FPS=15` 调整；preview server 会先用 `UYA_VP8_PREVIEW_CFLAGS`（默认 `-std=c99 -O3 -g -fno-builtin`）构建 sender，点击 Start 时直接运行该 executable；默认保留 VP8 SIMD/asm dispatch，必要时可用 `UYA_VP8_FORCE_SCALAR=1` 复现 scalar 路径；该路径 video-only，不启用 Opus。
 
 发布记录见 [CHANGELOG.md](CHANGELOG.md)。
