@@ -9,8 +9,10 @@ use webrtc.dtls.server;
 use webrtc.media.model;
 use webrtc.media.direct_runtime;
 use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.rtp_packet;
 use webrtc.srtp.core;
 use webrtc.srtp.model;
+use webrtc.srtp.protect;
 use webrtc.srtp.srtcp;
 use webrtc.stun.model;
 use webrtc.stun.parse;
@@ -62,6 +64,31 @@ fn test_init_srtcp_pair(tx: &SrtcpContext, rx: &SrtcpContext, ssrc: u32) i32 {
     }
     if srtcp_derive_session_keys(tx).error_id != 0 || srtcp_derive_session_keys(rx).error_id != 0 {
         return 122i32;
+    }
+    return 0i32;
+}
+
+fn test_init_srtp_pair(tx: &SrtpContext, rx: &SrtpContext, ssrc: u32) i32 {
+    var key: [byte: SRTP_KEY_BYTES] = [
+        0x30 as byte, 0x31 as byte, 0x32 as byte, 0x33 as byte,
+        0x34 as byte, 0x35 as byte, 0x36 as byte, 0x37 as byte,
+        0x38 as byte, 0x39 as byte, 0x3a as byte, 0x3b as byte,
+        0x3c as byte, 0x3d as byte, 0x3e as byte, 0x3f as byte,
+    ];
+    var salt: [byte: SRTP_SALT_BYTES] = [
+        0xd0 as byte, 0xd1 as byte, 0xd2 as byte, 0xd3 as byte,
+        0xd4 as byte, 0xd5 as byte, 0xd6 as byte, 0xd7 as byte,
+        0xd8 as byte, 0xd9 as byte, 0xda as byte, 0xdb as byte,
+        0xdc as byte, 0xdd as byte,
+    ];
+    if srtp_context_init(tx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 130i32;
+    }
+    if srtp_context_init(rx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 131i32;
+    }
+    if srtp_derive_session_keys(tx).error_id != 0 || srtp_derive_session_keys(rx).error_id != 0 {
+        return 132i32;
     }
     return 0i32;
 }
@@ -866,6 +893,75 @@ fn check_direct_runtime_srtcp_feedback() i32 {
     return 0i32;
 }
 
+fn check_direct_runtime_srtp_receive() i32 {
+    var runtime: DirectRuntime = direct_runtime_make();
+
+    var chrome_video_tx: SrtpContext = srtp_context_make();
+    const video_srtp: i32 = test_init_srtp_pair(&chrome_video_tx, &runtime.video_srtp_recv, 0x05060708u32);
+    if video_srtp != 0i32 {
+        return video_srtp;
+    }
+
+    var payload: [byte: 5] = [
+        0x90 as byte,
+        0x80 as byte,
+        0x01 as byte,
+        0x02 as byte,
+        0x03 as byte,
+    ];
+    var header: RtpHeader = rtp_header_make();
+    header.payload_type = 96u8;
+    header.sequence_number = 345u16;
+    header.timestamp = 123456u32;
+    header.ssrc = 0x05060708u32;
+    header.marker = true;
+
+    var rtp_plain: [byte: 128] = [];
+    const rtp_len: !usize = rtp_packet_write(&header, payload[0:5], rtp_plain[0:128]);
+    if rtp_len.error_id != 0 {
+        return 133i32;
+    }
+
+    var srtp_packet: [byte: 160] = [];
+    const srtp_len: !usize = srtp_protect(&chrome_video_tx, rtp_plain[0:rtp_len.value], srtp_packet[0:160]);
+    if srtp_len.error_id != 0 {
+        return 134i32;
+    }
+
+    var recovered: [byte: 128] = [];
+    const received: !DirectRuntimeRtpPacket = direct_runtime_process_srtp_packet(
+        &runtime,
+        srtp_packet[0:srtp_len.value],
+        recovered[0:128],
+    );
+    if received.error_id != 0 {
+        return 135i32;
+    }
+    if received.value.media_kind != MEDIA_KIND_VIDEO
+        || received.value.ssrc != 0x05060708u32
+        || received.value.payload_type != 96u8
+        || received.value.sequence_number != 345u16
+        || received.value.timestamp != 123456u32
+        || !received.value.marker
+        || received.value.payload_len != 5usize {
+        return 136i32;
+    }
+    if !test_bytes_equal(recovered[12:5], payload[0:5]) {
+        return 137i32;
+    }
+
+    const replay: !DirectRuntimeRtpPacket = direct_runtime_process_srtp_packet(
+        &runtime,
+        srtp_packet[0:srtp_len.value],
+        recovered[0:128],
+    );
+    if replay.error_id == 0 {
+        return 138i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_direct_runtime_stun_response();
     if result != 0i32 {
@@ -888,6 +984,12 @@ fn main() i32 {
     result = check_direct_runtime_srtcp_feedback();
     if result != 0i32 {
         printf("Uya FFmpeg direct runtime SRTCP feedback tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_direct_runtime_srtp_receive();
+    if result != 0i32 {
+        printf("Uya FFmpeg direct runtime SRTP receive tests failed: %d\n", result);
         return 1i32;
     }
 

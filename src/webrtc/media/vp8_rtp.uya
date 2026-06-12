@@ -15,6 +15,9 @@ export error Vp8RtpReassemblyPictureIdMismatch;
 export error Vp8RtpFrameStartRequired;
 export error Vp8RtpFramePayloadTooShort;
 
+export const VP8_RTP_REORDER_BUFFER_SLOTS: usize = 12usize;
+export const VP8_RTP_REORDER_PACKET_BYTES: usize = 2048usize;
+
 export struct Vp8RtpDescriptor {
     extension: bool = false,
     non_reference: bool = false,
@@ -40,6 +43,98 @@ export struct Vp8RtpFrameReassemblyState {
     bytes_written: usize = 0usize,
 }
 
+export struct Vp8RtpSequencedReassemblyState {
+    frame: Vp8RtpFrameReassemblyState = Vp8RtpFrameReassemblyState{},
+    have_expected_sequence: bool = false,
+    expected_sequence: u16 = 0u16,
+    waiting_for_keyframe: bool = true,
+}
+
+export struct Vp8RtpSequencedReassemblyResult {
+    frame_len: usize = 0usize,
+    keyframe: bool = false,
+    dropped: bool = false,
+    sequence_gap: bool = false,
+    waiting_for_keyframe: bool = true,
+}
+
+export struct Vp8RtpReorderSlot {
+    occupied: bool = false,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+    marker: bool = false,
+    packet_len: usize = 0usize,
+    packet: [byte: VP8_RTP_REORDER_PACKET_BYTES] = [],
+}
+
+export struct Vp8RtpReorderBuffer {
+    slots: [Vp8RtpReorderSlot: VP8_RTP_REORDER_BUFFER_SLOTS] = [],
+    have_expected_sequence: bool = false,
+    expected_sequence: u16 = 0u16,
+    buffered_count: usize = 0usize,
+}
+
+export struct Vp8RtpReorderPushResult {
+    accepted: bool = false,
+    duplicate: bool = false,
+    late: bool = false,
+    overflow_gap: bool = false,
+}
+
+export struct Vp8RtpReorderPopResult {
+    popped: bool = false,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+    marker: bool = false,
+    packet_len: usize = 0usize,
+}
+
+fn vp8_rtp_sequenced_reassembly_result_make(
+    frame_len: usize,
+    keyframe: bool,
+    dropped: bool,
+    sequence_gap: bool,
+    waiting_for_keyframe: bool,
+) Vp8RtpSequencedReassemblyResult {
+    return Vp8RtpSequencedReassemblyResult{
+        frame_len: frame_len,
+        keyframe: keyframe,
+        dropped: dropped,
+        sequence_gap: sequence_gap,
+        waiting_for_keyframe: waiting_for_keyframe,
+    };
+}
+
+fn vp8_rtp_reorder_push_result_make(
+    accepted: bool,
+    duplicate: bool,
+    late: bool,
+    overflow_gap: bool,
+) Vp8RtpReorderPushResult {
+    return Vp8RtpReorderPushResult{
+        accepted: accepted,
+        duplicate: duplicate,
+        late: late,
+        overflow_gap: overflow_gap,
+    };
+}
+
+fn vp8_rtp_reorder_pop_result_make(
+    popped: bool,
+    sequence_number: u16,
+    timestamp: u32,
+    marker: bool,
+    packet_len: usize,
+) Vp8RtpReorderPopResult {
+    return Vp8RtpReorderPopResult{
+        popped: popped,
+        sequence_number: sequence_number,
+        timestamp: timestamp,
+        marker: marker,
+        packet_len: packet_len,
+    };
+}
+
 fn vp8_rtp_copy_bytes(dst: &[byte], src: &[byte], len: usize) !void {
     if len > dst.len || len > src.len {
         return error.Vp8RtpBufferTooSmall;
@@ -60,6 +155,19 @@ export fn vp8_rtp_frame_reassembly_state_make() Vp8RtpFrameReassemblyState {
     return Vp8RtpFrameReassemblyState{};
 }
 
+export fn vp8_rtp_sequenced_reassembly_state_make() Vp8RtpSequencedReassemblyState {
+    return Vp8RtpSequencedReassemblyState{
+        frame: vp8_rtp_frame_reassembly_state_make(),
+        have_expected_sequence: false,
+        expected_sequence: 0u16,
+        waiting_for_keyframe: true,
+    };
+}
+
+export fn vp8_rtp_reorder_buffer_make() Vp8RtpReorderBuffer {
+    return Vp8RtpReorderBuffer{};
+}
+
 export fn vp8_rtp_frame_reassembly_reset(state: &Vp8RtpFrameReassemblyState) !void {
     if state == null {
         return error.Vp8RtpReassemblyStateRequired;
@@ -69,6 +177,151 @@ export fn vp8_rtp_frame_reassembly_reset(state: &Vp8RtpFrameReassemblyState) !vo
     state.has_picture_id = false;
     state.picture_id = 0u16;
     state.bytes_written = 0usize;
+}
+
+export fn vp8_rtp_sequence_next(sequence_number: u16) u16 {
+    if sequence_number == 0xFFFFu16 {
+        return 0u16;
+    }
+    return sequence_number + 1u16;
+}
+
+export fn vp8_rtp_sequence_distance_forward(start_sequence: u16, end_sequence: u16) u32 {
+    if end_sequence >= start_sequence {
+        return (end_sequence - start_sequence) as u32;
+    }
+    return 65536u32 - ((start_sequence - end_sequence) as u32);
+}
+
+fn vp8_rtp_reorder_slot_index(sequence_number: u16) usize {
+    return (sequence_number as usize) % VP8_RTP_REORDER_BUFFER_SLOTS;
+}
+
+export fn vp8_rtp_reorder_buffer_reset(state: &Vp8RtpReorderBuffer) !void {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    var index: usize = 0usize;
+    while index < VP8_RTP_REORDER_BUFFER_SLOTS {
+        state.slots[index].occupied = false;
+        state.slots[index].sequence_number = 0u16;
+        state.slots[index].timestamp = 0u32;
+        state.slots[index].marker = false;
+        state.slots[index].packet_len = 0usize;
+        index = index + 1usize;
+    }
+    state.have_expected_sequence = false;
+    state.expected_sequence = 0u16;
+    state.buffered_count = 0usize;
+}
+
+export fn vp8_rtp_reorder_buffer_push(
+    state: &Vp8RtpReorderBuffer,
+    packet: &[byte],
+    sequence_number: u16,
+    timestamp: u32,
+    marker: bool,
+) !Vp8RtpReorderPushResult {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    if packet.len > VP8_RTP_REORDER_PACKET_BYTES {
+        return error.Vp8RtpBufferTooSmall;
+    }
+
+    var overflow_gap: bool = false;
+    if !state.have_expected_sequence {
+        state.have_expected_sequence = true;
+        state.expected_sequence = sequence_number;
+    }
+
+    var distance: u32 = vp8_rtp_sequence_distance_forward(state.expected_sequence, sequence_number);
+    if distance >= 32768u32 {
+        return vp8_rtp_reorder_push_result_make(false, false, true, false);
+    }
+
+    if distance >= (VP8_RTP_REORDER_BUFFER_SLOTS as u32) {
+        try vp8_rtp_reorder_buffer_reset(state);
+        state.have_expected_sequence = true;
+        state.expected_sequence = sequence_number;
+        overflow_gap = true;
+        distance = 0u32;
+    }
+
+    const slot_index: usize = vp8_rtp_reorder_slot_index(sequence_number);
+    if slot_index >= VP8_RTP_REORDER_BUFFER_SLOTS {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    if state.slots[slot_index].occupied {
+        if state.slots[slot_index].sequence_number == sequence_number {
+            return vp8_rtp_reorder_push_result_make(false, true, false, overflow_gap);
+        }
+        try vp8_rtp_reorder_buffer_reset(state);
+        state.have_expected_sequence = true;
+        state.expected_sequence = sequence_number;
+        overflow_gap = true;
+    }
+
+    state.slots[slot_index].occupied = true;
+    state.slots[slot_index].sequence_number = sequence_number;
+    state.slots[slot_index].timestamp = timestamp;
+    state.slots[slot_index].marker = marker;
+    state.slots[slot_index].packet_len = packet.len;
+    try vp8_rtp_copy_bytes(
+        state.slots[slot_index].packet[0:packet.len],
+        packet,
+        packet.len,
+    );
+    state.buffered_count = state.buffered_count + 1usize;
+    return vp8_rtp_reorder_push_result_make(true, false, false, overflow_gap);
+}
+
+export fn vp8_rtp_reorder_buffer_pop_ready(
+    state: &Vp8RtpReorderBuffer,
+    out_packet: &[byte],
+) !Vp8RtpReorderPopResult {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    if !state.have_expected_sequence {
+        return vp8_rtp_reorder_pop_result_make(false, 0u16, 0u32, false, 0usize);
+    }
+
+    const slot_index: usize = vp8_rtp_reorder_slot_index(state.expected_sequence);
+    if slot_index >= VP8_RTP_REORDER_BUFFER_SLOTS {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    if !state.slots[slot_index].occupied || state.slots[slot_index].sequence_number != state.expected_sequence {
+        return vp8_rtp_reorder_pop_result_make(false, 0u16, 0u32, false, 0usize);
+    }
+    if state.slots[slot_index].packet_len > out_packet.len {
+        return error.Vp8RtpBufferTooSmall;
+    }
+
+    const sequence_number: u16 = state.slots[slot_index].sequence_number;
+    const timestamp: u32 = state.slots[slot_index].timestamp;
+    const marker: bool = state.slots[slot_index].marker;
+    const packet_len: usize = state.slots[slot_index].packet_len;
+    try vp8_rtp_copy_bytes(
+        out_packet[0:packet_len],
+        state.slots[slot_index].packet[0:packet_len],
+        packet_len,
+    );
+    state.slots[slot_index].occupied = false;
+    state.slots[slot_index].packet_len = 0usize;
+    if state.buffered_count > 0usize {
+        state.buffered_count = state.buffered_count - 1usize;
+    }
+    state.expected_sequence = vp8_rtp_sequence_next(sequence_number);
+    return vp8_rtp_reorder_pop_result_make(true, sequence_number, timestamp, marker, packet_len);
+}
+
+export fn vp8_rtp_sequenced_reassembly_wait_for_keyframe(state: &Vp8RtpSequencedReassemblyState) !void {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+    try vp8_rtp_frame_reassembly_reset(&state.frame);
+    state.waiting_for_keyframe = true;
 }
 
 export fn vp8_rtp_descriptor_parse(packet: &[byte]) !Vp8RtpDescriptor {
@@ -203,6 +456,54 @@ export fn vp8_rtp_frame_reassembly_absorb(
         return frame_len;
     }
     return 0usize;
+}
+
+export fn vp8_rtp_frame_reassembly_absorb_sequenced(
+    state: &Vp8RtpSequencedReassemblyState,
+    packet: &[byte],
+    sequence_number: u16,
+    marker: bool,
+    out_frame: &[byte],
+) !Vp8RtpSequencedReassemblyResult {
+    if state == null {
+        return error.Vp8RtpReassemblyStateRequired;
+    }
+
+    const descriptor: Vp8RtpDescriptor = try vp8_rtp_descriptor_parse(packet);
+    const frame_start: bool = vp8_rtp_descriptor_is_frame_start(&descriptor);
+    var packet_keyframe: bool = false;
+    if frame_start {
+        packet_keyframe = try vp8_rtp_payload_is_keyframe(descriptor.payload);
+    }
+
+    var sequence_gap: bool = false;
+    if state.have_expected_sequence && sequence_number != state.expected_sequence {
+        sequence_gap = true;
+        try vp8_rtp_sequenced_reassembly_wait_for_keyframe(state);
+    }
+    state.expected_sequence = vp8_rtp_sequence_next(sequence_number);
+    state.have_expected_sequence = true;
+
+    if state.waiting_for_keyframe && !state.frame.active && (!frame_start || !packet_keyframe) {
+        return vp8_rtp_sequenced_reassembly_result_make(0usize, false, true, sequence_gap, true);
+    }
+
+    const absorb_result: !usize = vp8_rtp_frame_reassembly_absorb(&state.frame, packet, marker, out_frame);
+    if absorb_result.error_id != 0 {
+        try vp8_rtp_sequenced_reassembly_wait_for_keyframe(state);
+        return vp8_rtp_sequenced_reassembly_result_make(0usize, false, true, sequence_gap, true);
+    }
+    if absorb_result.value == 0usize {
+        return vp8_rtp_sequenced_reassembly_result_make(0usize, false, false, sequence_gap, state.waiting_for_keyframe);
+    }
+
+    const keyframe: bool = try vp8_rtp_payload_is_keyframe(out_frame[0:absorb_result.value]);
+    if state.waiting_for_keyframe && !keyframe {
+        return vp8_rtp_sequenced_reassembly_result_make(0usize, false, true, sequence_gap, true);
+    }
+
+    state.waiting_for_keyframe = false;
+    return vp8_rtp_sequenced_reassembly_result_make(absorb_result.value, keyframe, false, sequence_gap, false);
 }
 
 export fn vp8_rtp_descriptor_is_frame_start(descriptor: &Vp8RtpDescriptor) bool {

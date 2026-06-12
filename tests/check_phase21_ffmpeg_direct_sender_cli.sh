@@ -17,16 +17,33 @@ test ! -e tests/fixtures/direct_transport/direct_transport_shim.c
 rg -Fq "uya_ffmpeg_direct_sender" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "rtp_packetize_encoded_frame" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "dtlsSrtpReady" src/webrtc_ffmpeg_direct_sender_main.uya
-rg -Fq "direct_session_parse_chrome_offer_sdp" src/webrtc_ffmpeg_direct_sender_main.uya
-rg -Fq "direct_session_write_passive_answer" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "use webrtc.peer_connection" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "pc.setRemoteChromeOffer" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "pc.createPassiveAnswer" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "pc.initDirectTransport" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "pc.directRuntime" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "pc.processSrtpPacket" src/webrtc_ffmpeg_direct_sender_main.uya
+if rg -Fq "direct_session_parse_chrome_offer_sdp(" src/webrtc_ffmpeg_direct_sender_main.uya || rg -Fq "direct_session_write_passive_answer(" src/webrtc_ffmpeg_direct_sender_main.uya; then
+	printf '%s\n' "FFmpeg Chrome sender must negotiate through PeerConnection methods" >&2
+	exit 1
+fi
 rg -Fq "dtls_identity_fingerprint_sha256_text" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "run_live_sender" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_runtime_process_dtls_datagram" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_runtime_write_stun_binding_response" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_runtime_process_srtcp_feedback" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_sender_write_sender_report" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "direct_sender_write_picture_loss_indication" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_sender_protect_srtcp_packet" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "direct_sender_record_rtcp_feedback" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "direct_sender_record_srtp_packet_received" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "direct_sender_record_inbound_video_frame" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "Vp8RtpReorderBuffer" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "vp8_rtp_reorder_buffer_push" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "vp8_rtp_reorder_buffer_pop_ready" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "CLI_VIDEO_REORDER_MAX_WAIT_US" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "video_reorder_gap_wait_start_us" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "cli_maybe_send_video_pli" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_direct_sender_encode_opus_rtp" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "ffmpeg_codec_encode_video_i420_to_frame" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "cli_http_request" src/webrtc_ffmpeg_direct_sender_main.uya
@@ -130,6 +147,11 @@ rg -Fq '"dtlsSrtpReady":false' "$tmpdir/diagnostics.json"
 rg -Fq '"answerReady":true' "$tmpdir/diagnostics.json"
 rg -Fq '"srtcpPackets":0' "$tmpdir/diagnostics.json"
 rg -Fq '"rtcpSenderReports":0' "$tmpdir/diagnostics.json"
+rg -Fq '"srtpPacketsReceived":0' "$tmpdir/diagnostics.json"
+rg -Fq '"rtpPacketsReceived":0' "$tmpdir/diagnostics.json"
+rg -Fq '"audioRtpPacketsReceived":0' "$tmpdir/diagnostics.json"
+rg -Fq '"videoRtpPacketsReceived":0' "$tmpdir/diagnostics.json"
+rg -Fq '"videoFramesReceived":0' "$tmpdir/diagnostics.json"
 rg -Fq '"srtcpPacketsReceived":0' "$tmpdir/diagnostics.json"
 rg -Fq '"rtcpPacketsReceived":0' "$tmpdir/diagnostics.json"
 test -f "$tmpdir/answer.json"

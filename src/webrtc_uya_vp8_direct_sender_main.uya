@@ -39,7 +39,11 @@ use webrtc.media.direct_sender;
 use webrtc.media.direct_session;
 use webrtc.media.model;
 use webrtc.media.vp8_codec_bridge;
+use webrtc.media.vp8_rtp;
 use webrtc.net.udp;
+use webrtc.peer_connection;
+use webrtc.rtp.rtp_packet;
+use webrtc.runtime;
 
 export error DirectSenderCliInvalidArgs;
 export error DirectSenderCliFileOpenFailed;
@@ -1872,6 +1876,26 @@ fn write_diagnostics_counts(
     try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_packets);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtpPackets\":" as &[byte]);
     try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtp_packets);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"audioRtpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.audio_rtp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"videoRtpPacketsReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.video_rtp_packets_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"videoRtpPayloadBytesReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.video_rtp_payload_bytes_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"videoFramesReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.video_frames_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"videoKeyFramesReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.video_key_frames_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"videoInterFramesReceived\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.video_inter_frames_received);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpLastReceivedSsrc\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_last_received_ssrc);
+    try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtpLastReceivedPayloadType\":" as &[byte]);
+    try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.rtp_last_received_payload_type);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"srtcpPackets\":" as &[byte]);
     try json_append_u64(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, diagnostics.srtcp_packets);
     try answer_json_append(json[0:CLI_MAX_ANSWER_JSON_BYTES], &cursor, ",\"rtcpSenderReports\":" as &[byte]);
@@ -2352,7 +2376,48 @@ fn cli_process_control_datagram(
     return DirectRuntimeOutput{};
 }
 
+fn cli_process_inbound_srtp_datagram(
+    pc: &PeerConnection,
+    sender: &UyaDirectSender,
+    srtp_packet: &[byte],
+    rtp_packet: &[byte],
+    video_reassembly: &Vp8RtpFrameReassemblyState,
+    video_frame_buffer: &[byte],
+) !void {
+    if pc == null || sender == null || srtp_packet.len == 0usize || rtp_packet.len == 0usize {
+        return error.DirectSenderCliRuntimeFailed;
+    }
+    const received: DirectRuntimeRtpPacket = try pc.processSrtpPacket(srtp_packet, rtp_packet);
+    try direct_sender_record_srtp_packet_received(
+        sender,
+        received.media_kind,
+        received.ssrc,
+        received.payload_type,
+        received.payload_len,
+    );
+    if received.media_kind != MEDIA_KIND_VIDEO {
+        return;
+    }
+    const parsed: RtpPacket = try rtp_packet_parse(rtp_packet[0:received.rtp_len]);
+    const frame_len: usize = try vp8_rtp_frame_reassembly_absorb(
+        video_reassembly,
+        parsed.header.payload,
+        parsed.header.marker,
+        video_frame_buffer,
+    );
+    if frame_len == 0usize {
+        return;
+    }
+    const keyframe_result: !bool = vp8_rtp_payload_is_keyframe(video_frame_buffer[0:frame_len]);
+    var keyframe: bool = false;
+    if keyframe_result.error_id == 0 {
+        keyframe = keyframe_result.value;
+    }
+    try direct_sender_record_inbound_video_frame(sender, keyframe, frame_len);
+}
+
 fn run_live_uya_vp8_sender(
+    pc: &PeerConnection,
     socket: &UdpSocket,
     offer: &DirectSessionOffer,
     diagnostics_path: &byte,
@@ -2364,7 +2429,7 @@ fn run_live_uya_vp8_sender(
     video_frame_duration_us: u32,
     codec_provider_id: u8,
 ) !UyaDirectSenderDiagnostics {
-    if video_source == null || codec_provider_id != CODEC_PROVIDER_UYA {
+    if pc == null || video_source == null || codec_provider_id != CODEC_PROVIDER_UYA {
         return error.DirectSenderCliRuntimeFailed;
     }
 
@@ -2384,8 +2449,11 @@ fn run_live_uya_vp8_sender(
     sender_config.video_mid = offer.video.mid;
     try uya_direct_sender_init(&sender, sender_config);
 
-    var runtime: DirectRuntime = direct_runtime_make();
-    try direct_runtime_init(&runtime, audio_ssrc, video_ssrc);
+    try pc.initDirectTransport(audio_ssrc, video_ssrc);
+    const direct_runtime_ref: &DirectRuntime = pc.directRuntime();
+    if direct_runtime_ref == null {
+        return error.DirectSenderCliRuntimeFailed;
+    }
 
     var v4l2_capture: CliV4L2Capture = CliV4L2Capture{};
     const raw_video_fd_result: !i32 = open_optional_read_fd(raw_video_path);
@@ -2441,8 +2509,19 @@ fn run_live_uya_vp8_sender(
         close_optional_fd(raw_video_fd);
         return error.DirectSenderCliRuntimeFailed;
     }
+    const received_video_storage: &byte = malloc(output_capacity) as &byte;
+    if received_video_storage == null {
+        free(encoded_video_storage as &void);
+        free(v_storage as &void);
+        free(u_storage as &void);
+        free(y_storage as &void);
+        cli_v4l2_capture_close(&v4l2_capture);
+        close_optional_fd(raw_video_fd);
+        return error.DirectSenderCliRuntimeFailed;
+    }
 
     var encoder: Vp8Encoder = vp8_codec_bridge_encoder_init(video_source.width, video_source.height) catch {
+        free(received_video_storage as &void);
         free(encoded_video_storage as &void);
         free(v_storage as &void);
         free(u_storage as &void);
@@ -2455,6 +2534,7 @@ fn run_live_uya_vp8_sender(
     var selected_addr: [byte: UDP_SOCKADDR_BYTES] = [];
     var selected_addr_len: u32 = 0u32;
     var recv_slot: UdpRecvSlot = UdpRecvSlot{};
+    var inbound_video_reassembly: Vp8RtpFrameReassemblyState = vp8_rtp_frame_reassembly_state_make();
     const start_us: u64 = cli_now_us();
     var dtls_ready: bool = false;
     var media_start_us: u64 = 0u64;
@@ -2482,6 +2562,7 @@ fn run_live_uya_vp8_sender(
                 cli_write_stderr("uya_vp8_direct_sender: live timeout before media duration completed\n" as &[byte]);
             }
             vp8_codec_bridge_encoder_deinit(&encoder);
+            free(received_video_storage as &void);
             free(encoded_video_storage as &void);
             free(v_storage as &void);
             free(u_storage as &void);
@@ -2496,6 +2577,7 @@ fn run_live_uya_vp8_sender(
             sender.diagnostics.udp_datagrams_received = sender.diagnostics.udp_datagrams_received + 1u64;
             const payload_for_kind: &[byte] = recv_slot.payload[0:recv_slot.payload_len];
             const received_kind: u8 = cli_packet_kind(payload_for_kind);
+            var handled_as_media: bool = false;
             if received_kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
                 sender.diagnostics.stun_packets_received = sender.diagnostics.stun_packets_received + 1u64;
                 if !logged_stun {
@@ -2508,37 +2590,58 @@ fn run_live_uya_vp8_sender(
             } else if received_kind == DIRECT_RUNTIME_OUTPUT_KIND_SRTCP {
                 _ = direct_sender_record_srtcp_packet_received(&sender) catch {};
             } else {
-                sender.diagnostics.unknown_packets_received = sender.diagnostics.unknown_packets_received + 1u64;
+                if dtls_ready {
+                    var inbound_rtp_packet: [byte: CLI_RTP_PACKET_BYTES] = [];
+                    const inbound_result: !void = cli_process_inbound_srtp_datagram(
+                        pc,
+                        &sender,
+                        payload_for_kind,
+                        inbound_rtp_packet[0:CLI_RTP_PACKET_BYTES],
+                        &inbound_video_reassembly,
+                        received_video_storage[0:output_capacity],
+                    );
+                    if inbound_result.error_id == 0 {
+                        handled_as_media = true;
+                    } else {
+                        _ = vp8_rtp_frame_reassembly_reset(&inbound_video_reassembly) catch {};
+                        sender.diagnostics.unknown_packets_received = sender.diagnostics.unknown_packets_received + 1u64;
+                        sender.diagnostics.runtime_errors = sender.diagnostics.runtime_errors + 1u64;
+                    }
+                } else {
+                    sender.diagnostics.unknown_packets_received = sender.diagnostics.unknown_packets_received + 1u64;
+                }
             }
-            const control_out: !DirectRuntimeOutput = cli_process_control_datagram(
-                socket,
-                &sender,
-                &runtime,
-                "uyaDirectPwd012345678901234" as &[byte],
-                &recv_slot,
-                selected_addr[0:UDP_SOCKADDR_BYTES],
-                &selected_addr_len,
-            );
-            if control_out.error_id == 0 {
-                if control_out.value.bytes_written > 0usize {
-                    if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
-                        sender.diagnostics.stun_responses_sent = sender.diagnostics.stun_responses_sent + 1u64;
-                    } else if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS {
-                        sender.diagnostics.dtls_responses_sent = sender.diagnostics.dtls_responses_sent + 1u64;
+            if !handled_as_media && (received_kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN || received_kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS || received_kind == DIRECT_RUNTIME_OUTPUT_KIND_SRTCP) {
+                const control_out: !DirectRuntimeOutput = cli_process_control_datagram(
+                    socket,
+                    &sender,
+                    direct_runtime_ref,
+                    "uyaDirectPwd012345678901234" as &[byte],
+                    &recv_slot,
+                    selected_addr[0:UDP_SOCKADDR_BYTES],
+                    &selected_addr_len,
+                );
+                if control_out.error_id == 0 {
+                    if control_out.value.bytes_written > 0usize {
+                        if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_STUN {
+                            sender.diagnostics.stun_responses_sent = sender.diagnostics.stun_responses_sent + 1u64;
+                        } else if control_out.value.kind == DIRECT_RUNTIME_OUTPUT_KIND_DTLS {
+                            sender.diagnostics.dtls_responses_sent = sender.diagnostics.dtls_responses_sent + 1u64;
+                        }
                     }
-                }
-                if control_out.value.dtls_srtp_ready && !dtls_ready {
-                    dtls_ready = true;
-                    media_start_us = now_us;
-                    next_video_us = now_us;
-                    next_rtcp_us = now_us;
-                    if !logged_dtls {
-                        logged_dtls = true;
-                        cli_write_stderr("uya_vp8_direct_sender: DTLS/SRTP ready\n" as &[byte]);
+                    if control_out.value.dtls_srtp_ready && !dtls_ready {
+                        dtls_ready = true;
+                        media_start_us = now_us;
+                        next_video_us = now_us;
+                        next_rtcp_us = now_us;
+                        if !logged_dtls {
+                            logged_dtls = true;
+                            cli_write_stderr("uya_vp8_direct_sender: DTLS/SRTP ready\n" as &[byte]);
+                        }
                     }
+                } else {
+                    sender.diagnostics.runtime_errors = sender.diagnostics.runtime_errors + 1u64;
                 }
-            } else {
-                sender.diagnostics.runtime_errors = sender.diagnostics.runtime_errors + 1u64;
             }
         }
 
@@ -2554,7 +2657,7 @@ fn run_live_uya_vp8_sender(
                         selected_addr[0:UDP_SOCKADDR_BYTES],
                         selected_addr_len,
                         &sender,
-                        &runtime,
+                        direct_runtime_ref,
                         &encoder,
                         raw_video_fd,
                         &v4l2_capture,
@@ -2574,7 +2677,7 @@ fn run_live_uya_vp8_sender(
                     next_video_us = next_video_us + (video_frame_duration_us as u64);
                 }
                 if now_us >= next_rtcp_us {
-                    try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, &runtime, MEDIA_KIND_VIDEO, now_us);
+                    try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, direct_runtime_ref, MEDIA_KIND_VIDEO, now_us);
                     next_rtcp_us = next_rtcp_us + CLI_RTCP_REPORT_INTERVAL_US;
                 }
             } else if video_frames_sent > 0u64 {
@@ -2584,6 +2687,7 @@ fn run_live_uya_vp8_sender(
     }
 
     vp8_codec_bridge_encoder_deinit(&encoder);
+    free(received_video_storage as &void);
     free(encoded_video_storage as &void);
     free(v_storage as &void);
     free(u_storage as &void);
@@ -2693,11 +2797,31 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         cli_write_stderr("uya_vp8_direct_sender: failed to extract Chrome offer SDP JSON string\n" as &[byte]);
         return 4;
     }
-    const session_result: !DirectSessionOffer = direct_session_parse_chrome_offer_sdp(offer_sdp[0:offer_sdp_len]);
-    if session_result.error_id != 0 {
+    var rtc_config: RtcConfiguration = rtc_configuration_make();
+    const rtc_runtime_result: !RtcRuntime = rtc_runtime_init(&rtc_config);
+    if rtc_runtime_result.error_id != 0 {
+        cli_write_stderr("uya_vp8_direct_sender: failed to initialize PeerConnection runtime\n" as &[byte]);
+        return 5;
+    }
+    var rtc_runtime: RtcRuntime = rtc_runtime_result.value;
+    const peer_connection_result: !PeerConnection = peer_connection_new(&rtc_runtime, &rtc_config);
+    if peer_connection_result.error_id != 0 {
+        cli_write_stderr("uya_vp8_direct_sender: failed to create PeerConnection\n" as &[byte]);
+        return 5;
+    }
+    var pc: PeerConnection = peer_connection_result.value;
+
+    const remote_offer_result: !void = pc.setRemoteChromeOffer(offer_sdp[0:offer_sdp_len]);
+    if remote_offer_result.error_id != 0 {
         cli_write_stderr("uya_vp8_direct_sender: Chrome offer SDP is not a recvonly Opus/VP8 host-ICE offer\n" as &[byte]);
         return 4;
     }
+    const session_result: !DirectSessionOffer = pc.directOffer();
+    if session_result.error_id != 0 {
+        cli_write_stderr("uya_vp8_direct_sender: PeerConnection did not retain the parsed Chrome offer\n" as &[byte]);
+        return 5;
+    }
+    const session_offer: DirectSessionOffer = session_result.value;
 
     var live_socket: UdpSocket = UdpSocket{};
     var local_udp_port: u16 = CLI_LOCAL_UDP_PORT;
@@ -2716,18 +2840,17 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
         local_udp_port = live_socket.local_port;
     }
 
-    var answer_sdp: [byte: CLI_MAX_ANSWER_SDP_BYTES] = [];
-    const answer_len: !usize = direct_session_write_passive_answer(
-        &session_result.value,
+    var answer_description: PeerConnectionDescription = PeerConnectionDescription{};
+    const passive_answer_result: !void = pc.createPassiveAnswer(
         local_host_buf[0:local_host_len],
         local_udp_port,
         "uyaDirect" as &[byte],
         "uyaDirectPwd012345678901234" as &[byte],
         dtls_identity_fingerprint_sha256_text(),
-        answer_sdp[0:CLI_MAX_ANSWER_SDP_BYTES],
+        &answer_description,
     );
-    if answer_len.error_id != 0 {
-        cli_write_stderr("uya_vp8_direct_sender: failed to build Uya passive SDP answer\n" as &[byte]);
+    if passive_answer_result.error_id != 0 {
+        cli_write_stderr("uya_vp8_direct_sender: failed to build PeerConnection passive SDP answer\n" as &[byte]);
         if !dry_run {
             udp_socket_close(&live_socket);
         }
@@ -2735,7 +2858,7 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
     var answer_json: [byte: CLI_MAX_ANSWER_JSON_BYTES] = [];
     var answer_json_len: usize = 0usize;
-    const build_answer_result: !void = build_answer_json(answer_json[0:CLI_MAX_ANSWER_JSON_BYTES], &answer_json_len, answer_sdp[0:answer_len.value]);
+    const build_answer_result: !void = build_answer_json(answer_json[0:CLI_MAX_ANSWER_JSON_BYTES], &answer_json_len, answer_description.text[0:answer_description.text_len]);
     if build_answer_result.error_id != 0 {
         cli_write_stderr("uya_vp8_direct_sender: failed to build answer JSON\n" as &[byte]);
         if !dry_run {
@@ -2792,8 +2915,9 @@ export extern fn main(argc: i32, argv: & &byte) i32 {
     }
 
     const live_result: !UyaDirectSenderDiagnostics = run_live_uya_vp8_sender(
+        &pc,
         &live_socket,
-        &session_result.value,
+        &session_offer,
         diagnostics_path,
         raw_video_path,
         v4l2_device,

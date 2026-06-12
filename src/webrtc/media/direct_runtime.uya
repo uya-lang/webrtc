@@ -12,8 +12,10 @@ use webrtc.dtls.server;
 use webrtc.media.direct_session;
 use webrtc.media.model;
 use webrtc.rtcp.rtcp_packet;
+use webrtc.rtp.rtp_packet;
 use webrtc.srtp.dtls_keys;
 use webrtc.srtp.model;
+use webrtc.srtp.protect;
 use webrtc.srtp.srtcp;
 use webrtc.stun.model;
 use webrtc.stun.parse;
@@ -59,6 +61,17 @@ export struct DirectRuntimeRtcpFeedback {
     report_blocks: u8 = 0u8,
 }
 
+export struct DirectRuntimeRtpPacket {
+    rtp_len: usize = 0usize,
+    media_kind: u8 = MEDIA_KIND_UNKNOWN,
+    ssrc: u32 = 0u32,
+    payload_type: u8 = 0u8,
+    sequence_number: u16 = 0u16,
+    timestamp: u32 = 0u32,
+    marker: bool = false,
+    payload_len: usize = 0usize,
+}
+
 export struct DirectRuntime {
     dtls_state: u8 = DIRECT_RUNTIME_DTLS_STATE_NEW,
     selected_srtp_profile: u16 = 0u16,
@@ -94,6 +107,10 @@ export struct DirectRuntime {
     video_srtcp_recv: SrtcpContext = SrtcpContext{},
     audio_ssrc: u32 = DIRECT_SESSION_DEFAULT_AUDIO_SSRC,
     video_ssrc: u32 = DIRECT_SESSION_DEFAULT_VIDEO_SSRC,
+    remote_audio_payload_type: u8 = 0u8,
+    remote_audio_payload_type_present: bool = false,
+    remote_video_payload_type: u8 = 0u8,
+    remote_video_payload_type_present: bool = false,
 }
 
 fn direct_runtime_copy_bytes(dst: &[byte], src: &[byte]) !void {
@@ -223,6 +240,63 @@ fn direct_runtime_media_kind_for_ssrc(runtime: &DirectRuntime, ssrc: u32) u8 {
         return MEDIA_KIND_VIDEO;
     }
     return MEDIA_KIND_UNKNOWN;
+}
+
+fn direct_runtime_recv_media_kind_for_ssrc(runtime: &DirectRuntime, ssrc: u32) u8 {
+    if runtime == null {
+        return MEDIA_KIND_UNKNOWN;
+    }
+    if ssrc == runtime.audio_srtp_recv.ssrc {
+        return MEDIA_KIND_AUDIO;
+    }
+    if ssrc == runtime.video_srtp_recv.ssrc {
+        return MEDIA_KIND_VIDEO;
+    }
+    return MEDIA_KIND_UNKNOWN;
+}
+
+fn direct_runtime_recv_media_kind_for_payload_type(runtime: &DirectRuntime, payload_type: u8) u8 {
+    if runtime == null {
+        return MEDIA_KIND_UNKNOWN;
+    }
+    if runtime.remote_audio_payload_type_present && payload_type == runtime.remote_audio_payload_type {
+        return MEDIA_KIND_AUDIO;
+    }
+    if runtime.remote_video_payload_type_present && payload_type == runtime.remote_video_payload_type {
+        return MEDIA_KIND_VIDEO;
+    }
+    return MEDIA_KIND_UNKNOWN;
+}
+
+fn direct_runtime_rtp_packet_from_plaintext_for_kind(
+    runtime: &DirectRuntime,
+    plaintext: &[byte],
+    expected_kind: u8,
+) !DirectRuntimeRtpPacket {
+    if runtime == null || plaintext.len == 0usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    const packet: RtpPacket = try rtp_packet_parse(plaintext);
+    var media_kind: u8 = direct_runtime_recv_media_kind_for_ssrc(runtime, packet.header.ssrc);
+    if media_kind == MEDIA_KIND_UNKNOWN {
+        media_kind = direct_runtime_recv_media_kind_for_payload_type(runtime, packet.header.payload_type);
+    }
+    if media_kind == MEDIA_KIND_UNKNOWN {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    if expected_kind != MEDIA_KIND_UNKNOWN && media_kind != expected_kind {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    return DirectRuntimeRtpPacket{
+        rtp_len: plaintext.len,
+        media_kind: media_kind,
+        ssrc: packet.header.ssrc,
+        payload_type: packet.header.payload_type,
+        sequence_number: packet.header.sequence_number,
+        timestamp: packet.header.timestamp,
+        marker: packet.header.marker,
+        payload_len: packet.header.payload.len,
+    };
 }
 
 fn direct_runtime_feedback_from_rtcp_segment(
@@ -469,6 +543,10 @@ fn direct_runtime_reset_common(runtime: &DirectRuntime, audio_ssrc: u32, video_s
     runtime.video_srtcp_recv = srtcp_context_make();
     runtime.audio_ssrc = audio_ssrc;
     runtime.video_ssrc = video_ssrc;
+    runtime.remote_audio_payload_type = 0u8;
+    runtime.remote_audio_payload_type_present = false;
+    runtime.remote_video_payload_type = 0u8;
+    runtime.remote_video_payload_type_present = false;
     direct_runtime_zero_bytes(runtime.client_random[0:DTLS_HELLO_RANDOM_BYTES]);
     direct_runtime_zero_bytes(runtime.server_ecdhe_public_key[0:CRYPTO_P256_PUBLIC_KEY_BYTES]);
     direct_runtime_zero_bytes(runtime.server_signature_r[0:CRYPTO_P256_FIELD_BYTES]);
@@ -525,12 +603,30 @@ export fn direct_runtime_make() DirectRuntime {
         video_srtcp_recv: srtcp_context_make(),
         audio_ssrc: DIRECT_SESSION_DEFAULT_AUDIO_SSRC,
         video_ssrc: DIRECT_SESSION_DEFAULT_VIDEO_SSRC,
+        remote_audio_payload_type: 0u8,
+        remote_audio_payload_type_present: false,
+        remote_video_payload_type: 0u8,
+        remote_video_payload_type_present: false,
     };
 }
 
 export fn direct_runtime_init(runtime: &DirectRuntime, audio_ssrc: u32, video_ssrc: u32) !void {
     try direct_runtime_reset_common(runtime, audio_ssrc, video_ssrc);
     try direct_runtime_generate_entropy(runtime);
+}
+
+export fn direct_runtime_set_remote_payload_types(
+    runtime: &DirectRuntime,
+    audio_payload_type: u8,
+    video_payload_type: u8,
+) !void {
+    if runtime == null {
+        return error.DirectRuntimeInvalidPacket;
+    }
+    runtime.remote_audio_payload_type = audio_payload_type;
+    runtime.remote_audio_payload_type_present = true;
+    runtime.remote_video_payload_type = video_payload_type;
+    runtime.remote_video_payload_type_present = true;
 }
 
 export fn direct_runtime_init_with_entropy(
@@ -1008,6 +1104,54 @@ export fn direct_runtime_process_srtcp_feedback(
         feedback.compound_len = video_unprotect.value;
         runtime.video_srtcp_recv = video_candidate;
         return feedback;
+    }
+
+    return error.DirectRuntimeInvalidPacket;
+}
+
+export fn direct_runtime_process_srtp_packet(
+    runtime: &DirectRuntime,
+    srtp_packet: &[byte],
+    rtp_packet: &[byte],
+) !DirectRuntimeRtpPacket {
+    if runtime == null || srtp_packet.len == 0usize || rtp_packet.len == 0usize {
+        return error.DirectRuntimeInvalidPacket;
+    }
+
+    var audio_candidate: SrtpContext = runtime.audio_srtp_recv;
+    const audio_unprotect: !usize = srtp_unprotect(&audio_candidate, srtp_packet, rtp_packet);
+    if audio_unprotect.error_id == 0 {
+        const audio_packet: !DirectRuntimeRtpPacket = direct_runtime_rtp_packet_from_plaintext_for_kind(
+            runtime,
+            rtp_packet[0:audio_unprotect.value],
+            MEDIA_KIND_AUDIO,
+        );
+        if audio_packet.error_id == 0 {
+            if runtime.audio_srtp_recv.ssrc == 0u32 || runtime.audio_srtp_recv.ssrc == 0x01020304u32 {
+                audio_candidate.ssrc = audio_packet.value.ssrc;
+                runtime.audio_srtcp_recv.ssrc = audio_packet.value.ssrc;
+            }
+            runtime.audio_srtp_recv = audio_candidate;
+            return audio_packet.value;
+        }
+    }
+
+    var video_candidate: SrtpContext = runtime.video_srtp_recv;
+    const video_unprotect: !usize = srtp_unprotect(&video_candidate, srtp_packet, rtp_packet);
+    if video_unprotect.error_id == 0 {
+        const video_packet: !DirectRuntimeRtpPacket = direct_runtime_rtp_packet_from_plaintext_for_kind(
+            runtime,
+            rtp_packet[0:video_unprotect.value],
+            MEDIA_KIND_VIDEO,
+        );
+        if video_packet.error_id == 0 {
+            if runtime.video_srtp_recv.ssrc == 0u32 || runtime.video_srtp_recv.ssrc == 0x05060708u32 {
+                video_candidate.ssrc = video_packet.value.ssrc;
+                runtime.video_srtcp_recv.ssrc = video_packet.value.ssrc;
+            }
+            runtime.video_srtp_recv = video_candidate;
+            return video_packet.value;
+        }
     }
 
     return error.DirectRuntimeInvalidPacket;

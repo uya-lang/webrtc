@@ -79,7 +79,7 @@ if rg -Fq "captureStream" src/webrtc/media/ffmpeg_codec.uya src/webrtc/media/ffm
 fi
 
 non_codec_externs="$(
-	rg -n "@c_import\\(|uya_ffmpeg_codec_" src tests \
+	rg -n "uya_ffmpeg_codec_" src tests \
 		-g '*.uya' \
 		-g '!src/webrtc/media/ffmpeg_codec.uya' \
 		-g '!tests/fixtures/**' || true

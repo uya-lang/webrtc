@@ -1,0 +1,375 @@
+use libc.printf;
+use webrtc.binary;
+use webrtc.media.direct_runtime;
+use webrtc.media.direct_session;
+use webrtc.media.model;
+use webrtc.peer_connection;
+use webrtc.receiver;
+use webrtc.rtp.rtp_packet;
+use webrtc.runtime;
+use webrtc.sender;
+use webrtc.srtp.core;
+use webrtc.srtp.model;
+use webrtc.srtp.protect;
+use webrtc.track;
+use webrtc.transceiver;
+
+fn bytes_contains_at(haystack: &[byte], offset: usize, needle: &[byte]) bool {
+    if offset + needle.len > haystack.len {
+        return false;
+    }
+    var index: usize = 0usize;
+    while index < needle.len {
+        if haystack[offset + index] != needle[index] {
+            return false;
+        }
+        index = index + 1usize;
+    }
+    return true;
+}
+
+fn bytes_contains(haystack: &[byte], needle: &[byte]) bool {
+    if needle.len == 0usize {
+        return true;
+    }
+    var index: usize = 0usize;
+    while index + needle.len <= haystack.len {
+        if bytes_contains_at(haystack, index, needle) {
+            return true;
+        }
+        index = index + 1usize;
+    }
+    return false;
+}
+
+fn make_video_frame(sequence_id: u64, payload: &[byte]) EncodedFrame {
+    var frame: EncodedFrame = encoded_frame_make();
+    frame.codec_id = CODEC_ID_VP8;
+    frame.media_kind = MEDIA_KIND_VIDEO;
+    frame.sequence_id = sequence_id;
+    frame.timestamp = 90000u64 + sequence_id;
+    frame.duration_us = 33333u32;
+    frame.is_keyframe = sequence_id == 1u64;
+    frame.marker = true;
+    frame.payload = payload;
+    return frame;
+}
+
+fn init_test_srtp_pair(tx: &SrtpContext, rx: &SrtpContext, ssrc: u32) i32 {
+    var key: [byte: SRTP_KEY_BYTES] = [
+        0x40 as byte, 0x41 as byte, 0x42 as byte, 0x43 as byte,
+        0x44 as byte, 0x45 as byte, 0x46 as byte, 0x47 as byte,
+        0x48 as byte, 0x49 as byte, 0x4a as byte, 0x4b as byte,
+        0x4c as byte, 0x4d as byte, 0x4e as byte, 0x4f as byte,
+    ];
+    var salt: [byte: SRTP_SALT_BYTES] = [
+        0xe0 as byte, 0xe1 as byte, 0xe2 as byte, 0xe3 as byte,
+        0xe4 as byte, 0xe5 as byte, 0xe6 as byte, 0xe7 as byte,
+        0xe8 as byte, 0xe9 as byte, 0xea as byte, 0xeb as byte,
+        0xec as byte, 0xed as byte,
+    ];
+    if srtp_context_init(tx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 70i32;
+    }
+    if srtp_context_init(rx, SRTP_PROFILE_AES128_CM_HMAC_SHA1_80, ssrc, key[0:SRTP_KEY_BYTES], salt[0:SRTP_SALT_BYTES]).error_id != 0 {
+        return 71i32;
+    }
+    if srtp_derive_session_keys(tx).error_id != 0 || srtp_derive_session_keys(rx).error_id != 0 {
+        return 72i32;
+    }
+    return 0i32;
+}
+
+fn check_chrome_style_video_offer() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 10i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 11i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    var init: TransceiverInit = transceiver_init_make();
+    init.direction = TRANSCEIVER_DIRECTION_SENDRECV;
+    const transceiver_result: !Transceiver = pc.addTransceiver(MEDIA_KIND_VIDEO, &init);
+    if transceiver_result.error_id != 0 {
+        return 12i32;
+    }
+
+    var offer: PeerConnectionDescription = PeerConnectionDescription{};
+    const offer_result: !void = pc.createOffer(&offer);
+    if offer_result.error_id != 0 {
+        return 13i32;
+    }
+
+    const offer_sdp: &[byte] = offer.text[0:offer.text_len];
+    if !bytes_contains(offer_sdp, "m=video 9 UDP/TLS/RTP/SAVPF 96 102" as &[byte]) {
+        return 14i32;
+    }
+    if !bytes_contains(offer_sdp, "a=sendrecv" as &[byte]) {
+        return 15i32;
+    }
+    if !bytes_contains(offer_sdp, "a=rtpmap:96 VP8/90000" as &[byte]) {
+        return 16i32;
+    }
+    if !bytes_contains(offer_sdp, "a=rtpmap:102 H264/90000" as &[byte]) {
+        return 17i32;
+    }
+
+    return 0i32;
+}
+
+fn check_chrome_style_remote_video_answer() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 20i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 21i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    const chrome_offer: &[byte] = "v=0\r\no=- 548391 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=sendrecv\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=setup:actpass\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=rtpmap:102 H264/90000\r\n" as &[byte];
+    const remote_result: !void = pc.setRemoteDescription(chrome_offer);
+    if remote_result.error_id != 0 {
+        return 22i32;
+    }
+
+    var answer: PeerConnectionDescription = PeerConnectionDescription{};
+    const answer_result: !void = pc.createAnswer(&answer);
+    if answer_result.error_id != 0 {
+        return 23i32;
+    }
+
+    const answer_sdp: &[byte] = answer.text[0:answer.text_len];
+    if !bytes_contains(answer_sdp, "m=video 9 UDP/TLS/RTP/SAVPF 96 102" as &[byte]) {
+        return 24i32;
+    }
+    if !bytes_contains(answer_sdp, "a=setup:active" as &[byte]) {
+        return 25i32;
+    }
+    if peer_connection_transceiver_count(&pc) != 1usize {
+        return 26i32;
+    }
+
+    return 0i32;
+}
+
+fn check_chrome_direct_transport_methods() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 50i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if pc_result.error_id != 0 {
+        return 51i32;
+    }
+    var pc: PeerConnection = pc_result.value;
+
+    const chrome_offer: &[byte] = "v=0\r\no=- 548391 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 0.0.0.0\r\na=mid:0\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=setup:actpass\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=candidate:1 1 udp 2122260223 127.0.0.1 43123 typ host generation 0 ufrag chromeUfrag network-id 1\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:1\r\na=recvonly\r\na=ice-ufrag:chromeUfrag\r\na=ice-pwd:chromePwd012345678901234567\r\na=setup:actpass\r\na=rtcp-mux\r\na=rtpmap:96 VP8/90000\r\na=candidate:2 1 UDP 2122260223 127.0.0.1 43124 typ host generation 0 ufrag chromeUfrag network-id 1\r\n" as &[byte];
+    const remote_result: !void = pc.setRemoteChromeOffer(chrome_offer);
+    if remote_result.error_id != 0 {
+        return 52i32;
+    }
+    const direct_offer_result: !DirectSessionOffer = pc.directOffer();
+    if direct_offer_result.error_id != 0 {
+        return 53i32;
+    }
+    if direct_offer_result.value.video.payload_type != 96u8 || direct_offer_result.value.audio.payload_type != 111u8 {
+        return 54i32;
+    }
+
+    var answer: PeerConnectionDescription = PeerConnectionDescription{};
+    const answer_result: !void = pc.createPassiveAnswer(
+        "127.0.0.1" as &[byte],
+        49999u16,
+        "uyaDirect" as &[byte],
+        "uyaDirectPwd012345678901234" as &[byte],
+        "00:11:22" as &[byte],
+        &answer,
+    );
+    if answer_result.error_id != 0 {
+        return 55i32;
+    }
+    const answer_sdp: &[byte] = answer.text[0:answer.text_len];
+    if !bytes_contains(answer_sdp, "a=ice-lite" as &[byte]) {
+        return 56i32;
+    }
+    if !bytes_contains(answer_sdp, "a=setup:passive" as &[byte]) {
+        return 57i32;
+    }
+    if !bytes_contains(answer_sdp, "m=video 9 UDP/TLS/RTP/SAVPF 96" as &[byte]) {
+        return 58i32;
+    }
+
+    const transport_result: !void = pc.initDirectTransport(0x41554431u32, 0x56494431u32);
+    if transport_result.error_id != 0 {
+        return 59i32;
+    }
+    const direct_runtime: &DirectRuntime = pc.directRuntime();
+    if direct_runtime == null {
+        return 60i32;
+    }
+    if direct_runtime.video_ssrc != 0x56494431u32 {
+        return 61i32;
+    }
+
+    var chrome_video_tx: SrtpContext = srtp_context_make();
+    const srtp_init: i32 = init_test_srtp_pair(&chrome_video_tx, &direct_runtime.video_srtp_recv, 0x05060708u32);
+    if srtp_init != 0i32 {
+        return srtp_init;
+    }
+
+    var payload: [byte: 4] = [0x90 as byte, 0x80 as byte, 0x01 as byte, 0x02 as byte];
+    var header: RtpHeader = rtp_header_make();
+    header.payload_type = 96u8;
+    header.sequence_number = 77u16;
+    header.timestamp = 90000u32;
+    header.ssrc = 0x05060708u32;
+    header.marker = true;
+    var plain_rtp: [byte: 64] = [];
+    const plain_len: !usize = rtp_packet_write(&header, payload[0:4], plain_rtp[0:64]);
+    if plain_len.error_id != 0 {
+        return 62i32;
+    }
+    var protected_rtp: [byte: 96] = [];
+    const protected_len: !usize = srtp_protect(&chrome_video_tx, plain_rtp[0:plain_len.value], protected_rtp[0:96]);
+    if protected_len.error_id != 0 {
+        return 63i32;
+    }
+    var recovered_rtp: [byte: 64] = [];
+    const received: !DirectRuntimeRtpPacket = pc.processSrtpPacket(
+        protected_rtp[0:protected_len.value],
+        recovered_rtp[0:64],
+    );
+    if received.error_id != 0 {
+        return 64i32;
+    }
+    if received.value.media_kind != MEDIA_KIND_VIDEO
+        || received.value.payload_type != 96u8
+        || received.value.sequence_number != 77u16
+        || received.value.timestamp != 90000u32
+        || received.value.payload_len != 4usize {
+        return 65i32;
+    }
+    if !constant_time_bytes_equal(recovered_rtp[12:4], payload[0:4]) {
+        return 66i32;
+    }
+
+    return 0i32;
+}
+
+fn check_bidirectional_video_frames() i32 {
+    var config: RtcConfiguration = rtc_configuration_make();
+    const runtime_result: !RtcRuntime = rtc_runtime_init(&config);
+    if runtime_result.error_id != 0 {
+        return 30i32;
+    }
+    var runtime: RtcRuntime = runtime_result.value;
+
+    const left_pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    const right_pc_result: !PeerConnection = peer_connection_new(&runtime, &config);
+    if left_pc_result.error_id != 0 || right_pc_result.error_id != 0 {
+        return 31i32;
+    }
+    var left_pc: PeerConnection = left_pc_result.value;
+    var right_pc: PeerConnection = right_pc_result.value;
+
+    var left_track: Track = track_make();
+    var right_track: Track = track_make();
+    if track_init(&left_track, 1u64, MEDIA_KIND_VIDEO).error_id != 0 || track_init(&right_track, 2u64, MEDIA_KIND_VIDEO).error_id != 0 {
+        return 32i32;
+    }
+
+    const left_sender_result: !Sender = left_pc.addTrack(&left_track);
+    const right_sender_result: !Sender = right_pc.addTrack(&right_track);
+    if left_sender_result.error_id != 0 || right_sender_result.error_id != 0 {
+        return 33i32;
+    }
+    var left_sender: Sender = left_sender_result.value;
+    var right_sender: Sender = right_sender_result.value;
+
+    var left_receiver: Receiver = receiver_make();
+    var right_receiver: Receiver = receiver_make();
+    if receiver_init(&left_receiver, 3u64, MEDIA_KIND_VIDEO).error_id != 0 || receiver_init(&right_receiver, 4u64, MEDIA_KIND_VIDEO).error_id != 0 {
+        return 34i32;
+    }
+    if !receiver_open(&left_receiver) || !receiver_open(&right_receiver) {
+        return 35i32;
+    }
+
+    var left_payload: [byte: 4] = ['l' as byte, 'e' as byte, 'f' as byte, 't' as byte];
+    var right_payload: [byte: 5] = ['r' as byte, 'i' as byte, 'g' as byte, 'h' as byte, 't' as byte];
+    var left_frame: EncodedFrame = make_video_frame(1u64, left_payload[0:4]);
+    var right_frame: EncodedFrame = make_video_frame(2u64, right_payload[0:5]);
+
+    if sender_send_encoded_frame(&left_sender, &left_frame).error_id != 0 {
+        return 36i32;
+    }
+    if sender_send_encoded_frame(&right_sender, &right_frame).error_id != 0 {
+        return 37i32;
+    }
+
+    const left_to_right: !bool = left_pc.routeVideoFrame(&left_sender, &right_receiver);
+    const right_to_left: !bool = right_pc.routeVideoFrame(&right_sender, &left_receiver);
+    if left_to_right.error_id != 0 || right_to_left.error_id != 0 || !left_to_right.value || !right_to_left.value {
+        return 38i32;
+    }
+
+    var received_left: EncodedFrame = encoded_frame_make();
+    var received_right: EncodedFrame = encoded_frame_make();
+    const read_left: !bool = receiver_read_encoded_frame(&left_receiver, &received_left);
+    const read_right: !bool = receiver_read_encoded_frame(&right_receiver, &received_right);
+    if read_left.error_id != 0 || read_right.error_id != 0 || !read_left.value || !read_right.value {
+        return 39i32;
+    }
+    if !constant_time_bytes_equal(received_left.payload, right_payload[0:5]) {
+        return 40i32;
+    }
+    if !constant_time_bytes_equal(received_right.payload, left_payload[0:4]) {
+        return 41i32;
+    }
+
+    return 0i32;
+}
+
+fn main() i32 {
+    var result: i32 = check_chrome_style_video_offer();
+    if result != 0i32 {
+        printf("PeerConnection Chrome video offer test failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_chrome_style_remote_video_answer();
+    if result != 0i32 {
+        printf("PeerConnection Chrome video answer test failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_bidirectional_video_frames();
+    if result != 0i32 {
+        printf("PeerConnection bidirectional video test failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_chrome_direct_transport_methods();
+    if result != 0i32 {
+        printf("PeerConnection Chrome direct transport test failed: %d\n", result);
+        return 1i32;
+    }
+
+    printf("PeerConnection Chrome video tests passed\n");
+    return 0i32;
+}

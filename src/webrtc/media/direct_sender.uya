@@ -63,11 +63,28 @@ export struct UyaDirectSenderDiagnostics {
     h264_inter_frames: u64 = 0u64,
     srtp_packets: u64 = 0u64,
     srtcp_packets: u64 = 0u64,
+    srtp_packets_received: u64 = 0u64,
+    rtp_packets_received: u64 = 0u64,
+    audio_rtp_packets_received: u64 = 0u64,
+    video_rtp_packets_received: u64 = 0u64,
+    video_rtp_payload_bytes_received: u64 = 0u64,
+    video_rtp_sequence_gaps_received: u64 = 0u64,
+    video_frames_received: u64 = 0u64,
+    video_frames_dropped_received: u64 = 0u64,
+    video_key_frames_received: u64 = 0u64,
+    video_inter_frames_received: u64 = 0u64,
+    audio_frames_decoded: u64 = 0u64,
+    audio_playback_bytes: u64 = 0u64,
+    video_frames_decoded: u64 = 0u64,
+    video_playback_bytes: u64 = 0u64,
+    rtp_last_received_ssrc: u64 = 0u64,
+    rtp_last_received_payload_type: u64 = 0u64,
     rtcp_sender_reports_sent: u64 = 0u64,
     srtcp_packets_received: u64 = 0u64,
     rtcp_packets_received: u64 = 0u64,
     rtcp_receiver_reports_received: u64 = 0u64,
     rtcp_feedback_packets_received: u64 = 0u64,
+    rtcp_pli_packets_sent: u64 = 0u64,
     rtcp_nack_packets_received: u64 = 0u64,
     rtcp_pli_packets_received: u64 = 0u64,
     rtcp_fir_packets_received: u64 = 0u64,
@@ -863,6 +880,24 @@ export fn direct_sender_write_sender_report(
     return written;
 }
 
+export fn direct_sender_write_picture_loss_indication(
+    sender: &UyaDirectSender,
+    sender_ssrc: u32,
+    media_ssrc: u32,
+    out_packet: &[byte],
+) !usize {
+    if sender == null || sender_ssrc == 0u32 || media_ssrc == 0u32 || out_packet.len == 0usize {
+        return error.DirectSenderInvalidConfig;
+    }
+
+    var pli: RtcpPliPacket = rtcp_pli_packet_make();
+    pli.sender_ssrc = sender_ssrc;
+    pli.media_ssrc = media_ssrc;
+    const written: usize = try rtcp_pli_write(&pli, out_packet);
+    sender.diagnostics.rtcp_pli_packets_sent = sender.diagnostics.rtcp_pli_packets_sent + 1u64;
+    return written;
+}
+
 export fn direct_sender_protect_srtcp_packet(
     sender: &UyaDirectSender,
     srtcp_ctx: &SrtcpContext,
@@ -882,6 +917,58 @@ export fn direct_sender_record_srtcp_packet_received(sender: &UyaDirectSender) !
         return error.DirectSenderInvalidConfig;
     }
     sender.diagnostics.srtcp_packets_received = sender.diagnostics.srtcp_packets_received + 1u64;
+}
+
+export fn direct_sender_record_srtp_packet_received(
+    sender: &UyaDirectSender,
+    media_kind: u8,
+    ssrc: u32,
+    payload_type: u8,
+    payload_len: usize,
+) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    sender.diagnostics.srtp_packets_received = sender.diagnostics.srtp_packets_received + 1u64;
+    sender.diagnostics.rtp_packets_received = sender.diagnostics.rtp_packets_received + 1u64;
+    sender.diagnostics.rtp_last_received_ssrc = ssrc as u64;
+    sender.diagnostics.rtp_last_received_payload_type = payload_type as u64;
+    if media_kind == MEDIA_KIND_AUDIO {
+        sender.diagnostics.audio_rtp_packets_received = sender.diagnostics.audio_rtp_packets_received + 1u64;
+    } else if media_kind == MEDIA_KIND_VIDEO {
+        sender.diagnostics.video_rtp_packets_received = sender.diagnostics.video_rtp_packets_received + 1u64;
+        sender.diagnostics.video_rtp_payload_bytes_received = sender.diagnostics.video_rtp_payload_bytes_received + (payload_len as u64);
+    }
+}
+
+export fn direct_sender_record_inbound_video_frame(
+    sender: &UyaDirectSender,
+    keyframe: bool,
+    payload_len: usize,
+) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    _ = payload_len;
+    sender.diagnostics.video_frames_received = sender.diagnostics.video_frames_received + 1u64;
+    if keyframe {
+        sender.diagnostics.video_key_frames_received = sender.diagnostics.video_key_frames_received + 1u64;
+    } else {
+        sender.diagnostics.video_inter_frames_received = sender.diagnostics.video_inter_frames_received + 1u64;
+    }
+}
+
+export fn direct_sender_record_inbound_video_drop(
+    sender: &UyaDirectSender,
+    sequence_gap: bool,
+) !void {
+    if sender == null {
+        return error.DirectSenderInvalidConfig;
+    }
+    sender.diagnostics.video_frames_dropped_received = sender.diagnostics.video_frames_dropped_received + 1u64;
+    if sequence_gap {
+        sender.diagnostics.video_rtp_sequence_gaps_received = sender.diagnostics.video_rtp_sequence_gaps_received + 1u64;
+    }
 }
 
 export fn direct_sender_record_srtcp_unprotect_error(sender: &UyaDirectSender) !void {

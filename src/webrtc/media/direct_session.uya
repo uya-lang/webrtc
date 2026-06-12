@@ -20,6 +20,7 @@ export struct DirectSessionCandidate {
 export struct DirectSessionMedia {
     present: bool = false,
     mid: &[byte] = [],
+    direction: &[byte] = [],
     mid_extension_id: u8 = 0u8,
     ice_ufrag: &[byte] = [],
     ice_pwd: &[byte] = [],
@@ -352,6 +353,13 @@ fn direct_session_parse_attribute(
         media.mid = value[4:value.len - 4];
         return;
     }
+    if direct_session_bytes_equal(value, "sendrecv" as &[byte])
+        || direct_session_bytes_equal(value, "sendonly" as &[byte])
+        || direct_session_bytes_equal(value, "recvonly" as &[byte])
+        || direct_session_bytes_equal(value, "inactive" as &[byte]) {
+        media.direction = value;
+        return;
+    }
     if direct_session_starts_with(value, "ice-ufrag:" as &[byte]) {
         media.ice_ufrag = value[10:value.len - 10];
         return;
@@ -428,6 +436,12 @@ export fn direct_session_parse_chrome_offer_sdp_for_audio_video_codecs(
     }
     if offer.video.mid.len == 0usize {
         offer.video.mid = "video" as &[byte];
+    }
+    if offer.audio.direction.len == 0usize {
+        offer.audio.direction = "sendrecv" as &[byte];
+    }
+    if offer.video.direction.len == 0usize {
+        offer.video.direction = "sendrecv" as &[byte];
     }
     return offer;
 }
@@ -528,13 +542,15 @@ fn direct_session_answer_append_common_media(
     out: &[byte],
     cursor: &usize,
     media: &DirectSessionMedia,
+    direction: &[byte],
     local_ufrag: &[byte],
     local_pwd: &[byte],
     local_fingerprint: &[byte],
 ) !void {
     try direct_session_answer_append(out, cursor, "a=mid:" as &[byte]);
     try direct_session_answer_append_line(out, cursor, media.mid);
-    try direct_session_answer_append_line(out, cursor, "a=sendonly" as &[byte]);
+    try direct_session_answer_append(out, cursor, "a=" as &[byte]);
+    try direct_session_answer_append_line(out, cursor, direction);
     try direct_session_answer_append_line(out, cursor, "a=rtcp-mux" as &[byte]);
     try direct_session_answer_append_mid_extmap(out, cursor, media);
     try direct_session_answer_append(out, cursor, "a=ice-ufrag:" as &[byte]);
@@ -544,6 +560,22 @@ fn direct_session_answer_append_common_media(
     try direct_session_answer_append(out, cursor, "a=fingerprint:sha-256 " as &[byte]);
     try direct_session_answer_append_line(out, cursor, local_fingerprint);
     try direct_session_answer_append_line(out, cursor, "a=setup:passive" as &[byte]);
+}
+
+fn direct_session_answer_direction_for_offer(media: &DirectSessionMedia) &[byte] {
+    if media == null || media.direction.len == 0usize {
+        return "sendrecv" as &[byte];
+    }
+    if direct_session_bytes_equal(media.direction, "recvonly" as &[byte]) {
+        return "sendonly" as &[byte];
+    }
+    if direct_session_bytes_equal(media.direction, "sendonly" as &[byte]) {
+        return "recvonly" as &[byte];
+    }
+    if direct_session_bytes_equal(media.direction, "inactive" as &[byte]) {
+        return "inactive" as &[byte];
+    }
+    return "sendrecv" as &[byte];
 }
 
 export fn direct_session_write_passive_answer(
@@ -581,7 +613,7 @@ export fn direct_session_write_passive_answer(
     try direct_session_answer_append(out, &cursor, "m=audio 9 UDP/TLS/RTP/SAVPF " as &[byte]);
     try direct_session_answer_append_u32(out, &cursor, offer.audio.payload_type as u32);
     try direct_session_answer_append(out, &cursor, "\r\nc=IN IP4 0.0.0.0\r\n" as &[byte]);
-    try direct_session_answer_append_common_media(out, &cursor, &offer.audio, local_ufrag, local_pwd, local_fingerprint);
+    try direct_session_answer_append_common_media(out, &cursor, &offer.audio, direct_session_answer_direction_for_offer(&offer.audio), local_ufrag, local_pwd, local_fingerprint);
     try direct_session_answer_append_audio_codec(out, &cursor, &offer.audio);
     try direct_session_answer_append(out, &cursor, "a=ssrc:" as &[byte]);
     try direct_session_answer_append_u32(out, &cursor, DIRECT_SESSION_DEFAULT_AUDIO_SSRC);
@@ -591,7 +623,7 @@ export fn direct_session_write_passive_answer(
     try direct_session_answer_append(out, &cursor, "m=video 9 UDP/TLS/RTP/SAVPF " as &[byte]);
     try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
     try direct_session_answer_append(out, &cursor, "\r\nc=IN IP4 0.0.0.0\r\n" as &[byte]);
-    try direct_session_answer_append_common_media(out, &cursor, &offer.video, local_ufrag, local_pwd, local_fingerprint);
+    try direct_session_answer_append_common_media(out, &cursor, &offer.video, direct_session_answer_direction_for_offer(&offer.video), local_ufrag, local_pwd, local_fingerprint);
     try direct_session_answer_append(out, &cursor, "a=rtpmap:" as &[byte]);
     try direct_session_answer_append_u32(out, &cursor, offer.video.payload_type as u32);
     if video_codec_id == CODEC_ID_H264 {

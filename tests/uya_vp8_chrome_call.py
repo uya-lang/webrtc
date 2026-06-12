@@ -172,6 +172,32 @@ def make_video_only_page() -> str:
           return wanted.concat(helpers);
         }
 
+        function makeSyntheticVideoTrack() {
+          const canvas = document.createElement('canvas');
+          canvas.width = 160;
+          canvas.height = 90;
+          const ctx = canvas.getContext('2d');
+          let frame = 0;
+          function draw() {
+            ctx.fillStyle = '#102030';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#14b8a6';
+            ctx.fillRect((frame * 5) % canvas.width, 12, 38, 24);
+            ctx.fillStyle = '#f97316';
+            ctx.fillRect(18, (frame * 3) % canvas.height, 24, 18);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = '16px sans-serif';
+            ctx.fillText(String(frame), 8, 82);
+            frame += 1;
+          }
+          draw();
+          const interval = setInterval(draw, 66);
+          const stream = canvas.captureStream(15);
+          const track = stream.getVideoTracks()[0];
+          window.__uyaOutboundVideo = {canvas, stream, track, interval};
+          return track;
+        }
+
         async function waitForVideoInbound(receiver) {
           const deadline = Date.now() + 12000;
           while (Date.now() < deadline) {
@@ -201,6 +227,19 @@ def make_video_only_page() -> str:
           return {packetsReceived: 0, framesDecoded: 0, frameWidth: 0, frameHeight: 0, codecMimeType: ''};
         }
 
+        async function readVideoOutbound(sender) {
+          const stats = await sender.getStats();
+          for (const stat of stats.values()) {
+            if (stat.type !== 'outbound-rtp') continue;
+            if (stat.kind !== 'video' && stat.mediaType !== 'video') continue;
+            return {
+              packetsSent: stat.packetsSent || 0,
+              framesEncoded: stat.framesEncoded || 0
+            };
+          }
+          return {packetsSent: 0, framesEncoded: 0};
+        }
+
         async function runReceiver() {
           mark('start');
           const receiver = new RTCPeerConnection({iceServers: []});
@@ -214,10 +253,11 @@ def make_video_only_page() -> str:
           const audioTransceiver = receiver.addTransceiver('audio', {direction: 'recvonly'});
           const opus = preferredCodecs('audio', 'audio/opus');
           if (opus.length > 0) audioTransceiver.setCodecPreferences(opus);
-          const videoTransceiver = receiver.addTransceiver('video', {direction: 'recvonly'});
+          const outboundTrack = makeSyntheticVideoTrack();
+          const videoTransceiver = receiver.addTransceiver(outboundTrack, {direction: 'sendrecv'});
           const vp8 = preferredCodecs('video', 'video/vp8');
           if (vp8.length > 0) videoTransceiver.setCodecPreferences(vp8);
-          mark('recvonly-transceivers');
+          mark('sendrecv-video-transceiver');
 
           const offer = await receiver.createOffer();
           await receiver.setLocalDescription(offer);
@@ -242,9 +282,12 @@ def make_video_only_page() -> str:
             }
             mark('media-received');
             await delay(2500);
+            const outboundVideoStats = await readVideoOutbound(videoTransceiver.sender);
             mark('rtcp-feedback-window');
             const finalVideoStats = await waitForVideoInbound(video);
             receiver.close();
+            clearInterval(window.__uyaOutboundVideo.interval);
+            outboundTrack.stop();
             await delay(25);
             window.__ffmpegChromeCallResult = {
               ok: true,
@@ -258,6 +301,8 @@ def make_video_only_page() -> str:
               videoFrameWidth: finalVideoStats.frameWidth,
               videoFrameHeight: finalVideoStats.frameHeight,
               videoCodecMimeType: finalVideoStats.codecMimeType,
+              outboundVideoPacketsSent: outboundVideoStats.packetsSent,
+              outboundVideoFramesEncoded: outboundVideoStats.framesEncoded,
               offerSdp: window.__uyaDirectOffer.sdp,
               answerSdp: typeof answer === 'string' ? answer : String(answer.sdp || ''),
               progress: window.__ffmpegChromeCallProgress.slice()
@@ -681,6 +726,8 @@ def patch_staged_tls_ec_calls(ec_path: Path) -> None:
         "ec_p256.ec_p256_public_from_private": "ec_p256_public_from_private",
         "ec_p384.ec_p384_public_from_private": "ec_p384_public_from_private",
         "ec_p256.ec_p256_ecdsa_sign_with_k": "ec_p256_ecdsa_sign_with_k",
+        "ec_p256.ec_p256_ecdsa_precompute_k": "ec_p256_ecdsa_precompute_k",
+        "ec_p256.ec_p256_ecdsa_sign_precomputed": "ec_p256_ecdsa_sign_precomputed",
         "ec_p384.ec_p384_ecdsa_sign_with_k": "ec_p384_ecdsa_sign_with_k",
         "ec_p256.ec_p256_ecdsa_verify": "ec_p256_ecdsa_verify",
         "ec_p384.ec_p384_ecdsa_verify": "ec_p384_ecdsa_verify",
@@ -1303,7 +1350,11 @@ def start_manual_preview_server(
     return server, thread, port, state
 
 
-def run_chrome_page(tempdir_path: Path, raw_video_path: Path) -> dict[str, Any]:
+def run_chrome_page(
+    tempdir_path: Path,
+    raw_video_path: Path,
+    sender_executable: PreviewSenderExecutable | None = None,
+) -> dict[str, Any]:
     browser_exe = find_browser_executable()
     server: ThreadingHTTPServer
     server, thread, http_port = start_http_server(tempdir_path)
@@ -1352,7 +1403,7 @@ def run_chrome_page(tempdir_path: Path, raw_video_path: Path) -> dict[str, Any]:
             client.command("Page.enable", session_id=session_id)
             client.command("Page.navigate", {"url": f"http://127.0.0.1:{http_port}/index.html"}, session_id=session_id)
             offer = wait_for_offer(client, session_id)
-            sender_handle = start_uya_sender(offer, raw_video_path, tempdir_path)
+            sender_handle = start_uya_sender(offer, raw_video_path, tempdir_path, sender_executable=sender_executable)
             apply_answer(client, session_id, sender_handle.answer_sdp)
             result = wait_for_result(client, session_id)
             result["senderDiagnostics"] = wait_for_sender(sender_handle)
@@ -1372,12 +1423,20 @@ def run_chrome_page(tempdir_path: Path, raw_video_path: Path) -> dict[str, Any]:
         thread.join(timeout=2.0)
 
 
-def validate_result(result: dict[str, Any], expected_width: int = VIDEO_WIDTH, expected_height: int = VIDEO_HEIGHT) -> None:
+def validate_result(
+    result: dict[str, Any],
+    expected_width: int = VIDEO_WIDTH,
+    expected_height: int = VIDEO_HEIGHT,
+    require_bidirectional: bool = True,
+) -> None:
     require(result.get("ok") is True, f"browser page reported failure: {result}")
     tracks = result.get("tracks")
     require(isinstance(tracks, list) and "video" in tracks, "Chrome did not surface a video track")
     require(int(result.get("videoPacketsReceived", 0)) > 0, "Chrome received no Uya VP8 RTP packets")
     require(int(result.get("videoFramesDecoded", 0)) > 0, "Chrome decoded no Uya VP8 frames")
+    if require_bidirectional:
+        require(int(result.get("outboundVideoPacketsSent", 0)) > 0, "Chrome sent no VP8 RTP packets to Uya")
+        require(int(result.get("outboundVideoFramesEncoded", 0)) > 0, "Chrome encoded no outbound VP8 frames")
     decoded_width = int(result.get("videoFrameWidth") or result.get("remoteVideoWidth") or 0)
     decoded_height = int(result.get("videoFrameHeight") or result.get("remoteVideoHeight") or 0)
     require(decoded_width == expected_width, f"Chrome decoded unexpected width: {result}")
@@ -1386,6 +1445,8 @@ def validate_result(result: dict[str, Any], expected_width: int = VIDEO_WIDTH, e
     answer_sdp = str(result.get("answerSdp", "")).lower()
     require("m=video" in offer_sdp and "m=video" in answer_sdp, "SDP missing video m-line")
     require("vp8/90000" in offer_sdp or "vp8/90000" in answer_sdp, "SDP missing VP8 negotiation")
+    if require_bidirectional:
+        require("a=sendrecv" in offer_sdp and "a=sendrecv" in answer_sdp, "SDP did not negotiate bidirectional video")
     diagnostics = result.get("senderDiagnostics")
     require(isinstance(diagnostics, dict), "Uya VP8 sender diagnostics missing")
     require(diagnostics.get("codecProvider") == "uya", f"unexpected codec provider: {diagnostics}")
@@ -1398,12 +1459,17 @@ def validate_result(result: dict[str, Any], expected_width: int = VIDEO_WIDTH, e
     require(int(diagnostics.get("vp8InterFrames", 0)) > 0, "Uya VP8 sender reported no inter frames")
     require(int(diagnostics.get("rtpPackets", 0)) > 0, "Uya VP8 sender reported no RTP packets")
     require(int(diagnostics.get("srtpPackets", 0)) > 0, "Uya VP8 sender reported no SRTP packets")
+    if require_bidirectional:
+        require(int(diagnostics.get("srtpPacketsReceived", 0)) > 0, "Uya PeerConnection reported no inbound Chrome SRTP packets")
+        require(int(diagnostics.get("rtpPacketsReceived", 0)) > 0, "Uya PeerConnection reported no inbound Chrome RTP packets")
+        require(int(diagnostics.get("videoRtpPacketsReceived", 0)) > 0, "Uya PeerConnection reported no inbound Chrome video RTP packets")
+        require(int(diagnostics.get("videoFramesReceived", 0)) > 0, "Uya PeerConnection reassembled no inbound Chrome VP8 frames")
     require(int(diagnostics.get("rtcpSenderReports", 0)) > 0, "Uya VP8 sender reported no RTCP Sender Reports")
     require(int(diagnostics.get("udpPackets", 0)) > 0, "Uya VP8 sender reported no UDP packets")
 
 
 def validate_manual_preview_result(result: dict[str, Any], assets: UyaVp8PreviewAssets) -> None:
-    validate_result(result, expected_width=assets.video_width, expected_height=assets.video_height)
+    validate_result(result, expected_width=assets.video_width, expected_height=assets.video_height, require_bidirectional=False)
     progress = result.get("progress")
     require(isinstance(progress, list) and "playing" in progress, "manual preview did not reach playing state")
     require(isinstance(progress, list) and "complete" in progress, "manual preview did not reach complete state")
@@ -1487,10 +1553,25 @@ def run_manual_preview_chrome_page(preview_dir: Path, assets: UyaVp8PreviewAsset
 def run_flow(keep_temp: bool = False) -> str:
     with tempfile.TemporaryDirectory(prefix="webrtc-uya-vp8-chrome-") as tmp:
         tempdir_path = Path(tmp)
-        raw_video_path = write_synthetic_i420_source(tempdir_path)
-        (tempdir_path / "index.html").write_text(make_video_only_page(), encoding="utf-8")
-        result = run_chrome_page(tempdir_path, raw_video_path)
-        validate_result(result)
+        try:
+            raw_video_path = write_synthetic_i420_source(tempdir_path)
+            (tempdir_path / "index.html").write_text(make_video_only_page(), encoding="utf-8")
+            print("building Uya VP8 Chrome sender:", flush=True)
+            sender_executable = build_uya_vp8_sender(tempdir_path / "sender-build")
+            print(f"built Uya VP8 Chrome sender: {sender_executable.path}", flush=True)
+            result = run_chrome_page(tempdir_path, raw_video_path, sender_executable=sender_executable)
+            validate_result(result)
+        except Exception:
+            if keep_temp:
+                kept = Path(tempfile.mkdtemp(prefix="webrtc-uya-vp8-chrome-kept-"))
+                for path in tempdir_path.iterdir():
+                    target = kept / path.name
+                    if path.is_dir():
+                        shutil.copytree(path, target)
+                    elif path.is_file():
+                        target.write_bytes(path.read_bytes())
+                print(f"kept failed run: {kept}", flush=True)
+            raise
         diagnostics = result.get("senderDiagnostics")
         if not isinstance(diagnostics, dict):
             diagnostics = {}
@@ -1517,6 +1598,10 @@ def run_flow(keep_temp: bool = False) -> str:
             f"sender_vp8_inter_frames={diagnostics.get('vp8InterFrames')} "
             f"sender_rtp_packets={diagnostics.get('rtpPackets')} "
             f"sender_srtp_packets={diagnostics.get('srtpPackets')} "
+            f"sender_srtp_packets_received={diagnostics.get('srtpPacketsReceived')} "
+            f"sender_rtp_packets_received={diagnostics.get('rtpPacketsReceived')} "
+            f"sender_video_rtp_packets_received={diagnostics.get('videoRtpPacketsReceived')} "
+            f"sender_video_frames_received={diagnostics.get('videoFramesReceived')} "
             f"sender_srtcp_packets={diagnostics.get('srtcpPackets')} "
             f"sender_rtcp_sender_reports={diagnostics.get('rtcpSenderReports')} "
             f"sender_udp_packets={diagnostics.get('udpPackets')}"

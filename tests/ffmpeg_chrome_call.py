@@ -19,6 +19,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,10 @@ RAW_PREVIEW_DURATION_SECONDS = 6
 RAW_PREVIEW_DURATION_US = RAW_PREVIEW_DURATION_SECONDS * 1_000_000
 SYNTHETIC_PREVIEW_WIDTH = 32
 SYNTHETIC_PREVIEW_HEIGHT = 18
+PLAYBACK_SMOKE_WIDTH = 320
+PLAYBACK_SMOKE_HEIGHT = 240
+PLAYBACK_SMOKE_FPS = 15
+PLAYBACK_SMOKE_DURATION_US = 6_000_000
 
 
 @dataclass
@@ -79,6 +84,52 @@ class PreviewMediaAssets:
     raw_video_width: int = 0
     raw_video_height: int = 0
     media_duration_us: int = RAW_PREVIEW_DURATION_US
+
+
+class PlaybackPipeCapture:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.bytes_read = 0
+        self.chunks = 0
+        self.error: BaseException | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            raise AssertionError(f"playback FIFO reader did not stop: {self.path}")
+        if self.error is not None:
+            raise AssertionError(f"playback FIFO reader failed for {self.path}: {self.error}")
+
+    def _run(self) -> None:
+        fd = -1
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)
+            while True:
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    if self._stop.is_set():
+                        break
+                    time.sleep(0.01)
+                    continue
+                if chunk:
+                    self.bytes_read += len(chunk)
+                    self.chunks += 1
+                    continue
+                if self._stop.is_set():
+                    break
+                time.sleep(0.01)
+        except BaseException as exc:  # noqa: BLE001 - thread errors are re-raised by stop().
+            self.error = exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 def generate_ffmpeg_media(workdir: Path) -> tuple[Path, dict[str, int | str]]:
@@ -612,6 +663,203 @@ def make_call_page() -> str:
     ).strip()
 
 
+def make_playback_smoke_page() -> str:
+    config_json = json.dumps(
+        {
+            "width": PLAYBACK_SMOKE_WIDTH,
+            "height": PLAYBACK_SMOKE_HEIGHT,
+            "fps": PLAYBACK_SMOKE_FPS,
+        },
+        sort_keys=True,
+    )
+    return textwrap.dedent(
+        f"""
+        <!doctype html>
+        <meta charset="utf-8">
+        <title>Uya FFmpeg Chrome Playback Smoke</title>
+        <script>
+        const config = {config_json};
+        window.__uyaPlaybackOffer = null;
+        window.__uyaPlaybackResult = null;
+        window.__uyaPlaybackProgress = [];
+
+        function mark(step) {{
+          window.__uyaPlaybackProgress.push(step);
+        }}
+
+        function fail(message, error) {{
+          const detail = [];
+          if (error) {{
+            if (error.name) detail.push(String(error.name));
+            if (error.message) detail.push(String(error.message));
+            detail.push(error.stack ? String(error.stack) : String(error));
+          }}
+          window.__uyaPlaybackResult = {{
+            ok: false,
+            error: message,
+            detail: detail.join("\\n"),
+            progress: window.__uyaPlaybackProgress.slice()
+          }};
+        }}
+
+        function delay(ms) {{
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }}
+
+        function waitForEvent(target, name, predicate) {{
+          return new Promise((resolve, reject) => {{
+            const handler = event => {{
+              try {{
+                if (!predicate || predicate(event)) {{
+                  target.removeEventListener(name, handler);
+                  resolve(event);
+                }}
+              }} catch (error) {{
+                target.removeEventListener(name, handler);
+                reject(error);
+              }}
+            }};
+            target.addEventListener(name, handler);
+          }});
+        }}
+
+        async function waitForGatheringComplete(peer) {{
+          if (peer.iceGatheringState === 'complete') return;
+          await waitForEvent(peer, 'icegatheringstatechange', () => peer.iceGatheringState === 'complete');
+        }}
+
+        function preferredCodecs(kind, mimeType) {{
+          const capabilities = RTCRtpReceiver.getCapabilities(kind);
+          if (!capabilities || !capabilities.codecs) return [];
+          const wanted = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase() === mimeType);
+          const helpers = capabilities.codecs.filter(codec => String(codec.mimeType).toLowerCase().indexOf('rtx') >= 0);
+          return wanted.concat(helpers);
+        }}
+
+        async function readInbound(kind, receiver) {{
+          if (!receiver) return {{packets: 0, frames: 0}};
+          const stats = await receiver.getStats();
+          for (const stat of stats.values()) {{
+            if (stat.type !== 'inbound-rtp') continue;
+            if (stat.kind !== kind && stat.mediaType !== kind) continue;
+            return {{
+              packets: stat.packetsReceived || 0,
+              frames: stat.framesDecoded || stat.framesReceived || 0
+            }};
+          }}
+          return {{packets: 0, frames: 0}};
+        }}
+
+        async function readOutbound(kind, sender) {{
+          if (!sender) return {{packets: 0, frames: 0}};
+          const stats = await sender.getStats();
+          for (const stat of stats.values()) {{
+            if (stat.type !== 'outbound-rtp') continue;
+            if (stat.kind !== kind && stat.mediaType !== kind) continue;
+            return {{
+              packets: stat.packetsSent || 0,
+              frames: stat.framesEncoded || stat.framesSent || 0
+            }};
+          }}
+          return {{packets: 0, frames: 0}};
+        }}
+
+        async function waitForMedia(peer, audioSender, videoSender) {{
+          const deadline = Date.now() + 14000;
+          let latest = null;
+          while (Date.now() < deadline) {{
+            const audioReceiver = peer.getReceivers().find(item => item.track && item.track.kind === 'audio');
+            const videoReceiver = peer.getReceivers().find(item => item.track && item.track.kind === 'video');
+            const inAudio = await readInbound('audio', audioReceiver);
+            const inVideo = await readInbound('video', videoReceiver);
+            const outAudio = await readOutbound('audio', audioSender);
+            const outVideo = await readOutbound('video', videoSender);
+            latest = {{inAudio, inVideo, outAudio, outVideo}};
+            if (inAudio.packets > 0 && inVideo.packets > 0 && inVideo.frames > 0 && outAudio.packets > 0 && outVideo.packets > 0) {{
+              return latest;
+            }}
+            await delay(120);
+          }}
+          throw new Error('sendrecv media stats did not become live: ' + JSON.stringify(latest));
+        }}
+
+        async function runPlaybackSmoke() {{
+          mark('media');
+          const stream = await navigator.mediaDevices.getUserMedia({{
+            audio: true,
+            video: {{
+              width: {{exact: config.width}},
+              height: {{exact: config.height}},
+              frameRate: {{ideal: config.fps, max: config.fps}}
+            }}
+          }});
+          const peer = new RTCPeerConnection({{iceServers: []}});
+          window.__uyaPlaybackPeer = peer;
+          const states = [];
+          const tracks = [];
+          peer.addEventListener('connectionstatechange', () => states.push('connection:' + peer.connectionState));
+          peer.addEventListener('iceconnectionstatechange', () => states.push('ice:' + peer.iceConnectionState));
+          peer.addEventListener('track', event => tracks.push(event.track.kind));
+
+          const audioTrack = stream.getAudioTracks()[0];
+          const videoTrack = stream.getVideoTracks()[0];
+          if (!audioTrack || !videoTrack) throw new Error('fake media did not provide audio and video tracks');
+
+          const audioTransceiver = peer.addTransceiver(audioTrack, {{direction: 'sendrecv'}});
+          const opus = preferredCodecs('audio', 'audio/opus');
+          if (opus.length > 0) audioTransceiver.setCodecPreferences(opus);
+          const videoTransceiver = peer.addTransceiver(videoTrack, {{direction: 'sendrecv'}});
+          const vp8 = preferredCodecs('video', 'video/vp8');
+          if (vp8.length > 0) videoTransceiver.setCodecPreferences(vp8);
+          mark('sendrecv-transceivers');
+
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          await waitForGatheringComplete(peer);
+          window.__uyaPlaybackOffer = {{
+            type: peer.localDescription.type,
+            sdp: peer.localDescription.sdp
+          }};
+          mark('offer-ready');
+
+          window.__uyaPlaybackApplyAnswer = async answer => {{
+            await peer.setRemoteDescription({{
+              type: 'answer',
+              sdp: typeof answer === 'string' ? answer : String(answer.sdp || '')
+            }});
+            mark('answer-applied');
+            const firstStats = await waitForMedia(peer, audioTransceiver.sender, videoTransceiver.sender);
+            mark('media-live');
+            await delay(3500);
+            const finalStats = await waitForMedia(peer, audioTransceiver.sender, videoTransceiver.sender);
+            peer.close();
+            stream.getTracks().forEach(track => track.stop());
+            await delay(25);
+            window.__uyaPlaybackResult = {{
+              ok: true,
+              browser: navigator.userAgent,
+              states,
+              tracks,
+              connectionState: peer.connectionState,
+              inboundAudioPackets: finalStats.inAudio.packets || firstStats.inAudio.packets,
+              inboundVideoPackets: finalStats.inVideo.packets || firstStats.inVideo.packets,
+              inboundVideoFrames: finalStats.inVideo.frames || firstStats.inVideo.frames,
+              outboundAudioPackets: finalStats.outAudio.packets || firstStats.outAudio.packets,
+              outboundVideoPackets: finalStats.outVideo.packets || firstStats.outVideo.packets,
+              outboundVideoFrames: finalStats.outVideo.frames || firstStats.outVideo.frames,
+              offerSdp: window.__uyaPlaybackOffer.sdp,
+              answerSdp: typeof answer === 'string' ? answer : String(answer.sdp || ''),
+              progress: window.__uyaPlaybackProgress.slice()
+            }};
+          }};
+        }}
+
+        runPlaybackSmoke().catch(error => fail('Chrome sendrecv setup failed', error));
+        </script>
+        """
+    ).strip()
+
+
 def make_preview_page(ffmpeg_stats: dict[str, int | str]) -> str:
     stats_json = json.dumps(ffmpeg_stats, sort_keys=True)
     return textwrap.dedent(
@@ -1087,6 +1335,95 @@ def wait_for_result(client: CDPClient, session_id: str) -> dict[str, Any]:
     raise TimeoutError(f"Chrome did not publish inbound RTP result; state={read_chrome_debug_state(client, session_id)}")
 
 
+def wait_for_playback_offer(client: CDPClient, session_id: str) -> dict[str, str]:
+    deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        offer = evaluate_json(
+            client,
+            session_id,
+            "window.__uyaPlaybackOffer ? JSON.stringify(window.__uyaPlaybackOffer) : null",
+        )
+        if isinstance(offer, dict) and offer.get("type") == "offer" and isinstance(offer.get("sdp"), str):
+            return {"type": "offer", "sdp": str(offer["sdp"])}
+        result = evaluate_json(
+            client,
+            session_id,
+            "window.__uyaPlaybackResult ? JSON.stringify(window.__uyaPlaybackResult) : null",
+        )
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise AssertionError(f"Chrome failed before publishing playback offer: {result}")
+        time.sleep(0.2)
+    raise TimeoutError(f"Chrome did not publish a sendrecv playback offer; state={read_playback_debug_state(client, session_id)}")
+
+
+def apply_playback_answer(client: CDPClient, session_id: str, answer_sdp: str) -> None:
+    answer_json = json.dumps({"sdp": answer_sdp})
+    response = client.command(
+        "Runtime.evaluate",
+        {
+            "expression": (
+                "(() => {"
+                "if (typeof window.__uyaPlaybackApplyAnswer !== 'function') {"
+                "fail('Chrome playback answer/media failed', new Error('apply-answer function missing'));"
+                "return false;"
+                "}"
+                f"window.__uyaPlaybackApplyAnswer({answer_json})"
+                ".catch(error => fail('Chrome playback answer/media failed', error));"
+                "return true;"
+                "})()"
+            ),
+            "returnByValue": True,
+        },
+        session_id=session_id,
+    )
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("value") is not True:
+        raise AssertionError(f"Chrome did not start applying the Uya playback answer: {response}")
+
+
+def read_playback_debug_state(client: CDPClient, session_id: str) -> dict[str, Any]:
+    state = evaluate_json(
+        client,
+        session_id,
+        textwrap.dedent(
+            """
+            JSON.stringify((() => {
+              const peer = window.__uyaPlaybackPeer || null;
+              return {
+                progress: window.__uyaPlaybackProgress || [],
+                result: window.__uyaPlaybackResult || null,
+                hasOffer: !!window.__uyaPlaybackOffer,
+                hasApplyAnswer: typeof window.__uyaPlaybackApplyAnswer === 'function',
+                signalingState: peer ? peer.signalingState : '',
+                connectionState: peer ? peer.connectionState : '',
+                iceConnectionState: peer ? peer.iceConnectionState : '',
+                iceGatheringState: peer ? peer.iceGatheringState : '',
+                localDescriptionType: peer && peer.localDescription ? peer.localDescription.type : '',
+                remoteDescriptionType: peer && peer.remoteDescription ? peer.remoteDescription.type : ''
+              };
+            })())
+            """
+        ),
+    )
+    if isinstance(state, dict):
+        return state
+    return {}
+
+
+def wait_for_playback_result(client: CDPClient, session_id: str, timeout_seconds: float) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = evaluate_json(
+            client,
+            session_id,
+            "window.__uyaPlaybackResult ? JSON.stringify(window.__uyaPlaybackResult) : null",
+        )
+        if isinstance(result, dict):
+            return result
+        time.sleep(0.2)
+    raise TimeoutError(f"Chrome did not publish playback smoke result; state={read_playback_debug_state(client, session_id)}")
+
+
 def evaluate_value(client: CDPClient, session_id: str, expression: str) -> Any:
     response = client.command(
         "Runtime.evaluate",
@@ -1232,9 +1569,16 @@ def start_uya_direct_sender(
     workdir: Path,
     raw_video_path: Path | None = None,
     raw_audio_path: Path | None = None,
+    playback_audio_path: Path | None = None,
+    playback_video_path: Path | None = None,
     raw_video_width: int = 0,
     raw_video_height: int = 0,
     media_duration_us: int = RAW_PREVIEW_DURATION_US,
+    video_frame_duration_us: int | None = None,
+    local_host: str | None = None,
+    v4l2_device: str | None = None,
+    v4l2_format: str | None = None,
+    force_video_dimensions: bool = False,
 ) -> UyaDirectSenderHandle:
     if not UYA_DIRECT_SENDER_MAIN.exists():
         raise AssertionError(
@@ -1272,14 +1616,29 @@ def start_uya_direct_sender(
         ]
         if raw_video_path is not None:
             command.extend(["--raw-video-i420", str(raw_video_path)])
+        if v4l2_device is not None:
+            command.extend(["--v4l2-device", str(v4l2_device)])
+        if v4l2_format is not None:
+            command.extend(["--v4l2-format", str(v4l2_format)])
+        if raw_video_path is not None or v4l2_device is not None or force_video_dimensions:
             if raw_video_width <= 0 or raw_video_height <= 0:
-                raise AssertionError("raw video preview dimensions are required when raw video is supplied")
+                raise AssertionError("video dimensions are required when raw video or V4L2 video is supplied")
             command.extend(["--video-width", str(raw_video_width), "--video-height", str(raw_video_height)])
         if media_duration_us <= 0:
             raise AssertionError("media duration must be positive")
         command.extend(["--media-duration-us", str(media_duration_us)])
+        if video_frame_duration_us is not None:
+            if video_frame_duration_us <= 0:
+                raise AssertionError("video frame duration must be positive")
+            command.extend(["--video-frame-duration-us", str(video_frame_duration_us)])
+        if local_host is not None:
+            command.extend(["--local-host", str(local_host)])
         if raw_audio_path is not None:
             command.extend(["--raw-audio-s16le", str(raw_audio_path)])
+        if playback_audio_path is not None:
+            command.extend(["--playback-audio-s16le", str(playback_audio_path)])
+        if playback_video_path is not None:
+            command.extend(["--playback-video-i420", str(playback_video_path)])
         proc = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
@@ -1385,7 +1744,8 @@ class ManualPreviewState:
         self.sessions: dict[str, ManualPreviewSession] = {}
         self.lock = threading.Lock()
 
-    def start_call(self, offer: dict[str, str]) -> tuple[str, str]:
+    def start_call(self, offer: dict[str, str], video_settings: dict[str, Any] | None = None) -> tuple[str, str]:
+        _ = video_settings
         session_id = uuid.uuid4().hex[:12]
         workdir = self.sessions_dir / session_id
         workdir.mkdir(parents=True, exist_ok=False)
@@ -1443,8 +1803,12 @@ class ManualPreviewHandler(SimpleHTTPRequestHandler):
                 offer = body.get("offer") if isinstance(body, dict) else None
                 if not isinstance(offer, dict) or offer.get("type") != "offer" or not isinstance(offer.get("sdp"), str):
                     raise AssertionError("manual preview start-call requires an offer SDP")
+                video_settings = body.get("videoSettings") if isinstance(body, dict) else None
+                if not isinstance(video_settings, dict):
+                    video_settings = None
                 session_id, answer_sdp = self.preview_state.start_call(
-                    {"type": "offer", "sdp": str(offer["sdp"])}
+                    {"type": "offer", "sdp": str(offer["sdp"])},
+                    video_settings=video_settings,
                 )
                 self._send_json(
                     200,
@@ -1588,6 +1952,119 @@ def run_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
         thread.join(timeout=2.0)
 
 
+def run_playback_smoke_chrome_page(tempdir_path: Path, media_path: Path) -> dict[str, Any]:
+    browser_exe = find_browser_executable()
+    page_path = tempdir_path / "playback_smoke.html"
+    page_path.write_text(make_playback_smoke_page(), encoding="utf-8")
+    audio_fifo = tempdir_path / "chrome_to_uya_48000_mono_s16le.fifo"
+    video_fifo = tempdir_path / "chrome_to_uya_i420.fifo"
+    os.mkfifo(audio_fifo)
+    os.mkfifo(video_fifo)
+    audio_capture = PlaybackPipeCapture(audio_fifo)
+    video_capture = PlaybackPipeCapture(video_fifo)
+    audio_capture.start()
+    video_capture.start()
+    captures_stopped = False
+
+    server, thread, http_port = start_http_server(tempdir_path)
+    browser_user_data_dir = tempdir_path / "playback-profile"
+    browser_user_data_dir.mkdir(exist_ok=True)
+    debug_port = find_free_port()
+    proc = subprocess.Popen(
+        [
+            str(browser_exe),
+            f"--remote-debugging-port={debug_port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--autoplay-policy=no-user-gesture-required",
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+            "--user-data-dir=" + str(browser_user_data_dir),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    sender_handle: UyaDirectSenderHandle | None = None
+    try:
+        version_url = f"http://127.0.0.1:{debug_port}/json/version"
+        deadline = time.monotonic() + DEFAULT_TIMEOUT_SECONDS
+        version: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(version_url, timeout=1.0) as response:
+                    version = json.loads(response.read().decode("utf-8"))
+                break
+            except Exception:
+                time.sleep(0.2)
+        require(version is not None, "browser remote debugging endpoint did not become ready")
+        browser_ws_url = str(version.get("webSocketDebuggerUrl"))
+        require(browser_ws_url.startswith("ws://"), "browser version endpoint missing websocket url")
+
+        client = CDPClient(browser_ws_url)
+        client.connect()
+        try:
+            target = client.command("Target.createTarget", {"url": "about:blank"})
+            target_id = str(target["targetId"])
+            attached = client.command("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+            session_id = str(attached["sessionId"])
+            client.command("Runtime.enable", session_id=session_id)
+            client.command("Page.enable", session_id=session_id)
+            client.command("Page.navigate", {"url": f"http://127.0.0.1:{http_port}/playback_smoke.html"}, session_id=session_id)
+            offer = wait_for_playback_offer(client, session_id)
+            sender_handle = start_uya_direct_sender(
+                offer,
+                media_path,
+                tempdir_path,
+                playback_audio_path=audio_fifo,
+                playback_video_path=video_fifo,
+                raw_video_width=PLAYBACK_SMOKE_WIDTH,
+                raw_video_height=PLAYBACK_SMOKE_HEIGHT,
+                media_duration_us=PLAYBACK_SMOKE_DURATION_US,
+                video_frame_duration_us=max(1, int(round(1_000_000 / PLAYBACK_SMOKE_FPS))),
+                force_video_dimensions=True,
+            )
+            apply_playback_answer(client, session_id, sender_handle.answer_sdp)
+            result = wait_for_playback_result(
+                client,
+                session_id,
+                timeout_seconds=max(35.0, media_duration_timeout_seconds(PLAYBACK_SMOKE_DURATION_US)),
+            )
+            result["senderDiagnostics"] = wait_for_uya_direct_sender(sender_handle)
+            audio_capture.stop()
+            video_capture.stop()
+            captures_stopped = True
+            result["playbackAudioPipeBytes"] = audio_capture.bytes_read
+            result["playbackAudioPipeChunks"] = audio_capture.chunks
+            result["playbackVideoPipeBytes"] = video_capture.bytes_read
+            result["playbackVideoPipeChunks"] = video_capture.chunks
+            return result
+        finally:
+            stop_uya_direct_sender(sender_handle)
+            client.close()
+    finally:
+        if not captures_stopped:
+            try:
+                audio_capture.stop()
+            except AssertionError:
+                pass
+            try:
+                video_capture.stop()
+            except AssertionError:
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
 def run_manual_preview_chrome_page(
     preview_dir: Path,
     media_path: Path,
@@ -1718,6 +2195,27 @@ def validate_manual_preview_result(result: dict[str, Any]) -> None:
     require(isinstance(progress, list) and "complete" in progress, "manual preview did not reach complete state")
 
 
+def validate_playback_smoke_result(result: dict[str, Any]) -> None:
+    require(result.get("ok") is True, f"browser page reported playback smoke failure: {result}")
+    require(int(result.get("outboundAudioPackets", 0)) > 0, "Chrome sent no fake audio packets toward Uya")
+    require(int(result.get("outboundVideoPackets", 0)) > 0, "Chrome sent no fake video packets toward Uya")
+    require(int(result.get("inboundAudioPackets", 0)) > 0, "Chrome received no Uya audio during playback smoke")
+    require(int(result.get("inboundVideoPackets", 0)) > 0, "Chrome received no Uya video during playback smoke")
+    require(int(result.get("inboundVideoFrames", 0)) > 0, "Chrome decoded no Uya video during playback smoke")
+    diagnostics = result.get("senderDiagnostics")
+    require(isinstance(diagnostics, dict), "Uya playback smoke diagnostics missing")
+    require(int(diagnostics.get("srtpPacketsReceived", 0)) > 0, "Uya received no Chrome SRTP packets")
+    require(int(diagnostics.get("audioRtpPacketsReceived", 0)) > 0, "Uya parsed no Chrome audio RTP packets")
+    require(int(diagnostics.get("videoRtpPacketsReceived", 0)) > 0, "Uya parsed no Chrome video RTP packets")
+    require(int(diagnostics.get("videoFramesReceived", 0)) > 0, "Uya reassembled no Chrome VP8 frames")
+    require(int(diagnostics.get("audioFramesDecoded", 0)) > 0, "Uya decoded no Chrome Opus audio frames")
+    require(int(diagnostics.get("audioPlaybackBytes", 0)) > 0, "Uya wrote no decoded PCM playback bytes")
+    require(int(diagnostics.get("videoFramesDecoded", 0)) > 0, "Uya decoded no Chrome VP8 video frames")
+    require(int(diagnostics.get("videoPlaybackBytes", 0)) > 0, "Uya wrote no decoded I420 playback bytes")
+    require(int(result.get("playbackAudioPipeBytes", 0)) > 0, "playback audio FIFO reader saw no PCM bytes")
+    require(int(result.get("playbackVideoPipeBytes", 0)) > 0, "playback video FIFO reader saw no I420 bytes")
+
+
 def assert_contract() -> str:
     source = Path(__file__).read_text(encoding="utf-8")
     required = [
@@ -1745,6 +2243,11 @@ def assert_contract() -> str:
         "stream_display_dimensions",
         "videoFrameWidth",
         "preview_manifest.json",
+        "playback-audio-s16le",
+        "playback-video-i420",
+        "audioFramesDecoded",
+        "videoFramesDecoded",
+        "rtcpPliPacketsSent",
     ]
     missing = [item for item in required if item not in source]
     if missing:
@@ -1802,6 +2305,43 @@ def run_flow(keep_temp: bool = False) -> str:
             f"sender_rtcp_receiver_reports={diagnostics.get('rtcpReceiverReportsReceived')} "
             f"sender_rtcp_feedback_packets_received={diagnostics.get('rtcpFeedbackPacketsReceived')} "
             f"sender_udp_packets={diagnostics.get('udpPackets')}"
+            f"{temp_note}"
+        )
+
+
+def run_playback_smoke_flow(keep_temp: bool = False) -> str:
+    with tempfile.TemporaryDirectory(prefix="webrtc-ffmpeg-chrome-playback-") as tmp:
+        tempdir_path = Path(tmp)
+        media_path = tempdir_path / "playback_placeholder.webm"
+        media_path.write_text("playback smoke synthetic Uya media source\n", encoding="utf-8")
+        result = run_playback_smoke_chrome_page(tempdir_path, media_path)
+        validate_playback_smoke_result(result)
+        diagnostics = result.get("senderDiagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+
+        if keep_temp:
+            kept = Path(tempfile.mkdtemp(prefix="webrtc-ffmpeg-chrome-playback-kept-"))
+            for path in tempdir_path.iterdir():
+                if path.is_file():
+                    (kept / path.name).write_bytes(path.read_bytes())
+            temp_note = f" kept={kept}"
+        else:
+            temp_note = ""
+
+        return (
+            "ffmpeg chrome playback smoke checks passed: "
+            f"chrome_out_audio_packets={result.get('outboundAudioPackets')} "
+            f"chrome_out_video_packets={result.get('outboundVideoPackets')} "
+            f"uya_audio_rtp={diagnostics.get('audioRtpPacketsReceived')} "
+            f"uya_video_rtp={diagnostics.get('videoRtpPacketsReceived')} "
+            f"uya_video_frames={diagnostics.get('videoFramesReceived')} "
+            f"uya_audio_decoded={diagnostics.get('audioFramesDecoded')} "
+            f"uya_audio_playback_bytes={diagnostics.get('audioPlaybackBytes')} "
+            f"uya_video_decoded={diagnostics.get('videoFramesDecoded')} "
+            f"uya_video_playback_bytes={diagnostics.get('videoPlaybackBytes')} "
+            f"audio_pipe_bytes={result.get('playbackAudioPipeBytes')} "
+            f"video_pipe_bytes={result.get('playbackVideoPipeBytes')}"
             f"{temp_note}"
         )
 
@@ -1952,11 +2492,15 @@ def main() -> int:
     parser.add_argument("--source-mp4", type=Path, help="prepare this MP4 as the raw preview source for the Uya sender")
     parser.add_argument("--serve-preview", action="store_true", help="serve the manual preview page and wait until Ctrl-C")
     parser.add_argument("--manual-preview-e2e", action="store_true", help="launch Chrome, click the manual preview button, and verify Uya-originated media")
+    parser.add_argument("--playback-smoke-e2e", action="store_true", help="launch Chrome fake media and verify Uya decoded playback FIFO output")
     parser.add_argument("--contract-only", action="store_true", help="validate the direct sender harness contract without launching Chrome")
     args = parser.parse_args()
     try:
         if args.contract_only:
             print(assert_contract(), flush=True)
+            return 0
+        if args.playback_smoke_e2e:
+            print(run_playback_smoke_flow(args.keep_temp), flush=True)
             return 0
         if args.manual_preview_e2e:
             print(run_manual_preview_flow(args.keep_temp, source_mp4=args.source_mp4), flush=True)

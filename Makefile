@@ -12,8 +12,20 @@ UYA_VP8_PREVIEW_MAX_DURATION ?= 2
 UYA_VP8_PREVIEW_FPS ?= 0
 UYA_VP8_FORCE_SCALAR ?= 0
 UYA_VP8_PREVIEW_CFLAGS ?= -std=c99 -O3 -g -fno-builtin
+HOST_CALL_VIDEO_DEV ?= synthetic
+HOST_CALL_PIXEL_FORMAT ?= yuyv
+HOST_CALL_WIDTH ?= 320
+HOST_CALL_HEIGHT ?= 240
+HOST_CALL_FPS ?= 15
+HOST_CALL_DURATION_US ?= 120000000
+HOST_CALL_AUDIO_FORMAT ?= alsa
+HOST_CALL_AUDIO_DEV ?= default
+HOST_CALL_HOST ?= 127.0.0.1
+HOST_CALL_LOCAL_HOST ?= auto
+HOST_CALL_PLAYBACK ?= 1
+HOST_CALL_PORT ?= 0
 
-.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call test-uya-vp8-chrome-call preview-ffmpeg-chrome-call preview-uya-vp8-chrome-call clean
+.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call test-uya-vp8-chrome-call preview-ffmpeg-chrome-call preview-uya-vp8-chrome-call host-ffmpeg-chrome-call clean
 
 all: build
 
@@ -65,6 +77,7 @@ test: build
 	test -f src/webrtc_ice_test.uya
 	test -f src/webrtc_dtls_test_main.uya
 	test -f src/webrtc_turn_test_main.uya
+	test -x tests/check_phase14_peer_connection_chrome_video.sh
 	test -x tests/check_phase7_crypto.sh
 	test -x tests/check_phase8_dtls.sh
 	test -x tests/check_phase12_rtp.sh
@@ -130,6 +143,7 @@ test: build
 	bash tests/check_phase8_dtls.sh
 	bash tests/check_phase12_rtp.sh
 	bash tests/check_phase13_sctp.sh
+	bash tests/check_phase14_peer_connection_chrome_video.sh
 	bash tests/check_phase15_congestion.sh
 	bash tests/check_phase15_pacer.sh
 	bash tests/check_phase15_rtp_sender_pacer.sh
@@ -263,6 +277,21 @@ preview-uya-vp8-chrome-call:
 	else \
 		UYA_VP8_FORCE_SCALAR="$(UYA_VP8_FORCE_SCALAR)" UYA_VP8_PREVIEW_CFLAGS="$(UYA_VP8_PREVIEW_CFLAGS)" python3 tests/uya_vp8_chrome_call.py --preview-dir build/uya-vp8-chrome-preview --preview-fps "$(UYA_VP8_PREVIEW_FPS)" --serve-preview; \
 	fi
+
+host-ffmpeg-chrome-call:
+	python3 examples/host_ffmpeg_chrome_call.py \
+		--video-device "$(HOST_CALL_VIDEO_DEV)" \
+		--v4l2-format "$(HOST_CALL_PIXEL_FORMAT)" \
+		--width "$(HOST_CALL_WIDTH)" \
+		--height "$(HOST_CALL_HEIGHT)" \
+		--fps "$(HOST_CALL_FPS)" \
+		--duration-us "$(HOST_CALL_DURATION_US)" \
+		--audio-format "$(HOST_CALL_AUDIO_FORMAT)" \
+		--audio-device "$(HOST_CALL_AUDIO_DEV)" \
+		--local-host "$(HOST_CALL_LOCAL_HOST)" \
+		--playback "$(HOST_CALL_PLAYBACK)" \
+		--host "$(HOST_CALL_HOST)" \
+		--port "$(HOST_CALL_PORT)"
 
 clean:
 	rm -rf $(BUILD_DIR)

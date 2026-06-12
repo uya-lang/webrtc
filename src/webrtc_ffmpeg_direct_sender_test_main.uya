@@ -608,6 +608,26 @@ fn check_sender_reports_and_srtcp() i32 {
         return 52i32;
     }
 
+    var pli_packet: [byte: 128] = [];
+    const pli_len: !usize = direct_sender_write_picture_loss_indication(
+        &sender,
+        sender.config.video_ssrc,
+        0x55667788u32,
+        pli_packet[0:128],
+    );
+    if pli_len.error_id != 0 {
+        return 53i32;
+    }
+    const parsed_pli: !RtcpPliPacket = rtcp_pli_parse(pli_packet[0:pli_len.value]);
+    if parsed_pli.error_id != 0 {
+        return 54i32;
+    }
+    if parsed_pli.value.sender_ssrc != sender.config.video_ssrc
+        || parsed_pli.value.media_ssrc != 0x55667788u32
+        || sender.diagnostics.rtcp_pli_packets_sent != 1u64 {
+        return 55i32;
+    }
+
     return 0i32;
 }
 

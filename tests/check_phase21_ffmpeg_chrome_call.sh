@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 test -x tests/ffmpeg_chrome_call.py
+test -x examples/host_ffmpeg_chrome_call.py
 rg -Fq "generate_ffmpeg_media" tests/ffmpeg_chrome_call.py
 rg -Fq "libopus" tests/ffmpeg_chrome_call.py
 rg -Fq "libvpx" tests/ffmpeg_chrome_call.py
@@ -66,8 +67,61 @@ rg -Fq "sender_srtcp_packets" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_rtcp_sender_reports" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_rtcp_packets_received" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_udp_packets" tests/ffmpeg_chrome_call.py
+rg -Fq "host-ffmpeg-chrome-call" Makefile
+rg -Fq "HOST_CALL_VIDEO_DEV" Makefile
+rg -Fq "getUserMedia" examples/host_ffmpeg_chrome_call.py
+rg -Fq "addTransceiver(audioTrack" examples/host_ffmpeg_chrome_call.py
+rg -Fq "addTransceiver(videoTrack" examples/host_ffmpeg_chrome_call.py
+rg -Fq "sendrecv" examples/host_ffmpeg_chrome_call.py
+rg -Fq "start_ffmpeg_audio_fifo" examples/host_ffmpeg_chrome_call.py
+rg -Fq "open_fifo_read_anchors" examples/host_ffmpeg_chrome_call.py
+rg -Fq "close_fifo_anchors" examples/host_ffmpeg_chrome_call.py
+rg -Fq "stdin=subprocess.DEVNULL" examples/host_ffmpeg_chrome_call.py
+rg -Fq "default_route_ipv4" examples/host_ffmpeg_chrome_call.py
+if sed -n '/def start_ffplay_playback/,/^def make_host_call_page/p' examples/host_ffmpeg_chrome_call.py | rg -Fq -- "-nostdin"; then
+	printf '%s\n' "host ffplay playback must not pass -nostdin; this ffplay build treats the next option as its value" >&2
+	exit 1
+fi
+ffplay_start_fn="$(sed -n '/def start_ffplay_playback/,/^def make_host_call_page/p' examples/host_ffmpeg_chrome_call.py)"
+printf '%s' "$ffplay_start_fn" | rg -Fq "mux_command"
+printf '%s' "$ffplay_start_fn" | rg -Fq "pipe:1"
+printf '%s' "$ffplay_start_fn" | rg -Fq "nut"
+printf '%s' "$ffplay_start_fn" | rg -Fq "use_wallclock_as_timestamps"
+printf '%s' "$ffplay_start_fn" | rg -Fq "sync"
+printf '%s' "$ffplay_start_fn" | rg -Fq "audio"
+ffplay_refs="$(printf '%s' "$ffplay_start_fn" | rg -F "ffplay," | wc -l | tr -d ' ')"
+test "$ffplay_refs" -eq 1
+python3 - <<'PY'
+import examples.host_ffmpeg_chrome_call as host_call
+
+host_call.default_route_ipv4 = lambda: "192.168.3.8"
+offer_sdp = "\r\n".join(
+    [
+        "v=0",
+        "m=audio 53522 UDP/TLS/RTP/SAVPF 111",
+        "c=IN IP4 172.19.0.1",
+        "a=candidate:1 1 udp 2122260223 172.19.0.1 53522 typ host generation 0",
+        "a=candidate:2 1 udp 2122194687 192.168.3.8 41463 typ host generation 0",
+    ]
+)
+assert host_call.select_uya_local_host(offer_sdp, "auto") == "192.168.3.8"
+assert host_call.select_uya_local_host(offer_sdp, "10.0.0.5") == "10.0.0.5"
+PY
+rg -Fq -- "--raw-audio-s16le" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--playback-audio-s16le" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--playback-video-i420" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--playback-smoke-e2e" tests/ffmpeg_chrome_call.py
+rg -Fq -- "--v4l2-device" tests/ffmpeg_chrome_call.py
+rg -Fq "v4l2_device" tests/ffmpeg_chrome_call.py
+rg -Fq "srtpPacketsReceived" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "audioRtpPacketsReceived" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "videoFramesReceived" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "audioFramesDecoded" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "videoFramesDecoded" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "PlaybackPipeCapture" tests/ffmpeg_chrome_call.py
 
 python3 tests/ffmpeg_chrome_call.py --contract-only
+python3 tests/ffmpeg_chrome_call.py --playback-smoke-e2e
 python3 tests/ffmpeg_chrome_call.py --manual-preview-e2e
 
 mp4_tmp="$(mktemp -d)"

@@ -282,6 +282,232 @@ fn check_golden_wrap_and_loss() i32 {
     return 0i32;
 }
 
+fn check_sequenced_reassembly_waits_for_clean_keyframe() i32 {
+    var state: Vp8RtpSequencedReassemblyState = vp8_rtp_sequenced_reassembly_state_make();
+    var frame: [byte: 16] = [];
+
+    var inter_before_keyframe: [byte: 2] = [0x10 as byte, 0x01 as byte];
+    const dropped_inter: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        inter_before_keyframe[0:2],
+        10u16,
+        true,
+        frame[0:16],
+    );
+    if dropped_inter.error_id != 0 || !dropped_inter.value.dropped || !dropped_inter.value.waiting_for_keyframe {
+        return 70i32;
+    }
+
+    var key_start: [byte: 3] = [0x10 as byte, 0x00 as byte, 0xAA as byte];
+    const key_first: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        key_start[0:3],
+        11u16,
+        false,
+        frame[0:16],
+    );
+    if key_first.error_id != 0 || key_first.value.frame_len != 0usize || !key_first.value.waiting_for_keyframe {
+        return 71i32;
+    }
+
+    var key_tail: [byte: 2] = [0x00 as byte, 0xBB as byte];
+    const key_done: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        key_tail[0:2],
+        12u16,
+        true,
+        frame[0:16],
+    );
+    if key_done.error_id != 0 || key_done.value.frame_len != 3usize || !key_done.value.keyframe || key_done.value.waiting_for_keyframe {
+        return 72i32;
+    }
+
+    var inter_clean: [byte: 3] = [0x10 as byte, 0x01 as byte, 0xCC as byte];
+    const inter_done: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        inter_clean[0:3],
+        13u16,
+        true,
+        frame[0:16],
+    );
+    if inter_done.error_id != 0 || inter_done.value.frame_len != 2usize || inter_done.value.keyframe || inter_done.value.waiting_for_keyframe {
+        return 73i32;
+    }
+
+    var inter_after_gap: [byte: 3] = [0x10 as byte, 0x01 as byte, 0xDD as byte];
+    const gap_drop: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        inter_after_gap[0:3],
+        15u16,
+        true,
+        frame[0:16],
+    );
+    if gap_drop.error_id != 0 || !gap_drop.value.sequence_gap || !gap_drop.value.dropped || !gap_drop.value.waiting_for_keyframe {
+        return 74i32;
+    }
+
+    var key_after_gap: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const key_recover: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        key_after_gap[0:2],
+        16u16,
+        true,
+        frame[0:16],
+    );
+    if key_recover.error_id != 0 || key_recover.value.frame_len != 1usize || !key_recover.value.keyframe || key_recover.value.waiting_for_keyframe {
+        return 75i32;
+    }
+
+    return 0i32;
+}
+
+fn check_sequenced_reassembly_drops_partial_inter_frame() i32 {
+    var state: Vp8RtpSequencedReassemblyState = vp8_rtp_sequenced_reassembly_state_make();
+    var frame: [byte: 16] = [];
+
+    var key_packet: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const key_done: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        key_packet[0:2],
+        100u16,
+        true,
+        frame[0:16],
+    );
+    if key_done.error_id != 0 || key_done.value.frame_len != 1usize || !key_done.value.keyframe || key_done.value.waiting_for_keyframe {
+        return 80i32;
+    }
+
+    var inter_start: [byte: 3] = [0x10 as byte, 0x01 as byte, 0xAA as byte];
+    const inter_first: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        inter_start[0:3],
+        101u16,
+        false,
+        frame[0:16],
+    );
+    if inter_first.error_id != 0 || inter_first.value.frame_len != 0usize || inter_first.value.dropped || inter_first.value.waiting_for_keyframe {
+        return 81i32;
+    }
+
+    var inter_tail_after_loss: [byte: 2] = [0x00 as byte, 0xBB as byte];
+    const tail_drop: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        inter_tail_after_loss[0:2],
+        103u16,
+        true,
+        frame[0:16],
+    );
+    if tail_drop.error_id != 0 || tail_drop.value.frame_len != 0usize || !tail_drop.value.sequence_gap || !tail_drop.value.dropped || !tail_drop.value.waiting_for_keyframe {
+        return 82i32;
+    }
+
+    var next_inter_start: [byte: 2] = [0x10 as byte, 0x01 as byte];
+    const next_inter_drop: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        next_inter_start[0:2],
+        104u16,
+        true,
+        frame[0:16],
+    );
+    if next_inter_drop.error_id != 0 || next_inter_drop.value.frame_len != 0usize || !next_inter_drop.value.dropped || !next_inter_drop.value.waiting_for_keyframe {
+        return 83i32;
+    }
+
+    var recover_key: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const recovered: !Vp8RtpSequencedReassemblyResult = vp8_rtp_frame_reassembly_absorb_sequenced(
+        &state,
+        recover_key[0:2],
+        105u16,
+        true,
+        frame[0:16],
+    );
+    if recovered.error_id != 0 || recovered.value.frame_len != 1usize || !recovered.value.keyframe || recovered.value.waiting_for_keyframe {
+        return 84i32;
+    }
+
+    return 0i32;
+}
+
+fn check_reorder_buffer_releases_in_sequence() i32 {
+    var state: Vp8RtpReorderBuffer = vp8_rtp_reorder_buffer_make();
+    var out: [byte: 8] = [];
+
+    var packet100: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const push100: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(&state, packet100[0:2], 100u16, 1000u32, true);
+    if push100.error_id != 0 || !push100.value.accepted || push100.value.overflow_gap {
+        return 90i32;
+    }
+    const pop100: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if pop100.error_id != 0 || !pop100.value.popped || pop100.value.sequence_number != 100u16 || pop100.value.timestamp != 1000u32 || pop100.value.packet_len != 2usize {
+        return 91i32;
+    }
+
+    var packet102: [byte: 2] = [0x00 as byte, 0x22 as byte];
+    const push102: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(&state, packet102[0:2], 102u16, 1020u32, true);
+    if push102.error_id != 0 || !push102.value.accepted {
+        return 92i32;
+    }
+    const blocked: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if blocked.error_id != 0 || blocked.value.popped {
+        return 93i32;
+    }
+
+    var packet101: [byte: 2] = [0x00 as byte, 0x11 as byte];
+    const push101: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(&state, packet101[0:2], 101u16, 1010u32, true);
+    if push101.error_id != 0 || !push101.value.accepted {
+        return 94i32;
+    }
+    const pop101: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if pop101.error_id != 0 || !pop101.value.popped || pop101.value.sequence_number != 101u16 || pop101.value.timestamp != 1010u32 || out[1] != 0x11u8 {
+        return 95i32;
+    }
+    const pop102: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if pop102.error_id != 0 || !pop102.value.popped || pop102.value.sequence_number != 102u16 || pop102.value.timestamp != 1020u32 || out[1] != 0x22u8 {
+        return 96i32;
+    }
+    const empty: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if empty.error_id != 0 || empty.value.popped {
+        return 97i32;
+    }
+
+    const duplicate: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(&state, packet101[0:2], 101u16, 1010u32, true);
+    if duplicate.error_id != 0 || !duplicate.value.late {
+        return 98i32;
+    }
+
+    return 0i32;
+}
+
+fn check_reorder_buffer_bounds_gap_latency() i32 {
+    var state: Vp8RtpReorderBuffer = vp8_rtp_reorder_buffer_make();
+    var out: [byte: 8] = [];
+
+    var packet0: [byte: 2] = [0x10 as byte, 0x00 as byte];
+    const push0: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(&state, packet0[0:2], 200u16, 2000u32, false);
+    if push0.error_id != 0 || !push0.value.accepted {
+        return 100i32;
+    }
+
+    var packet_far: [byte: 2] = [0x10 as byte, 0x01 as byte];
+    const push_far: !Vp8RtpReorderPushResult = vp8_rtp_reorder_buffer_push(
+        &state,
+        packet_far[0:2],
+        200u16 + (VP8_RTP_REORDER_BUFFER_SLOTS as u16),
+        3000u32,
+        true,
+    );
+    if push_far.error_id != 0 || !push_far.value.accepted || !push_far.value.overflow_gap {
+        return 101i32;
+    }
+
+    const pop_far: !Vp8RtpReorderPopResult = vp8_rtp_reorder_buffer_pop_ready(&state, out[0:8]);
+    if pop_far.error_id != 0 || !pop_far.value.popped || pop_far.value.sequence_number != 200u16 + (VP8_RTP_REORDER_BUFFER_SLOTS as u16) {
+        return 102i32;
+    }
+
+    return 0i32;
+}
+
 fn main() i32 {
     var result: i32 = check_parse_minimal_descriptor();
     if result != 0i32 {
@@ -340,6 +566,30 @@ fn main() i32 {
     result = check_golden_wrap_and_loss();
     if result != 0i32 {
         printf("vp8 golden wrap/loss tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sequenced_reassembly_waits_for_clean_keyframe();
+    if result != 0i32 {
+        printf("vp8 sequenced reassembly tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_sequenced_reassembly_drops_partial_inter_frame();
+    if result != 0i32 {
+        printf("vp8 partial inter-frame drop tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_reorder_buffer_releases_in_sequence();
+    if result != 0i32 {
+        printf("vp8 reorder buffer sequence tests failed: %d\n", result);
+        return 1i32;
+    }
+
+    result = check_reorder_buffer_bounds_gap_latency();
+    if result != 0i32 {
+        printf("vp8 reorder buffer gap tests failed: %d\n", result);
         return 1i32;
     }
 
