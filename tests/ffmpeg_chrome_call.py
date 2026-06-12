@@ -1579,14 +1579,19 @@ def start_uya_direct_sender(
     v4l2_device: str | None = None,
     v4l2_format: str | None = None,
     force_video_dimensions: bool = False,
+    sender_executable: Path | None = None,
 ) -> UyaDirectSenderHandle:
-    if not UYA_DIRECT_SENDER_MAIN.exists():
+    if sender_executable is None and not UYA_DIRECT_SENDER_MAIN.exists():
         raise AssertionError(
             "Uya direct sender CLI is not implemented yet: expected "
             f"{UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)}"
         )
-    if not UYA_BIN.exists():
+    if sender_executable is None and not UYA_BIN.exists():
         raise AssertionError(f"Uya compiler/runtime not found at {UYA_BIN}")
+    if sender_executable is not None and not sender_executable.exists():
+        raise AssertionError(f"prebuilt Uya direct sender not found at {sender_executable}")
+    if sender_executable is not None and not os.access(sender_executable, os.X_OK):
+        raise AssertionError(f"prebuilt Uya direct sender is not executable: {sender_executable}")
 
     offer_path = workdir / "chrome_offer.json"
     answer_path = workdir / "uya_answer.json"
@@ -1598,11 +1603,16 @@ def start_uya_direct_sender(
     stdout_file = stdout_path.open("w", encoding="utf-8")
     stderr_file = stderr_path.open("w", encoding="utf-8")
     try:
-        command = [
-            str(UYA_BIN),
-            "run",
-            str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
-            "--",
+        if sender_executable is None:
+            command = [
+                str(UYA_BIN),
+                "run",
+                str(UYA_DIRECT_SENDER_MAIN.relative_to(REPO_ROOT)),
+                "--",
+            ]
+        else:
+            command = [str(sender_executable)]
+        command.extend([
             "--offer-json",
             str(offer_path),
             "--media",
@@ -1613,7 +1623,7 @@ def start_uya_direct_sender(
             str(diagnostics_path),
             "--codec",
             "ffmpeg",
-        ]
+        ])
         if raw_video_path is not None:
             command.extend(["--raw-video-i420", str(raw_video_path)])
         if v4l2_device is not None:

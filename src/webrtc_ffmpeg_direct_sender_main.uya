@@ -3075,10 +3075,31 @@ fn run_live_sender(
                     if control_out.value.dtls_srtp_ready && !dtls_ready {
                         dtls_ready = true;
                         media_start_us = now_us;
-                        next_audio_us = now_us;
-                        next_video_us = now_us;
-                        next_rtcp_us = now_us;
-                        next_diagnostics_us = now_us;
+                        try cli_send_video_frame(
+                            socket,
+                            selected_addr[0:UDP_SOCKADDR_BYTES],
+                            selected_addr_len,
+                            &sender,
+                            direct_runtime_ref,
+                            &video_encoder,
+                            raw_video_fd,
+                            &v4l2_capture,
+                            video_source,
+                            raw_video_storage[0:video_source.i420_bytes],
+                            encoded_video_storage[0:video_source.encoded_bytes],
+                            video_frames_sent,
+                            video_frame_duration_us,
+                        );
+                        video_frames_sent = video_frames_sent + 1u64;
+                        try cli_send_audio_frame(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, direct_runtime_ref, &audio_encoder, raw_audio_fd, audio_frames_sent);
+                        audio_frames_sent = audio_frames_sent + 1u64;
+                        try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, direct_runtime_ref, MEDIA_KIND_AUDIO, now_us);
+                        try cli_send_sender_report(socket, selected_addr[0:UDP_SOCKADDR_BYTES], selected_addr_len, &sender, direct_runtime_ref, MEDIA_KIND_VIDEO, now_us);
+                        _ = write_diagnostics_counts(diagnostics_path, &sender.diagnostics, true, true, codec_provider_id, false, false) catch {};
+                        next_audio_us = now_us + (CLI_AUDIO_FRAME_DURATION_US as u64);
+                        next_video_us = now_us + (video_frame_duration_us as u64);
+                        next_rtcp_us = now_us + CLI_RTCP_REPORT_INTERVAL_US;
+                        next_diagnostics_us = now_us + CLI_DIAGNOSTICS_INTERVAL_US;
                     }
                 } else {
                     sender.diagnostics.runtime_errors = sender.diagnostics.runtime_errors + 1u64;

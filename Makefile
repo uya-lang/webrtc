@@ -22,10 +22,14 @@ HOST_CALL_AUDIO_FORMAT ?= alsa
 HOST_CALL_AUDIO_DEV ?= default
 HOST_CALL_HOST ?= 127.0.0.1
 HOST_CALL_LOCAL_HOST ?= auto
-HOST_CALL_PLAYBACK ?= 1
+HOST_CALL_PLAYBACK ?= 0
+HOST_CALL_UYA_AUDIO_CAPTURE ?= 0
 HOST_CALL_PORT ?= 0
+HOST_CALL_SENDER_BIN ?= $(BUILD_DIR)/host-ffmpeg-chrome-call/sender-build/uya_ffmpeg_direct_sender
+HOST_CALL_SENDER_CFLAGS ?= -std=c99 -O0 -g -fno-builtin -I.uyacache/ffmpeg-dev/usr/include/x86_64-linux-gnu
+HOST_CALL_SENDER_LDFLAGS ?= -L.uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu -lavcodec -lavutil
 
-.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call test-uya-vp8-chrome-call preview-ffmpeg-chrome-call preview-uya-vp8-chrome-call host-ffmpeg-chrome-call clean
+.PHONY: all build test bench test-codec-bridge test-ffmpeg-codec-flow test-ffmpeg-codec-extern test-ffmpeg-chrome-call test-uya-vp8-chrome-call preview-ffmpeg-chrome-call preview-uya-vp8-chrome-call host-ffmpeg-chrome-call host-ffmpeg-chrome-call-playback clean
 
 all: build
 
@@ -278,7 +282,15 @@ preview-uya-vp8-chrome-call:
 		UYA_VP8_FORCE_SCALAR="$(UYA_VP8_FORCE_SCALAR)" UYA_VP8_PREVIEW_CFLAGS="$(UYA_VP8_PREVIEW_CFLAGS)" python3 tests/uya_vp8_chrome_call.py --preview-dir build/uya-vp8-chrome-preview --preview-fps "$(UYA_VP8_PREVIEW_FPS)" --serve-preview; \
 	fi
 
-host-ffmpeg-chrome-call:
+$(HOST_CALL_SENDER_BIN): src/webrtc_ffmpeg_direct_sender_main.uya src/webrtc/media/ffmpeg_codec.uya tests/fixtures/ffmpeg_codec/ffmpeg_codec_shim.c
+	test -f .uyacache/ffmpeg-dev/usr/include/x86_64-linux-gnu/libavcodec/avcodec.h
+	test -e .uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu/libavcodec.so
+	test -e .uyacache/ffmpeg-dev/usr/lib/x86_64-linux-gnu/libavutil.so
+	mkdir -p "$(dir $(HOST_CALL_SENDER_BIN))"
+	CFLAGS="$(HOST_CALL_SENDER_CFLAGS)" LDFLAGS="$(HOST_CALL_SENDER_LDFLAGS)" \
+		"$(UYA)" build src/webrtc_ffmpeg_direct_sender_main.uya --no-split-c -o "$(HOST_CALL_SENDER_BIN)"
+
+host-ffmpeg-chrome-call: $(HOST_CALL_SENDER_BIN)
 	python3 examples/host_ffmpeg_chrome_call.py \
 		--video-device "$(HOST_CALL_VIDEO_DEV)" \
 		--v4l2-format "$(HOST_CALL_PIXEL_FORMAT)" \
@@ -290,8 +302,13 @@ host-ffmpeg-chrome-call:
 		--audio-device "$(HOST_CALL_AUDIO_DEV)" \
 		--local-host "$(HOST_CALL_LOCAL_HOST)" \
 		--playback "$(HOST_CALL_PLAYBACK)" \
+		--uya-audio-capture "$(HOST_CALL_UYA_AUDIO_CAPTURE)" \
+		--sender-executable "$(HOST_CALL_SENDER_BIN)" \
 		--host "$(HOST_CALL_HOST)" \
 		--port "$(HOST_CALL_PORT)"
+
+host-ffmpeg-chrome-call-playback:
+	$(MAKE) host-ffmpeg-chrome-call HOST_CALL_PLAYBACK=1
 
 clean:
 	rm -rf $(BUILD_DIR)

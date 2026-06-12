@@ -55,7 +55,9 @@ DEFAULT_AUDIO_FORMAT = "alsa"
 DEFAULT_AUDIO_DEVICE = "default"
 DEFAULT_BIND_HOST = "127.0.0.1"
 DEFAULT_LOCAL_HOST = "auto"
-DEFAULT_PLAYBACK = "1"
+DEFAULT_PLAYBACK = "0"
+DEFAULT_UYA_AUDIO_CAPTURE = "0"
+DEFAULT_SENDER_EXECUTABLE = REPO_ROOT / "build" / "host-ffmpeg-chrome-call" / "sender-build" / "uya_ffmpeg_direct_sender"
 
 
 @dataclass
@@ -70,6 +72,8 @@ class HostCallConfig:
     audio_format: str
     audio_device: str
     playback: bool
+    uya_audio_capture: bool
+    sender_executable: Path | None
 
     @property
     def video_frame_duration_us(self) -> int:
@@ -108,8 +112,10 @@ class HostCallState:
         playback_width, playback_height, playback_fps = normalize_chrome_video_settings(video_settings, self.config)
         media_path = workdir / "host_ffmpeg_placeholder.webm"
         media_path.write_text("host ffmpeg live device source\n", encoding="utf-8")
-        audio_fifo = workdir / "mic_48000_mono_s16le.fifo"
-        os.mkfifo(audio_fifo)
+        audio_fifo: Path | None = None
+        if self.config.uya_audio_capture:
+            audio_fifo = workdir / "mic_48000_mono_s16le.fifo"
+            os.mkfifo(audio_fifo)
         playback_audio_fifo: Path | None = None
         playback_video_fifo: Path | None = None
         if self.config.playback:
@@ -135,11 +141,12 @@ class HostCallState:
                     playback_height,
                     playback_fps,
                 )
-            audio_proc = start_ffmpeg_audio_fifo(
-                audio_fifo,
-                self.config.audio_format,
-                self.config.audio_device,
-            )
+            if audio_fifo is not None:
+                audio_proc = start_ffmpeg_audio_fifo(
+                    audio_fifo,
+                    self.config.audio_format,
+                    self.config.audio_device,
+                )
             handle = start_uya_direct_sender(
                 offer,
                 media_path,
@@ -155,6 +162,7 @@ class HostCallState:
                 v4l2_device=self.config.video_device,
                 v4l2_format=self.config.v4l2_format,
                 force_video_dimensions=True,
+                sender_executable=self.config.sender_executable,
             )
         except Exception:
             close_fifo_anchors(fifo_anchor_fds)
@@ -414,7 +422,6 @@ def start_ffplay_playback(
     )
     mux_proc.stdout.close()
     procs = [ffplay_proc, mux_proc]
-    time.sleep(0.5)
     for proc, command in zip(procs, (ffplay_command, mux_command)):
         if proc.poll() is not None:
             stop_processes(procs)
@@ -432,6 +439,7 @@ def make_host_call_page(config: HostCallConfig) -> str:
             "videoDevice": config.uya_video_source,
             "audioDevice": config.audio_device,
             "playback": config.playback,
+            "uyaAudioCapture": config.uya_audio_capture,
         },
         sort_keys=True,
     )
@@ -495,6 +503,9 @@ let remoteStream = null;
 let sessionId = '';
 let statsTimer = 0;
 let latestStats = {{}};
+let callStartMs = 0;
+let timing = {{}};
+window.__hostFfmpegChromeCallTiming = timing;
 const startButton = document.getElementById('start');
 const stopButton = document.getElementById('stop');
 const refreshDevicesButton = document.getElementById('refreshDevices');
@@ -511,6 +522,14 @@ const log = document.getElementById('log');
 function writeLog(message) {{
   log.textContent += String(message) + '\\n';
   log.scrollTop = log.scrollHeight;
+}}
+
+function markTiming(name) {{
+  const now = performance.now();
+  if (!callStartMs) callStartMs = now;
+  timing[name] = Math.round(now - callStartMs);
+  window.__hostFfmpegChromeCallTiming = timing;
+  writeLog('timing ' + name + '=' + String(timing[name]) + 'ms');
 }}
 
 function setState(value) {{
@@ -689,26 +708,56 @@ async function updateChromeStats() {{
   latestStats = {{inAudio, inVideo, outAudio, outVideo}};
   chromeIn.textContent = String(inAudio.packets) + ' / ' + String(inVideo.frames || inVideo.packets);
   chromeOut.textContent = String(outAudio.packets) + ' / ' + String(outVideo.frames || outVideo.packets);
-  if (inAudio.packets > 0 && inVideo.frames > 0 && outAudio.packets > 0 && outVideo.packets > 0 && stateText.textContent !== 'live') {{
+  if (inAudio.packets > 0 && inVideo.frames > 0 && stateText.textContent !== 'live') {{
+    markTiming('live');
     setState('live');
   }}
 }}
 
+function armRemoteFirstFrameWatch() {{
+  if (timing['first-video-frame'] !== undefined) return;
+  const markFirstFrame = () => {{
+    if (timing['first-video-frame'] !== undefined) return;
+    markTiming('first-video-frame');
+    if (stateText.textContent !== 'live') setState('live');
+  }};
+  if ('requestVideoFrameCallback' in remoteVideo) {{
+    remoteVideo.requestVideoFrameCallback(markFirstFrame);
+  }} else {{
+    remoteVideo.addEventListener('loadeddata', markFirstFrame, {{once: true}});
+  }}
+}}
+
 async function startCall() {{
+  callStartMs = performance.now();
+  timing = {{}};
+  window.__hostFfmpegChromeCallTiming = timing;
   startButton.disabled = true;
   stopButton.disabled = false;
   log.textContent = '';
+  markTiming('start');
   setState('media');
   localStream = await openLocalMedia();
+  markTiming('media-open');
   localVideo.srcObject = localStream;
   remoteStream = new MediaStream();
   remoteVideo.srcObject = remoteStream;
 
   peer = new RTCPeerConnection({{iceServers: []}});
-  peer.addEventListener('connectionstatechange', () => writeLog('connection=' + peer.connectionState));
-  peer.addEventListener('iceconnectionstatechange', () => writeLog('ice=' + peer.iceConnectionState));
+  peer.addEventListener('connectionstatechange', () => {{
+    writeLog('connection=' + peer.connectionState);
+    if (peer.connectionState === 'connected') markTiming('connected');
+  }});
+  peer.addEventListener('iceconnectionstatechange', () => {{
+    writeLog('ice=' + peer.iceConnectionState);
+    if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') markTiming('ice-connected');
+  }});
   peer.addEventListener('track', event => {{
     remoteStream.addTrack(event.track);
+    if (event.track.kind === 'video') {{
+      markTiming('remote-video-track');
+      armRemoteFirstFrameWatch();
+    }}
     remoteVideo.play().catch(error => writeLog('remoteVideo.play=' + String(error.message || error)));
   }});
 
@@ -727,16 +776,19 @@ async function startCall() {{
   const offer = await peer.createOffer();
   await peer.setLocalDescription(offer);
   await waitForGatheringComplete(peer);
+  markTiming('offer-ready');
   const started = await postJson('/api/start-call', {{
     offer: {{type: peer.localDescription.type, sdp: peer.localDescription.sdp}},
     videoSettings
   }});
+  markTiming('start-call-returned');
   sessionId = String(started.sessionId || '');
   if (!sessionId || !started.answer || !started.answer.sdp) throw new Error('missing Uya answer');
   setState('answer');
   await peer.setRemoteDescription({{type: 'answer', sdp: String(started.answer.sdp)}});
+  markTiming('answer-applied');
   writeLog('session=' + sessionId);
-  statsTimer = window.setInterval(() => updateChromeStats().catch(error => writeLog('stats=' + String(error.message || error))), 500);
+  statsTimer = window.setInterval(() => updateChromeStats().catch(error => writeLog('stats=' + String(error.message || error))), 100);
   await updateChromeStats();
 }}
 
@@ -767,6 +819,7 @@ async function stopCall() {{
   startButton.disabled = false;
   window.__hostFfmpegChromeCallResult = {{
     ok: true,
+    timing,
     chromeStats: latestStats,
     senderDiagnostics: diagnostics
   }};
@@ -824,6 +877,13 @@ def normalize_video_device(value: str) -> str | None:
 
 def parse_bool(value: str) -> bool:
     return value.strip().lower() not in {"0", "false", "off", "no", "none"}
+
+
+def normalize_sender_executable(value: str) -> Path | None:
+    text = value.strip()
+    if text == "" or text.lower() in {"0", "false", "off", "no", "none", "uya-run"}:
+        return None
+    return Path(text).expanduser().resolve()
 
 
 def is_auto_local_host(value: str) -> bool:
@@ -947,6 +1007,16 @@ def main() -> int:
         default=os.environ.get("HOST_CALL_PLAYBACK", DEFAULT_PLAYBACK),
         help="enable Uya-side decoded media playback through ffplay FIFOs",
     )
+    parser.add_argument(
+        "--uya-audio-capture",
+        default=os.environ.get("HOST_CALL_UYA_AUDIO_CAPTURE", DEFAULT_UYA_AUDIO_CAPTURE),
+        help="capture host audio with FFmpeg for Uya-originated audio; disabled by default for faster first frame",
+    )
+    parser.add_argument(
+        "--sender-executable",
+        default=os.environ.get("HOST_CALL_SENDER_BIN", str(DEFAULT_SENDER_EXECUTABLE)),
+        help="prebuilt uya_ffmpeg_direct_sender executable; use uya-run to compile on each call",
+    )
     args = parser.parse_args()
 
     if args.width <= 0 or args.height <= 0 or args.fps <= 0 or args.duration_us <= 0:
@@ -965,6 +1035,8 @@ def main() -> int:
         audio_format=args.audio_format,
         audio_device=args.audio_device,
         playback=parse_bool(args.playback),
+        uya_audio_capture=parse_bool(args.uya_audio_capture),
+        sender_executable=normalize_sender_executable(args.sender_executable),
     )
     return serve(config, args.workdir, args.host, args.port)
 

@@ -67,9 +67,32 @@ rg -Fq "sender_srtcp_packets" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_rtcp_sender_reports" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_rtcp_packets_received" tests/ffmpeg_chrome_call.py
 rg -Fq "sender_udp_packets" tests/ffmpeg_chrome_call.py
+rg -Fq "next_video_us = now_us + (video_frame_duration_us as u64)" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "next_rtcp_us = now_us + CLI_RTCP_REPORT_INTERVAL_US" src/webrtc_ffmpeg_direct_sender_main.uya
+rg -Fq "try cli_send_video_frame(" src/webrtc_ffmpeg_direct_sender_main.uya
 rg -Fq "host-ffmpeg-chrome-call" Makefile
 rg -Fq "HOST_CALL_VIDEO_DEV" Makefile
+rg -Fq "HOST_CALL_SENDER_BIN" Makefile
+rg -Fq "HOST_CALL_PLAYBACK ?= 0" Makefile
+rg -Fq "HOST_CALL_UYA_AUDIO_CAPTURE ?= 0" Makefile
+rg -Fq 'host-ffmpeg-chrome-call: $(HOST_CALL_SENDER_BIN)' Makefile
+rg -Fq "host-ffmpeg-chrome-call-playback" Makefile
+rg -Fq "HOST_CALL_PLAYBACK=1" Makefile
+rg -Fq -- "--sender-executable" Makefile
+rg -Fq -- "--uya-audio-capture" Makefile
 rg -Fq "getUserMedia" examples/host_ffmpeg_chrome_call.py
+rg -Fq "sender_executable" examples/host_ffmpeg_chrome_call.py
+rg -Fq "normalize_sender_executable" examples/host_ffmpeg_chrome_call.py
+rg -Fq "DEFAULT_PLAYBACK = \"0\"" examples/host_ffmpeg_chrome_call.py
+rg -Fq "DEFAULT_UYA_AUDIO_CAPTURE = \"0\"" examples/host_ffmpeg_chrome_call.py
+rg -Fq "uya_audio_capture" examples/host_ffmpeg_chrome_call.py
+rg -Fq "markTiming" examples/host_ffmpeg_chrome_call.py
+rg -Fq "first-video-frame" examples/host_ffmpeg_chrome_call.py
+rg -Fq "requestVideoFrameCallback" examples/host_ffmpeg_chrome_call.py
+rg -Fq "__hostFfmpegChromeCallTiming" examples/host_ffmpeg_chrome_call.py
+rg -Fq "start-call-returned" examples/host_ffmpeg_chrome_call.py
+rg -Fq "timing," examples/host_ffmpeg_chrome_call.py
+rg -Fq "sender_executable" tests/ffmpeg_chrome_call.py
 rg -Fq "addTransceiver(audioTrack" examples/host_ffmpeg_chrome_call.py
 rg -Fq "addTransceiver(videoTrack" examples/host_ffmpeg_chrome_call.py
 rg -Fq "sendrecv" examples/host_ffmpeg_chrome_call.py
@@ -83,6 +106,10 @@ if sed -n '/def start_ffplay_playback/,/^def make_host_call_page/p' examples/hos
 	exit 1
 fi
 ffplay_start_fn="$(sed -n '/def start_ffplay_playback/,/^def make_host_call_page/p' examples/host_ffmpeg_chrome_call.py)"
+if printf '%s' "$ffplay_start_fn" | rg -Fq "time.sleep"; then
+	printf '%s\n' "host ffplay startup must not add fixed sleeps before returning the Uya answer" >&2
+	exit 1
+fi
 printf '%s' "$ffplay_start_fn" | rg -Fq "mux_command"
 printf '%s' "$ffplay_start_fn" | rg -Fq "pipe:1"
 printf '%s' "$ffplay_start_fn" | rg -Fq "nut"
