@@ -1,0 +1,122 @@
+<h1>一个新语言的硬核实验：用 Uya 重写 WebRTC 并打通 Chrome</h1>
+
+<p>
+  Uya WebRTC 发布了 <code>v0.3.0</code> 里程碑版本。这个版本继续沿着“默认运行路径用 Uya 实现 WebRTC transport”的方向推进，把通用 PeerConnection 从 DataChannel-only 的验证边界推进到 Chrome video SDP、SRTP/VP8 RTP 接收路由和 host FFmpeg Chrome call 手工互通。
+</p>
+
+<p>
+  <img src="https://raw.githubusercontent.com/uya-lang/webrtc/main/asserts/img/ffmpeg_chrom_live_call.png" alt="Host FFmpeg Chrome Call" style="max-width: 100%; height: auto;" />
+</p>
+
+<h2>Uya 简介</h2>
+
+<p>
+  Uya 是一个正在演进中的系统编程语言和工具链，目标是面向底层、网络、嵌入式和高性能服务场景，提供接近 C/C++ 的控制力，同时把模块、错误处理、泛型、异步、标准库和构建体验做成更适合工程协作的形态。
+</p>
+
+<p>在这个 WebRTC 项目里，Uya 主要承担三类工作：</p>
+
+<ul>
+  <li>协议和状态机：SDP、ICE、STUN/TURN、DTLS、SRTP/SRTCP、RTP/RTCP、SCTP DataChannel、PeerConnection、stats/trace。</li>
+  <li>热路径数据结构：固定容量 buffer、arena、ring queue、packet clone budget、jitter/reassembly、pacer。</li>
+  <li>跨平台边界：默认不复用 libwebrtc、BoringSSL、usrsctp、libsrtp、libvpx 或 libopus 的运行时对象，只在 socket、clock、线程、epoll 等 OS 能力处保留薄 FFI。</li>
+</ul>
+
+<p>
+  本仓库还把 <code>./uya/bin/uya</code> 和 <code>./uya/lib</code> 纳入发布验证，确保 release gate 使用仓库内的 Uya 编译器和标准库快照，而不是依赖开发机上的 sibling checkout。
+</p>
+
+<h2>这次 v0.3.0 做了什么</h2>
+
+<h3>1. PeerConnection 进入 Chrome video 验证</h3>
+
+<p>
+  <code>v0.3.0</code> 增加了 PeerConnection 层的 video media section、<code>addTransceiver</code>、<code>addTrack</code>、<code>processSrtpPacket</code> 和 <code>routeVideoFrame</code> 路径。对应 gate 是：
+</p>
+
+<pre><code>UYA=./uya/bin/uya bash tests/check_phase14_peer_connection_chrome_video.sh</code></pre>
+
+<p>
+  这个 gate 验证的不只是代码存在，还会编译并运行 <code>src/webrtc_peer_connection_chrome_video_test_main.uya</code>，确认 Chrome video SDP 和 SRTP/VP8 RTP 接收路由能走通。
+</p>
+
+<h3>2. Host FFmpeg Chrome Call 可手工预览</h3>
+
+<p>
+  <code>make host-ffmpeg-chrome-call</code> 提供一个本机浏览器互通页面。页面左侧是 Chrome 本地采集，右侧是 Uya remote synthetic video，中间还能打开 Uya 收到的 Chrome A/V 播放窗口。页面下方输出 timing、ICE 状态、首帧耗时和 RTP 计数，便于区分“只是发包了”和“浏览器真的解码了”。
+</p>
+
+<p>启动方式：</p>
+
+<pre><code>make host-ffmpeg-chrome-call UYA=./uya/bin/uya</code></pre>
+
+<p>发布验证中使用了短时 smoke：</p>
+
+<pre><code>timeout 15s make host-ffmpeg-chrome-call UYA=./uya/bin/uya HOST_CALL_DURATION_US=3000000 HOST_CALL_PORT=0</code></pre>
+
+<p>
+  该入口是显式 reference codec / 手工互通入口。FFmpeg 用于 host 侧 codec 和设备接入验证，不进入默认 runtime。
+</p>
+
+<h3>3. FFmpeg Chrome call E2E gate</h3>
+
+<p>本版本继续保留并加强 Chrome direct call 验证：</p>
+
+<pre><code>UYA=./uya/bin/uya make test-ffmpeg-chrome-call</code></pre>
+
+<p>该 gate 覆盖：</p>
+
+<ul>
+  <li>FFmpeg codec extern boundary。</li>
+  <li>direct sender RTP/SRTP/SRTCP packetizer。</li>
+  <li>DTLS/STUN/SRTP/SRTCP runtime 控制包处理。</li>
+  <li>playback smoke。</li>
+  <li>synthetic manual preview。</li>
+  <li>1080p MP4 manual preview。</li>
+  <li>Chrome direct call 的 audio/video RTP 与 decoded frames 统计。</li>
+</ul>
+
+<h3>4. 发布验证使用仓库内 Uya</h3>
+
+<p>发布记录明确使用：</p>
+
+<pre><code>./uya/bin/uya --version
+UYA=./uya/bin/uya make test
+UYA=./uya/bin/uya make test-ffmpeg-chrome-call</code></pre>
+
+<p>当前仓库内编译器版本输出为：</p>
+
+<pre><code>v0.10.0</code></pre>
+
+<h2>适合关注什么</h2>
+
+<p>这个版本适合关注以下方向：</p>
+
+<ul>
+  <li>纯 Uya WebRTC transport 的协议边界如何拆分。</li>
+  <li>PeerConnection 层如何从 DataChannel-only 走向音视频 media section。</li>
+  <li>不依赖 libwebrtc 的情况下，如何逐步建立 Chrome 互通 gate。</li>
+  <li>如何把 host reference codec 和默认 runtime 边界分开，既能验证互通，又不把 FFmpeg 变成默认依赖。</li>
+  <li>RK1106/RV1103B 这类板端 H264/G711 推流示例如何复用同一套 WebRTC transport。</li>
+</ul>
+
+<h2>已知限制</h2>
+
+<ul>
+  <li>通用 PeerConnection 还不是完整生产级浏览器 P2P 音视频 API；采集、发送和手工互通主要由 direct sender / 示例入口承接。</li>
+  <li>FFmpeg 仍是显式 reference codec / host interop 测试边界，不进入默认 runtime。</li>
+  <li>纯 Uya Opus codec bridge、<code>../vp8</code> UPM path dependency、跨平台 CI matrix 仍在推进中。</li>
+  <li>RK1106 板端真实链路依赖 Rockchip SDK、MPI、VENC/AENC、AI 设备和现场网络环境。</li>
+</ul>
+
+<h2>参考地址</h2>
+
+<ul>
+  <li>项目仓库：<a href="https://github.com/uya-lang/webrtc">https://github.com/uya-lang/webrtc</a></li>
+  <li>README：<a href="https://github.com/uya-lang/webrtc/blob/main/README.md">https://github.com/uya-lang/webrtc/blob/main/README.md</a></li>
+  <li>v0.3.0 版本说明：<a href="https://github.com/uya-lang/webrtc/blob/main/docs/release-v0.3.0.md">https://github.com/uya-lang/webrtc/blob/main/docs/release-v0.3.0.md</a></li>
+  <li>Changelog：<a href="https://github.com/uya-lang/webrtc/blob/main/CHANGELOG.md">https://github.com/uya-lang/webrtc/blob/main/CHANGELOG.md</a></li>
+  <li>设计文档：<a href="https://github.com/uya-lang/webrtc/blob/main/docs/design.md">https://github.com/uya-lang/webrtc/blob/main/docs/design.md</a></li>
+  <li>TODO / 阶段拆解：<a href="https://github.com/uya-lang/webrtc/blob/main/docs/todo.md">https://github.com/uya-lang/webrtc/blob/main/docs/todo.md</a></li>
+  <li>截图路径：<a href="https://github.com/uya-lang/webrtc/blob/main/asserts/img/ffmpeg_chrom_live_call.png">https://github.com/uya-lang/webrtc/blob/main/asserts/img/ffmpeg_chrom_live_call.png</a></li>
+</ul>
